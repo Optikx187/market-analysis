@@ -3,9 +3,12 @@ import WatchlistPanel from "@/components/WatchlistPanel";
 import PortfolioPanel from "@/components/PortfolioPanel";
 import TradesPanel from "@/components/TradesPanel";
 import AlertsPanel from "@/components/AlertsPanel";
+import SettingsPanel from "@/components/SettingsPanel";
+
+type Tab = "alerts" | "trades" | "settings";
 
 function App() {
-  const [tab, setTab] = useState<"alerts" | "trades">("alerts");
+  const [tab, setTab] = useState<Tab>("alerts");
 
   return (
     <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
@@ -37,26 +40,22 @@ function App() {
         </div>
 
         <div className="flex gap-2 border-b border-[var(--border)] pb-2">
-          <button
-            onClick={() => setTab("alerts")}
-            className={`px-4 py-1.5 text-sm rounded-t ${
-              tab === "alerts" ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : "text-[var(--muted-foreground)]"
-            }`}
-          >
-            Alerts
-          </button>
-          <button
-            onClick={() => setTab("trades")}
-            className={`px-4 py-1.5 text-sm rounded-t ${
-              tab === "trades" ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : "text-[var(--muted-foreground)]"
-            }`}
-          >
-            Trades
-          </button>
+          {(["alerts", "trades", "settings"] as Tab[]).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`px-4 py-1.5 text-sm rounded-t capitalize ${
+                tab === t ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : "text-[var(--muted-foreground)]"
+              }`}
+            >
+              {t}
+            </button>
+          ))}
         </div>
 
         {tab === "alerts" && <AlertsPanel />}
         {tab === "trades" && <TradesPanel />}
+        {tab === "settings" && <SettingsPanel />}
       </main>
 
       <footer className="border-t border-[var(--border)] py-4 mt-8">

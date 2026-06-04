@@ -33,7 +33,7 @@ class SignalResult:
 
 
 def evaluate_signals(
-    df: pd.DataFrame, available_capital: float = 100_000.0,
+    df: pd.DataFrame, available_capital: float = 10_000.0,
 ) -> Optional[SignalResult]:
     if len(df) < 201:
         return None

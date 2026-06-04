@@ -4,7 +4,7 @@ from typing import Optional
 
 class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./portfolio.db"
-    INITIAL_BALANCE: float = 100_000.0
+    INITIAL_BALANCE: float = 10_000.0
     QUANT_ENGINE_URL: str = "http://quant-engine:8001"
     DATA_INGESTION_URL: str = "http://data-ingestion:8000"
     ROBINHOOD_USERNAME: Optional[str] = None

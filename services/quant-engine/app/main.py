@@ -63,7 +63,7 @@ class RiskProfileResponse(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     ticker: str
-    available_capital: float = 100_000.0
+    available_capital: float = 10_000.0
 
 
 async def fetch_candles_from_service_a(ticker: str) -> pd.DataFrame:

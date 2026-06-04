@@ -23,7 +23,7 @@ A highly performant, decoupled microservices platform for algorithmic market ana
 - **Port**: 8000
 - Streams live pricing via WebSocket (Binance for crypto, Yahoo Finance for stocks)
 - Stores 365 days of historical OHLCV data
-- Default watchlist: SPY, BTC, ETH (runtime CRUD support)
+- Empty watchlist by default — users add any tickers via UI (examples: SPY, BTC, ETH)
 - Broadcasts data to Service B
 
 ### Service B — Quant Engine & Risk (`services/quant-engine/`)
@@ -36,7 +36,7 @@ A highly performant, decoupled microservices platform for algorithmic market ana
 ### Service C — Portfolio Engine (`services/portfolio-engine/`)
 - **Port**: 8002
 - SQLite + SQLAlchemy ORM for position tracking
-- Virtual paper trading ($100K starting capital)
+- Virtual paper trading ($10K starting capital, configurable via `INITIAL_BALANCE`)
 - **Robinhood Guardrail**: If trade > 5% of liquid Robinhood balance → CAPITAL OVERSPEND WARNING → cancel signal
 
 ### Service D — Frontend & Notifications (`services/frontend/` + `services/notification-gateway/`)
@@ -53,6 +53,17 @@ A highly performant, decoupled microservices platform for algorithmic market ana
 - (Optional) API keys for Binance, Alpaca, Telegram, Discord, Robinhood
 
 ### 1. Configure Environment
+
+Run the interactive setup script to configure all API keys and credentials:
+
+```bash
+python3 scripts/setup.py
+```
+
+This will prompt for Binance, Alpaca, Robinhood, Telegram, and Discord credentials
+and securely store them in a local `.env` file (gitignored, never committed).
+
+Alternatively, copy and edit manually:
 
 ```bash
 cp .env.example .env
@@ -138,6 +149,8 @@ market-analysis/
 ├── docker-compose.yml          # Orchestration
 ├── .env.example                # Configuration template
 ├── README.md                   # This file
+├── scripts/
+│   └── setup.py                # Interactive credential setup
 └── services/
     ├── data-ingestion/         # Service A
     │   ├── Dockerfile

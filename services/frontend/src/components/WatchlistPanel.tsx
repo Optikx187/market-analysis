@@ -86,6 +86,16 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
       </div>
 
       <div className="space-y-2">
+        {assets.length === 0 && (
+          <div className="rounded border border-dashed p-4 text-center text-sm text-[var(--muted-foreground)]">
+            <p className="mb-1">Your watchlist is empty.</p>
+            <p className="text-xs">
+              Add tickers above to start tracking. Examples:
+              <strong> BTC</strong> (Bitcoin), <strong>ETH</strong> (Ethereum),
+              <strong> SPY</strong> (S&P 500), <strong>AAPL</strong> (Apple)
+            </p>
+          </div>
+        )}
         {assets.map((a) => (
           <div key={a.ticker} className="flex items-center justify-between rounded border p-2">
             <div>

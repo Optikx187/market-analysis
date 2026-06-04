@@ -17,7 +17,7 @@ from app.database import get_db, init_db, async_session
 from app.models import (
     Trade, TradeStatus, SignalDirection, Portfolio, EquitySnapshot, AlertLog,
 )
-from app.robinhood import check_capital_overspend, get_buying_power
+from app.robinhood import check_capital_overspend, get_buying_power, execute_robinhood_order
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -177,6 +177,7 @@ async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)
     approved = not signal.suppressed and not rh_check["overspend"]
 
     paper_trade_executed = False
+    robinhood_order = None
     if approved and signal.direction in ("BUY", "SELL"):
         trade = await execute_paper_trade(
             db, signal.ticker,
@@ -184,6 +185,14 @@ async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)
             signal.trigger_price, signal.stop_loss, signal.target_price,
         )
         paper_trade_executed = trade is not None
+
+        # Execute through Robinhood (all trades go through Robinhood when connected)
+        if trade is not None:
+            robinhood_order = execute_robinhood_order(
+                signal.ticker, signal.direction, trade.quantity, signal.trigger_price,
+            )
+            if robinhood_order.get("executed"):
+                logger.info(f"Robinhood order executed: {robinhood_order}")
 
     reason_parts = [signal.reason]
     if signal.suppressed:
@@ -283,3 +292,56 @@ async def list_alerts(limit: int = 50, db: AsyncSession = Depends(get_db)):
 async def robinhood_balance():
     bp = get_buying_power()
     return {"buying_power": bp, "connected": bp is not None}
+
+
+@app.get("/api/settings/credentials")
+async def credential_status():
+    """Return which credential groups are configured (without exposing values)."""
+    return {
+        "robinhood": bool(settings.ROBINHOOD_USERNAME and settings.ROBINHOOD_PASSWORD),
+        "binance": False,  # Binance keys are in Service A, not here
+        "alpaca": False,   # Alpaca keys are in Service A, not here
+        "telegram": False, # Telegram keys are in notification gateway
+        "discord": False,  # Discord keys are in notification gateway
+    }
+
+
+@app.get("/api/settings/credentials/all")
+async def credential_status_all():
+    """Aggregate credential status from all services."""
+    robinhood_ok = bool(settings.ROBINHOOD_USERNAME and settings.ROBINHOOD_PASSWORD)
+
+    # Check Service A (data-ingestion) credentials
+    binance_ok = False
+    alpaca_ok = False
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{settings.DATA_INGESTION_URL}/api/settings/credentials")
+            if resp.status_code == 200:
+                data = resp.json()
+                binance_ok = data.get("binance", False)
+                alpaca_ok = data.get("alpaca", False)
+    except Exception:
+        pass
+
+    # Check notification gateway credentials
+    telegram_ok = False
+    discord_ok = False
+    try:
+        notification_url = settings.DATA_INGESTION_URL.replace(":8000", ":8003")
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{notification_url}/api/settings/credentials")
+            if resp.status_code == 200:
+                data = resp.json()
+                telegram_ok = data.get("telegram", False)
+                discord_ok = data.get("discord", False)
+    except Exception:
+        pass
+
+    return {
+        "robinhood": robinhood_ok,
+        "binance": binance_ok,
+        "alpaca": alpaca_ok,
+        "telegram": telegram_ok,
+        "discord": discord_ok,
+    }

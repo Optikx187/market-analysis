@@ -53,6 +53,54 @@ def get_buying_power() -> Optional[float]:
         return None
 
 
+def execute_robinhood_order(
+    ticker: str, direction: str, quantity: float, price: float,
+) -> dict:
+    """Execute a trade through Robinhood.
+
+    All trades go through Robinhood when credentials are configured.
+    Returns order result or error info.
+    """
+    if not _login():
+        return {
+            "executed": False,
+            "reason": "Robinhood not connected — paper trade only",
+        }
+    try:
+        import robin_stocks.robinhood as rh
+
+        if direction == "BUY":
+            order = rh.orders.order_buy_limit(
+                symbol=ticker,
+                quantity=quantity,
+                limitPrice=round(price, 2),
+                timeInForce="gfd",
+            )
+        elif direction == "SELL":
+            order = rh.orders.order_sell_limit(
+                symbol=ticker,
+                quantity=quantity,
+                limitPrice=round(price, 2),
+                timeInForce="gfd",
+            )
+        else:
+            return {"executed": False, "reason": f"Unknown direction: {direction}"}
+
+        order_id = order.get("id", "unknown")
+        logger.info(f"Robinhood order placed: {direction} {quantity} {ticker} @ ${price} (order: {order_id})")
+        return {
+            "executed": True,
+            "order_id": order_id,
+            "direction": direction,
+            "ticker": ticker,
+            "quantity": quantity,
+            "price": price,
+        }
+    except Exception as e:
+        logger.error(f"Robinhood order failed: {e}")
+        return {"executed": False, "reason": str(e)}
+
+
 def check_capital_overspend(optimal_trade_usd: float) -> dict:
     """Check if the optimal trade exceeds 5% of Robinhood liquid balance.
 

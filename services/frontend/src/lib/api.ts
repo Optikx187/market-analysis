@@ -119,9 +119,9 @@ export const fetchCandles = (ticker: string) =>
   api.get(`/candles/${ticker}`).then((r) => r.data);
 
 // Service B — Quant Engine
-export const analyzeSignal = (ticker: string, capital: number = 100000) =>
+export const analyzeSignal = (ticker: string, capital: number = 10000) =>
   api.post<Signal | null>("/analyze", { ticker, available_capital: capital }).then((r) => r.data);
-export const fetchRiskProfile = (ticker: string, capital: number = 100000) =>
+export const fetchRiskProfile = (ticker: string, capital: number = 10000) =>
   api.post<RiskProfile | null>("/risk-profile", { ticker, available_capital: capital }).then((r) => r.data);
 
 // Service C — Portfolio Engine
@@ -132,5 +132,17 @@ export const processSignal = (signal: Signal) =>
   api.post<SignalDecision>("/process-signal", signal).then((r) => r.data);
 export const fetchRobinhoodBalance = () =>
   api.get<{ buying_power: number | null; connected: boolean }>("/robinhood/balance").then((r) => r.data);
+
+// Settings — Credential Status
+export interface CredentialStatus {
+  robinhood: boolean;
+  binance: boolean;
+  alpaca: boolean;
+  telegram: boolean;
+  discord: boolean;
+}
+
+export const fetchCredentialStatus = () =>
+  api.get<CredentialStatus>("/settings/credentials/all").then((r) => r.data);
 
 export default api;
