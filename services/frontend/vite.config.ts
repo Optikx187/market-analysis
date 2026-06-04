@@ -23,6 +23,8 @@ export default defineConfig({
       "/api/trades": "http://portfolio-engine:8002",
       "/api/alerts": "http://portfolio-engine:8002",
       "/api/robinhood": "http://portfolio-engine:8002",
+      "/api/process-signal": "http://portfolio-engine:8002",
+      "/api/settings": "http://portfolio-engine:8002",
     },
   },
 });

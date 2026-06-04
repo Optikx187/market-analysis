@@ -58,31 +58,37 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
     <div className="rounded-lg border bg-[var(--card)] p-4">
       <h2 className="text-lg font-semibold mb-3">Watchlist</h2>
 
-      <div className="flex gap-2 mb-4">
-        <input
-          className="flex-1 rounded border bg-[var(--input)] px-2 py-1 text-sm"
-          placeholder="Ticker" value={ticker}
-          onChange={(e) => setTicker(e.target.value.toUpperCase())}
-        />
-        <input
-          className="flex-1 rounded border bg-[var(--input)] px-2 py-1 text-sm"
-          placeholder="Name" value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
-        <select
-          className="rounded border bg-[var(--input)] px-2 py-1 text-sm"
-          value={assetType} onChange={(e) => setAssetType(e.target.value)}
-        >
-          <option value="crypto">Crypto</option>
-          <option value="stock">Stock</option>
-        </select>
-        <button
-          onClick={handleAdd}
-          disabled={!ticker || !name}
-          className="rounded bg-[var(--primary)] text-[var(--primary-foreground)] px-3 py-1 text-sm font-medium disabled:opacity-50"
-        >
-          Add
-        </button>
+      <div className="flex flex-wrap gap-2 mb-4">
+        <div className="flex gap-2 flex-1 min-w-0">
+          <input
+            className="w-24 min-w-0 rounded border bg-[var(--input)] px-2 py-1 text-sm"
+            placeholder="Ticker" value={ticker}
+            onChange={(e) => setTicker(e.target.value.toUpperCase())}
+            onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+          />
+          <input
+            className="flex-1 min-w-0 rounded border bg-[var(--input)] px-2 py-1 text-sm"
+            placeholder="Name" value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+          />
+        </div>
+        <div className="flex gap-2">
+          <select
+            className="rounded border bg-[var(--input)] px-2 py-1 text-sm"
+            value={assetType} onChange={(e) => setAssetType(e.target.value)}
+          >
+            <option value="crypto">Crypto</option>
+            <option value="stock">Stock</option>
+          </select>
+          <button
+            onClick={handleAdd}
+            disabled={!ticker || !name}
+            className="rounded bg-[var(--primary)] text-[var(--primary-foreground)] px-3 py-1 text-sm font-medium disabled:opacity-50 whitespace-nowrap"
+          >
+            + Add
+          </button>
+        </div>
       </div>
 
       <div className="space-y-2">

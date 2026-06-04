@@ -145,4 +145,16 @@ export interface CredentialStatus {
 export const fetchCredentialStatus = () =>
   api.get<CredentialStatus>("/settings/credentials/all").then((r) => r.data);
 
+export const saveCredentials = (credentials: Record<string, string>) =>
+  api.post<{ saved: string[]; message: string }>("/settings/credentials/save", { credentials }).then((r) => r.data);
+
+export interface OnboardingStatus {
+  completed: boolean;
+  has_credentials: boolean;
+  has_assets: boolean;
+}
+
+export const fetchOnboardingStatus = () =>
+  api.get<OnboardingStatus>("/settings/onboarding").then((r) => r.data);
+
 export default api;

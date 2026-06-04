@@ -2,7 +2,10 @@
 
 import datetime
 import logging
+import os
+import stat
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -344,4 +347,119 @@ async def credential_status_all():
         "alpaca": alpaca_ok,
         "telegram": telegram_ok,
         "discord": discord_ok,
+    }
+
+
+class CredentialSaveRequest(BaseModel):
+    credentials: dict[str, str]
+
+
+def _find_env_path() -> Path:
+    """Find the .env file — check project root first, then service dir."""
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
+    candidates = [project_root / ".env", Path(".env")]
+    for p in candidates:
+        if p.exists():
+            return p
+    return project_root / ".env"
+
+
+def _read_env(path: Path) -> dict[str, str]:
+    """Read key=value pairs from a .env file."""
+    env: dict[str, str] = {}
+    if not path.exists():
+        return env
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+def _write_env(path: Path, env: dict[str, str]) -> None:
+    """Write key=value pairs to .env, preserving comments from .env.example."""
+    example_path = path.parent / ".env.example"
+    lines: list[str] = []
+    written_keys: set[str] = set()
+
+    template_path = example_path if example_path.exists() else None
+    if template_path:
+        for line in template_path.read_text().splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                lines.append(line)
+                continue
+            if "=" in stripped:
+                key = stripped.split("=", 1)[0].strip()
+                if key in env:
+                    lines.append(f"{key}={env[key]}")
+                    written_keys.add(key)
+                else:
+                    lines.append(line)
+
+    for k, v in env.items():
+        if k not in written_keys:
+            lines.append(f"{k}={v}")
+
+    path.write_text("\n".join(lines) + "\n")
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+
+
+@app.post("/api/settings/credentials/save")
+async def save_credentials(req: CredentialSaveRequest):
+    """Save credentials to the .env file (UI-based setup)."""
+    allowed_keys = {
+        "ROBINHOOD_USERNAME", "ROBINHOOD_PASSWORD", "ROBINHOOD_TOTP",
+        "BINANCE_API_KEY", "BINANCE_API_SECRET",
+        "ALPACA_API_KEY", "ALPACA_API_SECRET",
+        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+        "DISCORD_WEBHOOK_URL",
+    }
+    filtered = {k: v for k, v in req.credentials.items() if k in allowed_keys and v}
+    if not filtered:
+        raise HTTPException(400, "No valid credentials provided")
+
+    env_path = _find_env_path()
+    existing = _read_env(env_path)
+    existing.update(filtered)
+    _write_env(env_path, existing)
+
+    logger.info(f"Credentials saved via UI: {list(filtered.keys())}")
+    return {
+        "saved": list(filtered.keys()),
+        "message": "Credentials saved. Restart services to apply changes.",
+    }
+
+
+@app.get("/api/settings/onboarding")
+async def onboarding_status():
+    """Check if the user has completed onboarding (has at least one credential configured)."""
+    env_path = _find_env_path()
+    env = _read_env(env_path)
+    has_any_cred = any(
+        env.get(k)
+        for k in [
+            "ROBINHOOD_USERNAME", "BINANCE_API_KEY", "ALPACA_API_KEY",
+            "TELEGRAM_BOT_TOKEN", "DISCORD_WEBHOOK_URL",
+        ]
+    )
+    has_any_asset = False
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{settings.DATA_INGESTION_URL}/api/assets")
+            if resp.status_code == 200:
+                has_any_asset = len(resp.json()) > 0
+    except Exception:
+        pass
+
+    return {
+        "completed": has_any_cred,
+        "has_credentials": has_any_cred,
+        "has_assets": has_any_asset,
     }

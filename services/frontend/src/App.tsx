@@ -1,14 +1,53 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import WatchlistPanel from "@/components/WatchlistPanel";
 import PortfolioPanel from "@/components/PortfolioPanel";
 import TradesPanel from "@/components/TradesPanel";
 import AlertsPanel from "@/components/AlertsPanel";
 import SettingsPanel from "@/components/SettingsPanel";
+import HelpPanel from "@/components/HelpPanel";
+import GettingStartedPanel from "@/components/GettingStartedPanel";
+import { fetchOnboardingStatus } from "@/lib/api";
 
-type Tab = "alerts" | "trades" | "settings";
+type Tab = "alerts" | "trades" | "settings" | "help";
 
 function App() {
   const [tab, setTab] = useState<Tab>("alerts");
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    const dismissed = localStorage.getItem("onboarding_complete");
+    if (dismissed) {
+      setLoaded(true);
+      return;
+    }
+    fetchOnboardingStatus()
+      .then((s) => {
+        if (!s.completed) setShowOnboarding(true);
+        setLoaded(true);
+      })
+      .catch(() => {
+        setShowOnboarding(true);
+        setLoaded(true);
+      });
+  }, []);
+
+  const completeOnboarding = () => {
+    localStorage.setItem("onboarding_complete", "1");
+    setShowOnboarding(false);
+  };
+
+  if (!loaded) {
+    return (
+      <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)] flex items-center justify-center">
+        <div className="text-sm text-[var(--muted-foreground)]">Loading...</div>
+      </div>
+    );
+  }
+
+  if (showOnboarding) {
+    return <GettingStartedPanel onComplete={completeOnboarding} />;
+  }
 
   return (
     <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
@@ -22,9 +61,18 @@ function App() {
               Quant signals &middot; Half-Kelly sizing &middot; Capital preservation
             </p>
           </div>
-          <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
-            <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-            System Active
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => { setShowOnboarding(true); }}
+              className="text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+              title="Re-run the Getting Started wizard"
+            >
+              Setup Wizard
+            </button>
+            <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+              <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+              System Active
+            </div>
           </div>
         </div>
       </header>
@@ -40,7 +88,7 @@ function App() {
         </div>
 
         <div className="flex gap-2 border-b border-[var(--border)] pb-2">
-          {(["alerts", "trades", "settings"] as Tab[]).map((t) => (
+          {(["alerts", "trades", "settings", "help"] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -48,7 +96,7 @@ function App() {
                 tab === t ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : "text-[var(--muted-foreground)]"
               }`}
             >
-              {t}
+              {t === "help" ? "Help & Docs" : t}
             </button>
           ))}
         </div>
@@ -56,6 +104,7 @@ function App() {
         {tab === "alerts" && <AlertsPanel />}
         {tab === "trades" && <TradesPanel />}
         {tab === "settings" && <SettingsPanel />}
+        {tab === "help" && <HelpPanel />}
       </main>
 
       <footer className="border-t border-[var(--border)] py-4 mt-8">
