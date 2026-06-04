@@ -72,6 +72,7 @@ class SignalInput(BaseModel):
     kelly_pct: float
     optimal_size_usd: float
     volatility_scalar: float
+    asset_type: str = "stock"
 
 
 class SignalDecision(BaseModel):
@@ -203,6 +204,7 @@ async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)
             else:
                 robinhood_order = execute_robinhood_order(
                     signal.ticker, signal.direction, trade.quantity, signal.trigger_price,
+                    asset_type=signal.asset_type,
                 )
                 if robinhood_order.get("executed"):
                     logger.info(f"Robinhood order executed: {robinhood_order}")

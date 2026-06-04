@@ -42,7 +42,9 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
   const handleAnalyze = async (t: string) => {
     setAnalyzing(t);
     try {
-      const signal = await analyzeSignal(t);
+      const asset = assets.find((a) => a.ticker === t);
+      const assetType = asset?.asset_type ?? "stock";
+      const signal = await analyzeSignal(t, 10000, assetType);
       if (signal) {
         const decision = await processSignal(signal);
         setLastDecision(decision);

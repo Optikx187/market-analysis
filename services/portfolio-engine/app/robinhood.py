@@ -55,10 +55,12 @@ def get_buying_power() -> Optional[float]:
 
 def execute_robinhood_order(
     ticker: str, direction: str, quantity: float, price: float,
+    asset_type: str = "stock",
 ) -> dict:
     """Execute a trade through Robinhood.
 
     All trades go through Robinhood when credentials are configured.
+    Uses stock-specific or crypto-specific order functions based on asset_type.
     Returns order result or error info.
     """
     if not _login():
@@ -69,22 +71,38 @@ def execute_robinhood_order(
     try:
         import robin_stocks.robinhood as rh
 
-        if direction == "BUY":
-            order = rh.orders.order_buy_limit(
-                symbol=ticker,
-                quantity=quantity,
-                limitPrice=round(price, 2),
-                timeInForce="gfd",
-            )
-        elif direction == "SELL":
-            order = rh.orders.order_sell_limit(
-                symbol=ticker,
-                quantity=quantity,
-                limitPrice=round(price, 2),
-                timeInForce="gfd",
-            )
+        is_crypto = asset_type.lower() == "crypto"
+
+        if is_crypto:
+            if direction == "BUY":
+                order = rh.orders.order_buy_crypto_by_quantity(
+                    symbol=ticker,
+                    quantity=quantity,
+                )
+            elif direction == "SELL":
+                order = rh.orders.order_sell_crypto_by_quantity(
+                    symbol=ticker,
+                    quantity=quantity,
+                )
+            else:
+                return {"executed": False, "reason": f"Unknown direction: {direction}"}
         else:
-            return {"executed": False, "reason": f"Unknown direction: {direction}"}
+            if direction == "BUY":
+                order = rh.orders.order_buy_limit(
+                    symbol=ticker,
+                    quantity=quantity,
+                    limitPrice=round(price, 2),
+                    timeInForce="gfd",
+                )
+            elif direction == "SELL":
+                order = rh.orders.order_sell_limit(
+                    symbol=ticker,
+                    quantity=quantity,
+                    limitPrice=round(price, 2),
+                    timeInForce="gfd",
+                )
+            else:
+                return {"executed": False, "reason": f"Unknown direction: {direction}"}
 
         order_id = order.get("id") if order else None
         if not order_id:

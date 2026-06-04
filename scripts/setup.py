@@ -90,6 +90,7 @@ def mask_value(value: str) -> str:
 def write_env(values: dict[str, str]) -> None:
     """Write values to .env file, preserving comments from .env.example."""
     lines = []
+    written_keys: set[str] = set()
     if ENV_EXAMPLE.exists():
         for line in ENV_EXAMPLE.read_text().splitlines():
             stripped = line.strip()
@@ -97,10 +98,16 @@ def write_env(values: dict[str, str]) -> None:
                 key = stripped.split("=", 1)[0].strip()
                 val = values.get(key, "")
                 lines.append(f"{key}={val}")
+                written_keys.add(key)
             else:
                 lines.append(line)
     else:
         for key, val in values.items():
+            lines.append(f"{key}={val}")
+            written_keys.add(key)
+
+    for key, val in values.items():
+        if key not in written_keys:
             lines.append(f"{key}={val}")
 
     ENV_FILE.write_text("\n".join(lines) + "\n")
