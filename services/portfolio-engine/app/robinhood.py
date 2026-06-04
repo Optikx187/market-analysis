@@ -86,7 +86,11 @@ def execute_robinhood_order(
         else:
             return {"executed": False, "reason": f"Unknown direction: {direction}"}
 
-        order_id = order.get("id", "unknown")
+        order_id = order.get("id") if order else None
+        if not order_id:
+            error_detail = order.get("detail", "Unknown error") if order else "No response"
+            logger.error(f"Robinhood order rejected: {error_detail}")
+            return {"executed": False, "reason": f"Order rejected: {error_detail}"}
         logger.info(f"Robinhood order placed: {direction} {quantity} {ticker} @ ${price} (order: {order_id})")
         return {
             "executed": True,

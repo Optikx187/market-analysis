@@ -191,11 +191,21 @@ async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)
 
         # Execute through Robinhood (all trades go through Robinhood when connected)
         if trade is not None:
-            robinhood_order = execute_robinhood_order(
-                signal.ticker, signal.direction, trade.quantity, signal.trigger_price,
-            )
-            if robinhood_order.get("executed"):
-                logger.info(f"Robinhood order executed: {robinhood_order}")
+            # Validate actual order cost against Robinhood capital limit
+            actual_order_cost = trade.quantity * signal.trigger_price
+            rh_order_check = check_capital_overspend(actual_order_cost)
+            if rh_order_check["overspend"]:
+                logger.warning(
+                    f"Robinhood order blocked: actual cost ${actual_order_cost:.2f} "
+                    f"exceeds 5% limit. {rh_order_check['reason']}"
+                )
+                robinhood_order = {"executed": False, "reason": rh_order_check["reason"]}
+            else:
+                robinhood_order = execute_robinhood_order(
+                    signal.ticker, signal.direction, trade.quantity, signal.trigger_price,
+                )
+                if robinhood_order.get("executed"):
+                    logger.info(f"Robinhood order executed: {robinhood_order}")
 
     reason_parts = [signal.reason]
     if signal.suppressed:
@@ -331,9 +341,8 @@ async def credential_status_all():
     telegram_ok = False
     discord_ok = False
     try:
-        notification_url = settings.DATA_INGESTION_URL.replace(":8000", ":8003")
         async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{notification_url}/api/settings/credentials")
+            resp = await client.get(f"{settings.NOTIFICATION_GATEWAY_URL}/api/settings/credentials")
             if resp.status_code == 200:
                 data = resp.json()
                 telegram_ok = data.get("telegram", False)
