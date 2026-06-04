@@ -108,3 +108,29 @@ class NotificationConfig(BaseModel):
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
     discord_webhook_url: Optional[str] = None
+
+
+class WebhookCreate(BaseModel):
+    name: str
+    url: str
+    secret: Optional[str] = None
+
+
+class WebhookResponse(BaseModel):
+    id: int
+    name: str
+    url: str
+    is_active: bool
+    secret: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class WebhookTestResponse(BaseModel):
+    webhook_id: int
+    name: str
+    url: str
+    success: bool
+    status_code: Optional[int] = None
+    error: Optional[str] = None

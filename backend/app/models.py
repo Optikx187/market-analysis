@@ -118,6 +118,17 @@ class EquitySnapshot(Base):
     timestamp = Column(DateTime, server_default=func.now())
 
 
+class WebhookEndpoint(Base):
+    __tablename__ = "webhook_endpoints"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    url = Column(String(500), nullable=False)
+    is_active = Column(Boolean, default=True)
+    secret = Column(String(200), nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class SystemLog(Base):
     __tablename__ = "system_logs"
 

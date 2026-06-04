@@ -19,6 +19,7 @@ from app.models import (
     Trade,
     TradeStatus,
     SystemLog,
+    WebhookEndpoint,
 )
 from app.schemas import (
     AssetCreate,
@@ -30,6 +31,9 @@ from app.schemas import (
     BacktestResponse,
     SystemLogResponse,
     TickerSearchResult,
+    WebhookCreate,
+    WebhookResponse,
+    WebhookTestResponse,
 )
 from app.data_ingestion import refresh_asset_data, load_candles
 from app.quant_engine import evaluate_signals
@@ -40,7 +44,7 @@ from app.paper_trading import (
     get_or_create_portfolio,
     check_and_close_trades,
 )
-from app.notifications import send_signal_notification
+from app.notifications import send_signal_notification, build_signal_payload, send_api_webhook
 from app.backtester import run_backtest
 
 logging.basicConfig(level=logging.INFO)
@@ -227,7 +231,16 @@ async def analyze_ticker(ticker: str, db: AsyncSession = Depends(get_db)):
             signal_result.trigger_price, signal_result.stop_loss, signal_result.target_price,
         )
 
-    # Send notifications
+    # Fetch active API webhooks
+    wh_result = await db.execute(
+        select(WebhookEndpoint).where(WebhookEndpoint.is_active == True)
+    )
+    webhooks = [
+        {"id": w.id, "name": w.name, "url": w.url, "secret": w.secret}
+        for w in wh_result.scalars().all()
+    ]
+
+    # Send notifications (Telegram + Discord + API webhooks)
     await send_signal_notification(
         ticker.upper(),
         signal_result.direction,
@@ -236,6 +249,7 @@ async def analyze_ticker(ticker: str, db: AsyncSession = Depends(get_db)):
         signal_result.stop_loss,
         signal_result.target_price,
         signal_result.suppressed,
+        webhooks=webhooks,
     )
 
     return signal
@@ -303,6 +317,96 @@ async def run_backtest_endpoint(payload: BacktestRequest, db: AsyncSession = Dep
             "pnl": round(t.pnl, 2),
             "pnl_pct": round(t.pnl_pct, 2),
         } for t in result.trades],
+    )
+
+
+# ──── API Webhooks ────
+
+
+@app.get("/api/webhooks", response_model=list[WebhookResponse])
+async def list_webhooks(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(WebhookEndpoint).order_by(WebhookEndpoint.created_at)
+    )
+    return result.scalars().all()
+
+
+@app.post("/api/webhooks", response_model=WebhookResponse)
+async def add_webhook(payload: WebhookCreate, db: AsyncSession = Depends(get_db)):
+    webhook = WebhookEndpoint(
+        name=payload.name,
+        url=payload.url,
+        secret=payload.secret,
+    )
+    db.add(webhook)
+    log = SystemLog(level="INFO", message=f"Added API webhook: {payload.name}")
+    db.add(log)
+    await db.commit()
+    await db.refresh(webhook)
+    return webhook
+
+
+@app.delete("/api/webhooks/{webhook_id}")
+async def remove_webhook(webhook_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(WebhookEndpoint).where(WebhookEndpoint.id == webhook_id)
+    )
+    webhook = result.scalar_one_or_none()
+    if not webhook:
+        raise HTTPException(404, "Webhook not found")
+    await db.delete(webhook)
+    log = SystemLog(level="INFO", message=f"Removed API webhook: {webhook.name}")
+    db.add(log)
+    await db.commit()
+    return {"status": "removed", "id": webhook_id}
+
+
+@app.patch("/api/webhooks/{webhook_id}/toggle", response_model=WebhookResponse)
+async def toggle_webhook(webhook_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(WebhookEndpoint).where(WebhookEndpoint.id == webhook_id)
+    )
+    webhook = result.scalar_one_or_none()
+    if not webhook:
+        raise HTTPException(404, "Webhook not found")
+    webhook.is_active = not webhook.is_active
+    status = "enabled" if webhook.is_active else "disabled"
+    log = SystemLog(level="INFO", message=f"API webhook {webhook.name} {status}")
+    db.add(log)
+    await db.commit()
+    await db.refresh(webhook)
+    return webhook
+
+
+@app.post("/api/webhooks/{webhook_id}/test", response_model=WebhookTestResponse)
+async def test_webhook(webhook_id: int, db: AsyncSession = Depends(get_db)):
+    """Send a test signal payload to a specific webhook endpoint."""
+    result = await db.execute(
+        select(WebhookEndpoint).where(WebhookEndpoint.id == webhook_id)
+    )
+    webhook = result.scalar_one_or_none()
+    if not webhook:
+        raise HTTPException(404, "Webhook not found")
+
+    test_payload = build_signal_payload(
+        ticker="TEST",
+        direction=SignalDirection.BUY,
+        trigger_price=50000.0,
+        reason="Test signal — webhook connectivity check",
+        stop_loss=48500.0,
+        target_price=54500.0,
+        suppressed=False,
+    )
+    ok, status_code, error = await send_api_webhook(
+        webhook.url, test_payload, webhook.secret
+    )
+    return WebhookTestResponse(
+        webhook_id=webhook.id,
+        name=webhook.name,
+        url=webhook.url,
+        success=ok,
+        status_code=status_code,
+        error=error,
     )
 
 

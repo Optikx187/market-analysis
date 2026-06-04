@@ -125,4 +125,39 @@ export const searchTickers = (q: string) =>
     `/assets/search?q=${q}`
   ).then((r) => r.data);
 
+// ── API Webhooks ──
+
+export interface Webhook {
+  id: number;
+  name: string;
+  url: string;
+  is_active: boolean;
+  secret: string | null;
+  created_at: string | null;
+}
+
+export interface WebhookTestResult {
+  webhook_id: number;
+  name: string;
+  url: string;
+  success: boolean;
+  status_code: number | null;
+  error: string | null;
+}
+
+export const fetchWebhooks = () =>
+  api.get<Webhook[]>("/webhooks").then((r) => r.data);
+
+export const addWebhook = (name: string, url: string, secret?: string) =>
+  api.post<Webhook>("/webhooks", { name, url, secret: secret || null }).then((r) => r.data);
+
+export const removeWebhook = (id: number) =>
+  api.delete(`/webhooks/${id}`).then((r) => r.data);
+
+export const toggleWebhook = (id: number) =>
+  api.patch<Webhook>(`/webhooks/${id}/toggle`).then((r) => r.data);
+
+export const testWebhook = (id: number) =>
+  api.post<WebhookTestResult>(`/webhooks/${id}/test`).then((r) => r.data);
+
 export default api;
