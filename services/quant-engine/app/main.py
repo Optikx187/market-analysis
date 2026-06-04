@@ -35,6 +35,7 @@ class SignalResponse(BaseModel):
     risk_reward: float
     atr_value: float
     rsi_value: float
+    asset_type: str = "stock"
     suppressed: bool
     kelly_pct: float
     optimal_size_usd: float
@@ -63,7 +64,8 @@ class RiskProfileResponse(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     ticker: str
-    available_capital: float = 100_000.0
+    available_capital: float = 10_000.0
+    asset_type: str = "stock"
 
 
 async def fetch_candles_from_service_a(ticker: str) -> pd.DataFrame:
@@ -107,6 +109,7 @@ async def analyze(req: AnalyzeRequest):
         kelly_pct=result.kelly_pct,
         optimal_size_usd=result.optimal_size_usd,
         volatility_scalar=result.volatility_scalar,
+        asset_type=req.asset_type,
     )
 
 

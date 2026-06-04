@@ -18,12 +18,6 @@ from app.ingestion import refresh_asset_data, load_candles
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SEED_ASSETS = [
-    {"ticker": "SPY", "name": "S&P 500 ETF", "asset_type": AssetType.STOCK},
-    {"ticker": "BTC", "name": "Bitcoin", "asset_type": AssetType.CRYPTO},
-    {"ticker": "ETH", "name": "Ethereum", "asset_type": AssetType.CRYPTO},
-]
-
 
 class AssetCreate(BaseModel):
     ticker: str
@@ -40,16 +34,6 @@ class AssetResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-async def seed_defaults():
-    async with async_session() as db:
-        for a in SEED_ASSETS:
-            res = await db.execute(select(Asset).where(Asset.ticker == a["ticker"]))
-            if res.scalar_one_or_none() is None:
-                db.add(Asset(**a))
-        await db.commit()
-    logger.info("Default assets seeded")
-
-
 async def initial_fetch():
     async with async_session() as db:
         result = await db.execute(select(Asset).where(Asset.is_active == True))
@@ -64,7 +48,6 @@ async def initial_fetch():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    await seed_defaults()
     asyncio.create_task(initial_fetch())
     yield
 
@@ -129,6 +112,15 @@ async def get_candles(
         if hasattr(r["timestamp"], "isoformat"):
             r["timestamp"] = r["timestamp"].isoformat()
     return records
+
+
+@app.get("/api/settings/credentials")
+async def credential_status():
+    """Return which credential groups are configured (without exposing values)."""
+    return {
+        "binance": bool(settings.BINANCE_API_KEY and settings.BINANCE_API_SECRET),
+        "alpaca": bool(settings.ALPACA_API_KEY and settings.ALPACA_API_SECRET),
+    }
 
 
 @app.post("/api/data/refresh/{ticker}")

@@ -110,6 +110,15 @@ async def health():
     return {"status": "healthy", "service": "notification-gateway"}
 
 
+@app.get("/api/settings/credentials")
+async def credential_status():
+    """Return which credential groups are configured (without exposing values)."""
+    return {
+        "telegram": bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID),
+        "discord": bool(settings.DISCORD_WEBHOOK_URL),
+    }
+
+
 @app.post("/api/notify")
 async def notify(payload: NotificationPayload):
     """Dual-broadcast a formatted alert to Discord and Telegram simultaneously."""
