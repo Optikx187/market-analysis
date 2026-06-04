@@ -1,0 +1,96 @@
+version: "3.9"
+
+services:
+  # SERVICE A: Data Ingestion
+  data-ingestion:
+    build: ./services/data-ingestion
+    container_name: data-ingestion
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - data-ingestion-db:/app
+    networks:
+      - trading_network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # SERVICE B: Quantitative Analytics & Risk Engine
+  quant-engine:
+    build: ./services/quant-engine
+    container_name: quant-engine
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      - DATA_INGESTION_URL=http://data-ingestion:8000
+    networks:
+      - trading_network
+    depends_on:
+      data-ingestion:
+        condition: service_healthy
+
+  # SERVICE C: Portfolio & Integration Engine
+  portfolio-engine:
+    build: ./services/portfolio-engine
+    container_name: portfolio-engine
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
+    environment:
+      - QUANT_ENGINE_URL=http://quant-engine:8001
+      - DATA_INGESTION_URL=http://data-ingestion:8000
+    volumes:
+      - portfolio-db:/app
+    networks:
+      - trading_network
+    depends_on:
+      data-ingestion:
+        condition: service_healthy
+
+  # NOTIFICATION GATEWAY (part of Service D)
+  notification-gateway:
+    build: ./services/notification-gateway
+    container_name: notification-gateway
+    ports:
+      - "8003:8003"
+    env_file:
+      - .env
+    networks:
+      - trading_network
+    depends_on:
+      data-ingestion:
+        condition: service_healthy
+
+  # SERVICE D: Frontend (React + Nginx reverse proxy)
+  frontend:
+    build: ./services/frontend
+    container_name: frontend
+    ports:
+      - "3000:80"
+    networks:
+      - trading_network
+    depends_on:
+      data-ingestion:
+        condition: service_healthy
+      quant-engine:
+        condition: service_started
+      portfolio-engine:
+        condition: service_started
+      notification-gateway:
+        condition: service_started
+
+networks:
+  trading_network:
+    driver: bridge
+
+volumes:
+  data-ingestion-db:
+  portfolio-db:
