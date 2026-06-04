@@ -1,0 +1,10 @@
+fastapi[standard]==0.115.12
+uvicorn==0.34.2
+httpx==0.28.1
+websockets==15.0.1
+yfinance==0.2.62
+pandas==2.2.3
+numpy==2.2.6
+sqlalchemy[asyncio]==2.0.41
+aiosqlite==0.21.0
+pydantic-settings==2.9.1
