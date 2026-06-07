@@ -10,6 +10,23 @@ export interface Asset {
   is_active: boolean;
 }
 
+export interface Quote {
+  ticker: string;
+  name: string;
+  asset_type: string;
+  price: number | null;
+  change_pct: number | null;
+  volume: number | null;
+  updated_at: string;
+}
+
+export interface SymbolLookup {
+  ticker: string;
+  name: string;
+  asset_type: string;
+  recognized: boolean;
+}
+
 export interface Signal {
   ticker: string;
   direction: string | null;
@@ -117,6 +134,12 @@ export const removeAsset = (ticker: string) =>
   api.delete(`/assets/${ticker}`).then((r) => r.data);
 export const fetchCandles = (ticker: string) =>
   api.get(`/candles/${ticker}`).then((r) => r.data);
+export const refreshData = (ticker: string) =>
+  api.post(`/assets/${ticker}/refresh`).then((r) => r.data);
+export const fetchQuote = (ticker: string, asset_type: string = "stock") =>
+  api.get<Quote>(`/quotes/${ticker}`, { params: { asset_type } }).then((r) => r.data);
+export const lookupSymbol = (ticker: string, asset_type: string = "stock") =>
+  api.get<SymbolLookup>(`/symbols/lookup/${ticker}`, { params: { asset_type } }).then((r) => r.data);
 
 // Service B — Quant Engine
 export const analyzeSignal = (ticker: string, capital: number = 10000, asset_type: string = "stock") =>
@@ -130,23 +153,27 @@ export const fetchTrades = () => api.get<Trade[]>("/trades").then((r) => r.data)
 export const fetchAlerts = () => api.get<AlertLog[]>("/alerts").then((r) => r.data);
 export const processSignal = (signal: Signal) =>
   api.post<SignalDecision>("/process-signal", signal).then((r) => r.data);
-export const fetchRobinhoodBalance = () =>
-  api.get<{ buying_power: number | null; connected: boolean }>("/robinhood/balance").then((r) => r.data);
 
 // Settings — Credential Status
 export interface CredentialStatus {
-  robinhood: boolean;
-  binance: boolean;
-  alpaca: boolean;
-  telegram: boolean;
-  discord: boolean;
+  [provider: string]: {
+    configured: boolean;
+    verified: boolean;
+    configured_keys: string[];
+    verified_keys: string[];
+    masked: Record<string, string>;
+    errors: Record<string, string>;
+  };
 }
 
 export const fetchCredentialStatus = () =>
   api.get<CredentialStatus>("/settings/credentials/all").then((r) => r.data);
 
 export const saveCredentials = (credentials: Record<string, string>) =>
-  api.post<{ saved: string[]; message: string }>("/settings/credentials/save", { credentials }).then((r) => r.data);
+  api.post<{ saved: string[]; skipped?: string[]; message: string }>("/settings/credentials/save", { credentials }).then((r) => r.data);
+
+export const revealCredential = (key: string) =>
+  api.post<{ key: string; value: string }>("/settings/credentials/reveal", { key }).then((r) => r.data);
 
 export interface OnboardingStatus {
   completed: boolean;
@@ -156,5 +183,19 @@ export interface OnboardingStatus {
 
 export const fetchOnboardingStatus = () =>
   api.get<OnboardingStatus>("/settings/onboarding").then((r) => r.data);
+
+// Environment settings - viewable and adjustable
+export interface EnvSetting {
+  value: number;
+  default: number;
+  type: string;
+  description: string;
+}
+
+export const fetchEnvSettings = () =>
+  api.get<Record<string, EnvSetting>>("/settings/env").then((r) => r.data);
+
+export const updateEnvSetting = (key: string, value: number) =>
+  api.post<{ key: string; value: number; message: string }>("/settings/env", { key, value }).then((r) => r.data);
 
 export default api;

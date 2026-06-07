@@ -17,17 +17,17 @@ function App() {
 
   useEffect(() => {
     const dismissed = localStorage.getItem("onboarding_complete");
-    if (dismissed) {
-      setLoaded(true);
-      return;
-    }
     fetchOnboardingStatus()
       .then((s) => {
-        if (!s.completed) setShowOnboarding(true);
+        // Skip onboarding if: (a) localStorage flag OR (b) market data APIs configured
+        if (!dismissed && !s.has_credentials) {
+          setShowOnboarding(true);
+        }
         setLoaded(true);
       })
       .catch(() => {
-        setShowOnboarding(true);
+        // On error, only show onboarding if not dismissed
+        if (!dismissed) setShowOnboarding(true);
         setLoaded(true);
       });
   }, []);

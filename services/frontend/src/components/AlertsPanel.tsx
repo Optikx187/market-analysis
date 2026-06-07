@@ -1,6 +1,19 @@
 import { useEffect, useState } from "react";
 import { fetchAlerts, type AlertLog } from "@/lib/api";
 
+function formatDateTime(dateStr: string | null): string {
+  if (!dateStr) return "Unknown";
+  const date = new Date(dateStr);
+  return date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
 export default function AlertsPanel() {
   const [alerts, setAlerts] = useState<AlertLog[]>([]);
 
@@ -31,7 +44,7 @@ export default function AlertsPanel() {
                 </span>
               </div>
               <div className="text-xs text-[var(--muted-foreground)] mt-1">
-                Status: {a.status} | Price: ${a.trigger_price.toFixed(2)}
+                {formatDateTime(a.created_at)} | Status: {a.status} | Price: ${a.trigger_price.toFixed(2)}
                 {a.optimal_size_usd != null && ` | Size: $${a.optimal_size_usd.toFixed(2)}`}
                 {a.kelly_pct != null && ` | Kelly: ${a.kelly_pct}%`}
               </div>

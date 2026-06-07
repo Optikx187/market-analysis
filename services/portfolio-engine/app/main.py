@@ -1,6 +1,7 @@
 """Service C — Portfolio & Integration Engine."""
 
 import datetime
+import base64
 import logging
 import os
 import stat
@@ -18,9 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db, init_db, async_session
 from app.models import (
-    Trade, TradeStatus, SignalDirection, Portfolio, EquitySnapshot, AlertLog,
+    Trade, TradeStatus, SignalDirection, Portfolio, EquitySnapshot, AlertLog, CredentialSecret,
 )
-from app.robinhood import check_capital_overspend, get_buying_power, execute_robinhood_order
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -108,7 +108,71 @@ class AlertLogResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class CredentialSaveRequest(BaseModel):
+    credentials: dict[str, str]
+    overwrite: bool = False
+
+
+class CredentialRevealRequest(BaseModel):
+    key: str
+
+
 POSITION_SIZE_PCT = 0.02
+
+PROVIDER_KEYS = {
+    "binance": ["BINANCE_API_KEY", "BINANCE_API_SECRET"],
+    "alpaca": ["ALPACA_API_KEY", "ALPACA_API_SECRET"],
+    "telegram": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
+    "discord": ["DISCORD_WEBHOOK_URL"],
+}
+
+
+def _provider_for_key(key: str) -> str:
+    for provider, keys in PROVIDER_KEYS.items():
+        if key in keys:
+            return provider
+    return "unknown"
+
+
+def _mask(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 6:
+        return "•" * len(value)
+    return f"{value[:3]}{'•' * 6}{value[-3:]}"
+
+
+def _encode_secret(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode()).decode()
+
+
+def _decode_secret(value: str) -> str:
+    try:
+        return base64.urlsafe_b64decode(value.encode()).decode()
+    except Exception:
+        return value
+
+
+async def _get_secret(db: AsyncSession, key: str) -> Optional[CredentialSecret]:
+    result = await db.execute(select(CredentialSecret).where(CredentialSecret.key == key))
+    return result.scalar_one_or_none()
+
+
+async def _save_secret(
+    db: AsyncSession, key: str, value: str, verified: bool, last_error: Optional[str] = None,
+    overwrite: bool = False,
+) -> bool:
+    existing = await _get_secret(db, key)
+    if existing and existing.verified and not overwrite:
+        return False
+    if existing is None:
+        existing = CredentialSecret(provider=_provider_for_key(key), key=key, value=_encode_secret(value))
+        db.add(existing)
+    else:
+        existing.value = _encode_secret(value)
+    existing.verified = verified
+    existing.last_error = last_error
+    return True
 
 
 async def get_or_create_portfolio(db: AsyncSession) -> Portfolio:
@@ -177,11 +241,17 @@ async def health():
 @app.post("/api/process-signal", response_model=SignalDecision)
 async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)):
     """Receive a signal from quant-engine, validate against guardrails, execute paper trade."""
-    rh_check = check_capital_overspend(signal.optimal_size_usd)
-    approved = not signal.suppressed and not rh_check["overspend"]
+    # Simple capital guardrail: position size should not exceed 5% of portfolio value
+    portfolio = await db.execute(select(Portfolio).limit(1))
+    portfolio_row = portfolio.scalar_one_or_none()
+    portfolio_value = portfolio_row.total_equity if portfolio_row else settings.INITIAL_BALANCE
+    
+    position_limit = portfolio_value * 0.05  # 5% position limit
+    overspend = signal.optimal_size_usd and signal.optimal_size_usd > position_limit
+    
+    approved = not signal.suppressed and not overspend
 
     paper_trade_executed = False
-    robinhood_order = None
     if approved and signal.direction in ("BUY", "SELL"):
         trade = await execute_paper_trade(
             db, signal.ticker,
@@ -190,30 +260,11 @@ async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)
         )
         paper_trade_executed = trade is not None
 
-        # Execute through Robinhood (all trades go through Robinhood when connected)
-        if trade is not None:
-            # Validate actual order cost against Robinhood capital limit
-            actual_order_cost = trade.quantity * signal.trigger_price
-            rh_order_check = check_capital_overspend(actual_order_cost)
-            if rh_order_check["overspend"]:
-                logger.warning(
-                    f"Robinhood order blocked: actual cost ${actual_order_cost:.2f} "
-                    f"exceeds 5% limit. {rh_order_check['reason']}"
-                )
-                robinhood_order = {"executed": False, "reason": rh_order_check["reason"]}
-            else:
-                robinhood_order = execute_robinhood_order(
-                    signal.ticker, signal.direction, trade.quantity, signal.trigger_price,
-                    asset_type=signal.asset_type,
-                )
-                if robinhood_order.get("executed"):
-                    logger.info(f"Robinhood order executed: {robinhood_order}")
-
     reason_parts = [signal.reason]
     if signal.suppressed:
         reason_parts.append(f"Signal suppressed ({signal.status})")
-    if rh_check["overspend"]:
-        reason_parts.append(rh_check["reason"])
+    if overspend:
+        reason_parts.append(f"Position size ${signal.optimal_size_usd:.2f} exceeds 5% portfolio limit (${position_limit:.2f})")
 
     alert = AlertLog(
         ticker=signal.ticker,
@@ -224,8 +275,8 @@ async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)
         target_price=signal.target_price,
         optimal_size_usd=signal.optimal_size_usd,
         kelly_pct=signal.kelly_pct,
-        robinhood_buying_power=rh_check.get("buying_power"),
-        capital_overspend=rh_check["overspend"],
+        robinhood_buying_power=None,
+        capital_overspend=overspend,
         message=" | ".join(reason_parts),
     )
     db.add(alert)
@@ -241,8 +292,8 @@ async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)
         target_price=signal.target_price,
         optimal_size_usd=signal.optimal_size_usd,
         kelly_pct=signal.kelly_pct,
-        robinhood_buying_power=rh_check.get("buying_power"),
-        capital_overspend=rh_check["overspend"],
+        robinhood_buying_power=None,
+        capital_overspend=overspend,
         reason=" | ".join(reason_parts),
         paper_trade_executed=paper_trade_executed,
     )
@@ -303,84 +354,72 @@ async def list_alerts(limit: int = 50, db: AsyncSession = Depends(get_db)):
     return result.scalars().all()
 
 
-@app.get("/api/robinhood/balance")
-async def robinhood_balance():
-    bp = get_buying_power()
-    return {"buying_power": bp, "connected": bp is not None}
-
-
 @app.get("/api/settings/credentials")
-async def credential_status():
-    """Return which credential groups are configured (without exposing values)."""
-    return {
-        "robinhood": bool(settings.ROBINHOOD_USERNAME and settings.ROBINHOOD_PASSWORD),
-        "binance": False,  # Binance keys are in Service A, not here
-        "alpaca": False,   # Alpaca keys are in Service A, not here
-        "telegram": False, # Telegram keys are in notification gateway
-        "discord": False,  # Discord keys are in notification gateway
-    }
+async def credential_status(db: AsyncSession = Depends(get_db)):
+    return await credential_status_all(db)
 
 
 @app.get("/api/settings/credentials/all")
-async def credential_status_all():
-    """Aggregate credential status from all services."""
-    robinhood_ok = bool(settings.ROBINHOOD_USERNAME and settings.ROBINHOOD_PASSWORD)
-
-    # Check Service A (data-ingestion) credentials
-    binance_ok = False
-    alpaca_ok = False
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{settings.DATA_INGESTION_URL}/api/settings/credentials")
-            if resp.status_code == 200:
-                data = resp.json()
-                binance_ok = data.get("binance", False)
-                alpaca_ok = data.get("alpaca", False)
-    except Exception:
-        pass
-
-    # Check notification gateway credentials
-    telegram_ok = False
-    discord_ok = False
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{settings.NOTIFICATION_GATEWAY_URL}/api/settings/credentials")
-            if resp.status_code == 200:
-                data = resp.json()
-                telegram_ok = data.get("telegram", False)
-                discord_ok = data.get("discord", False)
-    except Exception:
-        pass
-
-    return {
-        "robinhood": robinhood_ok,
-        "binance": binance_ok,
-        "alpaca": alpaca_ok,
-        "telegram": telegram_ok,
-        "discord": discord_ok,
-    }
-
-
-class CredentialSaveRequest(BaseModel):
-    credentials: dict[str, str]
+async def credential_status_all(db: AsyncSession = Depends(get_db)):
+    """Aggregate masked credential status from DB and current env."""
+    result = await db.execute(select(CredentialSecret))
+    rows = result.scalars().all()
+    by_key = {r.key: r for r in rows}
+    env = _read_env(_find_env_path())
+    providers = {}
+    for provider, keys in PROVIDER_KEYS.items():
+        configured = []
+        verified = []
+        masked = {}
+        errors = {}
+        for key in keys:
+            row = by_key.get(key)
+            raw = _decode_secret(row.value) if row else env.get(key, "")
+            if raw:
+                configured.append(key)
+                masked[key] = _mask(raw)
+            if row and row.verified:
+                verified.append(key)
+            if row and row.last_error:
+                errors[key] = row.last_error
+        providers[provider] = {
+            "configured": len(configured) > 0,
+            "verified": bool(verified) or (len(configured) == len(keys) and provider != "robinhood"),
+            "configured_keys": configured,
+            "verified_keys": verified,
+            "masked": masked,
+            "errors": errors,
+        }
+    return providers
 
 
 def _find_env_path() -> Path:
-    """Find the .env file — check project root first, then service dir."""
+    """Find the host-mounted .env when available, otherwise project root."""
+    explicit = os.getenv("HOST_ENV_PATH")
     project_root = Path(__file__).resolve().parent.parent.parent.parent
-    candidates = [project_root / ".env", Path(".env")]
+    candidates = [Path(explicit)] if explicit else []
+    candidates.extend([project_root / ".env", Path("/workspace/.env"), Path(".env")])
+    logger.info(f"Looking for .env file. HOST_ENV_PATH={explicit}, candidates={candidates}")
     for p in candidates:
-        if p.exists():
+        exists = p.exists()
+        logger.info(f"Checking {p}: exists={exists}")
+        if exists:
+            logger.info(f"Found .env file at: {p}")
             return p
+    logger.warning(f"No .env file found, returning default: {project_root / '.env'}")
     return project_root / ".env"
 
 
 def _read_env(path: Path) -> dict[str, str]:
     """Read key=value pairs from a .env file."""
     env: dict[str, str] = {}
+    logger.info(f"Reading env from: {path}, exists={path.exists()}")
     if not path.exists():
+        logger.warning(f"Env file does not exist: {path}")
         return env
-    for line in path.read_text().splitlines():
+    content = path.read_text()
+    logger.info(f"Env file content length: {len(content)} chars")
+    for line in content.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -423,14 +462,10 @@ def _write_env(path: Path, env: dict[str, str]) -> None:
 
 
 @app.post("/api/settings/credentials/save")
-async def save_credentials(req: CredentialSaveRequest):
-    """Save credentials to the .env file (UI-based setup)."""
-    allowed_keys = {
+async def save_credentials(req: CredentialSaveRequest, db: AsyncSession = Depends(get_db)):
+    """Save non-Robinhood credentials to DB and .env without overwriting verified secrets by default."""
+    allowed_keys = {key for keys in PROVIDER_KEYS.values() for key in keys} - {
         "ROBINHOOD_USERNAME", "ROBINHOOD_PASSWORD", "ROBINHOOD_TOTP",
-        "BINANCE_API_KEY", "BINANCE_API_SECRET",
-        "ALPACA_API_KEY", "ALPACA_API_SECRET",
-        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
-        "DISCORD_WEBHOOK_URL",
     }
     filtered = {k: v for k, v in req.credentials.items() if k in allowed_keys and v}
     if not filtered:
@@ -438,26 +473,49 @@ async def save_credentials(req: CredentialSaveRequest):
 
     env_path = _find_env_path()
     existing = _read_env(env_path)
-    existing.update(filtered)
+    saved = []
+    skipped = []
+    for key, value in filtered.items():
+        changed = await _save_secret(db, key, value, verified=True, overwrite=req.overwrite)
+        if changed:
+            existing[key] = value
+            saved.append(key)
+        else:
+            skipped.append(key)
+    await db.commit()
     _write_env(env_path, existing)
 
-    logger.info(f"Credentials saved via UI: {list(filtered.keys())}")
+    logger.info(f"Credentials saved via UI: {saved}")
     return {
-        "saved": list(filtered.keys()),
-        "message": "Credentials saved. Restart services to apply changes.",
+        "saved": saved,
+        "skipped": skipped,
+        "message": "Credentials saved and synced to .env.",
     }
+
+
+@app.post("/api/settings/credentials/reveal")
+async def reveal_credential(req: CredentialRevealRequest, db: AsyncSession = Depends(get_db)):
+    if req.key not in {key for keys in PROVIDER_KEYS.values() for key in keys}:
+        raise HTTPException(400, "Credential key is not allowed")
+    row = await _get_secret(db, req.key)
+    if row:
+        return {"key": req.key, "value": _decode_secret(row.value)}
+    return {"key": req.key, "value": _read_env(_find_env_path()).get(req.key, "")}
+
+
 
 
 @app.get("/api/settings/onboarding")
 async def onboarding_status():
-    """Check if the user has completed onboarding (has at least one credential configured)."""
+    """Check if the user has completed onboarding (has market data API credentials)."""
     env_path = _find_env_path()
     env = _read_env(env_path)
-    has_any_cred = any(
+    # Only require market data APIs to skip onboarding
+    has_market_data_cred = any(
         env.get(k)
         for k in [
-            "ROBINHOOD_USERNAME", "BINANCE_API_KEY", "ALPACA_API_KEY",
-            "TELEGRAM_BOT_TOKEN", "DISCORD_WEBHOOK_URL",
+            "BINANCE_API_KEY",
+            "ALPACA_API_KEY",
         ]
     )
     has_any_asset = False
@@ -470,7 +528,100 @@ async def onboarding_status():
         pass
 
     return {
-        "completed": has_any_cred,
-        "has_credentials": has_any_cred,
+        "completed": has_market_data_cred,
+        "has_credentials": has_market_data_cred,
         "has_assets": has_any_asset,
     }
+
+
+# Environment settings that can be viewed and adjusted
+ADJUSTABLE_SETTINGS = {
+    "RISK_REWARD_RATIO": {"type": "float", "default": 3.0, "description": "Target risk/reward ratio for signals"},
+    "ATR_STOP_MULTIPLIER": {"type": "float", "default": 1.5, "description": "ATR multiplier for stop loss calculation"},
+    "ATR_VOLATILITY_THRESHOLD": {"type": "float", "default": 2.0, "description": "ATR threshold for volatility filtering"},
+    "TRAILING_STOP_PCT": {"type": "float", "default": 0.02, "description": "Trailing stop percentage (as decimal)"},
+    "INITIAL_BALANCE": {"type": "float", "default": 10000.0, "description": "Initial paper trading balance"},
+}
+
+@app.get("/api/settings/env")
+async def get_env_settings():
+    """Get current environment settings (non-sensitive, viewable/adjustable)."""
+    env_path = _find_env_path()
+    env = _read_env(env_path)
+    
+    settings = {}
+    for key, meta in ADJUSTABLE_SETTINGS.items():
+        value = env.get(key)
+        if value is not None:
+            try:
+                if meta["type"] == "float":
+                    value = float(value)
+                elif meta["type"] == "int":
+                    value = int(value)
+            except ValueError:
+                value = meta["default"]
+        else:
+            value = meta["default"]
+        settings[key] = {
+            "value": value,
+            "default": meta["default"],
+            "type": meta["type"],
+            "description": meta["description"],
+        }
+    return settings
+
+
+@app.get("/api/settings/env-debug")
+async def debug_env_path():
+    """Debug endpoint to check env file path detection."""
+    explicit = os.getenv("HOST_ENV_PATH")
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
+    candidates = [Path(explicit)] if explicit else []
+    candidates.extend([project_root / ".env", Path("/workspace/.env"), Path(".env")])
+    
+    results = []
+    for p in candidates:
+        results.append({
+            "path": str(p),
+            "exists": p.exists(),
+            "is_file": p.is_file() if p.exists() else False,
+        })
+    
+    chosen = _find_env_path()
+    env_data = _read_env(chosen)
+    
+    return {
+        "host_env_path": explicit,
+        "project_root": str(project_root),
+        "candidates": results,
+        "chosen_path": str(chosen),
+        "chosen_exists": chosen.exists(),
+        "env_keys": list(env_data.keys()),
+        "sample_values": {k: env_data.get(k) for k in list(env_data.keys())[:5]},
+    }
+
+
+@app.post("/api/settings/env")
+async def update_env_setting(payload: dict):
+    """Update a single environment setting."""
+    key = payload.get("key")
+    value = payload.get("value")
+    
+    if key not in ADJUSTABLE_SETTINGS:
+        raise HTTPException(400, f"Setting {key} is not adjustable")
+    
+    meta = ADJUSTABLE_SETTINGS[key]
+    try:
+        if meta["type"] == "float":
+            value = float(value)
+        elif meta["type"] == "int":
+            value = int(value)
+    except ValueError:
+        raise HTTPException(400, f"Invalid value type for {key}, expected {meta['type']}")
+    
+    env_path = _find_env_path()
+    env = _read_env(env_path)
+    env[key] = str(value)
+    _write_env(env_path, env)
+    
+    return {"key": key, "value": value, "message": f"{key} updated successfully"}

@@ -74,3 +74,15 @@ class AlertLog(Base):
     capital_overspend = Column(Boolean, default=False)
     message = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+
+
+class CredentialSecret(Base):
+    __tablename__ = "credential_secrets"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    provider = Column(String(50), nullable=False, index=True)
+    key = Column(String(100), nullable=False, unique=True, index=True)
+    value = Column(Text, nullable=False)
+    verified = Column(Boolean, default=False)
+    last_error = Column(Text, nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

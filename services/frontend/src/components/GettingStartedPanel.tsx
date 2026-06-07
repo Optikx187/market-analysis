@@ -1,24 +1,19 @@
 import { useState } from "react";
-import { saveCredentials, addAsset } from "@/lib/api";
+import { saveCredentials, addAsset, lookupSymbol } from "@/lib/api";
 
 interface Props {
   onComplete: () => void;
 }
 
-type Step = "welcome" | "robinhood" | "market-data" | "notifications" | "watchlist" | "done";
+type Step = "welcome" | "market-data" | "notifications" | "watchlist" | "done";
 
-const STEPS: Step[] = ["welcome", "robinhood", "market-data", "notifications", "watchlist", "done"];
+const STEPS: Step[] = ["welcome", "market-data", "notifications", "watchlist", "done"];
 
 export default function GettingStartedPanel({ onComplete }: Props) {
   const [step, setStep] = useState<Step>("welcome");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-
-  // Robinhood
-  const [rhUser, setRhUser] = useState("");
-  const [rhPass, setRhPass] = useState("");
-  const [rhTotp, setRhTotp] = useState("");
 
   // Market data
   const [binKey, setBinKey] = useState("");
@@ -73,6 +68,20 @@ export default function GettingStartedPanel({ onComplete }: Props) {
 
   const handleAddTicker = async () => {
     if (!ticker || !assetName) return;
+    setError("");
+    
+    // Validate ticker exists via API before adding
+    try {
+      const lookup = await lookupSymbol(ticker, assetType);
+      if (!lookup.recognized) {
+        setError(`Ticker "${ticker}" not found on ${assetType === "crypto" ? "Binance" : "market data provider"}. Please check the symbol and try again.`);
+        return;
+      }
+    } catch (e: any) {
+      setError(`Unable to validate ticker: ${e?.response?.data?.detail || "API unavailable. Please check your market data API credentials and try again."}`);
+      return;
+    }
+    
     try {
       await addAsset(ticker, assetName, assetType);
       setAddedTickers([...addedTickers, ticker.toUpperCase()]);
@@ -116,19 +125,19 @@ export default function GettingStartedPanel({ onComplete }: Props) {
               <div className="text-4xl">📊</div>
               <h1 className="text-2xl font-bold">Welcome to Market Analysis</h1>
               <p className="text-[var(--muted-foreground)] max-w-md mx-auto">
-                This wizard will help you set up your trading platform in a few minutes.
-                We&apos;ll connect your brokerage, market data, and notification services.
+                This wizard will help you set up your market analysis platform in a few minutes.
+                We&apos;ll connect market data sources and notification services for tracking stocks and crypto.
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-6 text-left">
-                <InfoCard
-                  icon="🏦"
-                  title="Brokerage"
-                  desc="Connect Robinhood for live trading"
-                />
                 <InfoCard
                   icon="📈"
                   title="Market Data"
                   desc="Binance (crypto) & Alpaca (stocks)"
+                />
+                <InfoCard
+                  icon="�"
+                  title="Watchlist"
+                  desc="Track your favorite tickers"
                 />
                 <InfoCard
                   icon="🔔"
@@ -139,28 +148,6 @@ export default function GettingStartedPanel({ onComplete }: Props) {
               <p className="text-xs text-[var(--muted-foreground)]">
                 You can skip any step and set it up later from Settings.
               </p>
-            </div>
-          )}
-
-          {/* Step: Robinhood */}
-          {step === "robinhood" && (
-            <div className="space-y-4">
-              <div className="flex items-center gap-3">
-                <span className="text-2xl">🏦</span>
-                <div>
-                  <h2 className="text-lg font-semibold">Robinhood — Trade Execution</h2>
-                  <p className="text-xs text-[var(--muted-foreground)]">
-                    All trades execute through Robinhood. Your credentials are stored locally and never sent to external servers.
-                  </p>
-                </div>
-              </div>
-              <CredField label="Username" value={rhUser} onChange={setRhUser} placeholder="your@email.com" />
-              <CredField label="Password" value={rhPass} onChange={setRhPass} placeholder="••••••••" type="password" />
-              <CredField label="TOTP Secret (optional)" value={rhTotp} onChange={setRhTotp} placeholder="2FA authenticator secret" />
-              <HelpBox>
-                <p><strong>Where to find these:</strong> Use your regular Robinhood login email and password.
-                For the TOTP secret, check your authenticator app settings or Robinhood security page.</p>
-              </HelpBox>
             </div>
           )}
 
@@ -325,17 +312,6 @@ export default function GettingStartedPanel({ onComplete }: Props) {
                 className="rounded bg-[var(--primary)] text-[var(--primary-foreground)] px-6 py-2 text-sm font-medium">
                 Get Started →
               </button>
-            )}
-            {step === "robinhood" && (
-              <div className="flex gap-2">
-                <button onClick={() => setStep("market-data")} className="text-sm text-[var(--muted-foreground)]">Skip</button>
-                <button onClick={() => handleSaveCreds({
-                  ROBINHOOD_USERNAME: rhUser, ROBINHOOD_PASSWORD: rhPass, ROBINHOOD_TOTP: rhTotp,
-                }, "market-data")} disabled={saving}
-                  className="rounded bg-[var(--primary)] text-[var(--primary-foreground)] px-4 py-2 text-sm font-medium disabled:opacity-50">
-                  {saving ? "Saving..." : "Save & Continue →"}
-                </button>
-              </div>
             )}
             {step === "market-data" && (
               <div className="flex gap-2">
