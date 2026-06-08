@@ -48,11 +48,7 @@ export default function AlertsPanel() {
                 {a.optimal_size_usd != null && ` | Size: $${a.optimal_size_usd.toFixed(2)}`}
                 {a.kelly_pct != null && ` | Kelly: ${a.kelly_pct}%`}
               </div>
-              {a.robinhood_buying_power != null && (
-                <div className="text-xs mt-0.5">
-                  Robinhood Buying Power: ${a.robinhood_buying_power.toLocaleString()}
-                </div>
-              )}
+
               {a.capital_overspend && (
                 <div className="text-xs text-red-400 font-bold mt-0.5">CAPITAL OVERSPEND WARNING</div>
               )}

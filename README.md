@@ -15,7 +15,7 @@ A highly performant, decoupled microservices platform for algorithmic market ana
 └──────┬───────┴───────┬───────┴───────┬───────┴───────────────┘
        │               │               │
        ▼               ▼               ▼
-   Binance/Yahoo   Half-Kelly     SQLite + Robinhood
+   Binance/Yahoo   Half-Kelly     SQLite + Portfolio
    WebSocket/REST  ATR Scaling    Capital Guardrails
 ```
 
@@ -37,20 +37,21 @@ A highly performant, decoupled microservices platform for algorithmic market ana
 - **Port**: 8002
 - SQLite + SQLAlchemy ORM for position tracking
 - Virtual paper trading ($10K starting capital, configurable via `INITIAL_BALANCE`)
-- **Robinhood Guardrail**: If trade > 5% of liquid Robinhood balance → CAPITAL OVERSPEND WARNING → cancel signal
+- **Capital Guardrail**: If trade > 5% of portfolio balance → CAPITAL OVERSPEND WARNING → cancel signal
+- **Balance-Aware Recommendations**: Trade sizing accounts for current balance and configurable loss tolerance
 
 ### Service D — Frontend & Notifications (`services/frontend/` + `services/notification-gateway/`)
 - **Frontend Port**: 3000 (nginx reverse proxy)
 - **Notification Port**: 8003
 - React / Vite / Tailwind CSS dashboard
-- Real-time charts, dynamic watchlist CRUD, floating PnL, Robinhood cash status
+- Real-time charts, dynamic watchlist CRUD, floating PnL, portfolio balance tracking
 - Dual-broadcast Discord + Telegram notifications
 
 ## Quick Start
 
 ### Prerequisites
 - Docker & Docker Compose installed
-- (Optional) API keys for Binance, Alpaca, Telegram, Discord, Robinhood
+- (Optional) API keys for Binance, Alpaca, Telegram, Discord
 
 ### 1. Configure Environment
 
@@ -60,7 +61,7 @@ Run the interactive setup script to configure all API keys and credentials:
 python3 scripts/setup.py
 ```
 
-This will prompt for Binance, Alpaca, Robinhood, Telegram, and Discord credentials
+This will prompt for Binance, Alpaca, Telegram, and Discord credentials
 and securely store them in a local `.env` file (gitignored, never committed).
 
 Alternatively, copy and edit manually:
@@ -120,12 +121,10 @@ docker-compose run --rm quant-engine pytest tests/ -v
 | `TELEGRAM_BOT_TOKEN` | Gateway | Telegram bot token |
 | `TELEGRAM_CHAT_ID` | Gateway | Telegram chat ID |
 | `DISCORD_WEBHOOK_URL` | Gateway | Discord webhook URL |
-| `ROBINHOOD_USERNAME` | C | Robinhood login username |
-| `ROBINHOOD_PASSWORD` | C | Robinhood login password |
-| `ROBINHOOD_TOTP` | C | Robinhood 2FA TOTP secret |
 | `RISK_REWARD_RATIO` | B | Min risk:reward (default: 3.0) |
 | `ATR_VOLATILITY_THRESHOLD` | B | ATR suppression multiplier (default: 2.0) |
 | `INITIAL_BALANCE` | C | Paper trading starting capital |
+| `LOSS_TOLERANCE_PCT` | C | Max loss per trade as % of balance (default: 0.02) |
 
 ## Risk Model — Position Sizing
 

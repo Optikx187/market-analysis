@@ -5,6 +5,7 @@ import {
   saveCredentials,
   fetchEnvSettings,
   updateEnvSetting,
+  testNotifications,
   type CredentialStatus,
   type EnvSetting,
 } from "@/lib/api";
@@ -201,6 +202,36 @@ export default function SettingsPanel() {
           })}
         </div>
       )}
+
+      {/* Test Notifications Section */}
+      <div className="mt-6 pt-4 border-t border-[var(--border)]">
+        <h3 className="text-sm font-medium mb-2">Test Notifications</h3>
+        <p className="text-xs text-[var(--muted-foreground)] mb-3">
+          Send a test message to verify your Discord and Telegram channels are working.
+        </p>
+        <button
+          onClick={async () => {
+            setMessage(null);
+            try {
+              const res = await testNotifications();
+              if (res.success) {
+                setMessage({ type: "success", text: res.message });
+              } else {
+                const details: string[] = [];
+                if (res.results.telegram.configured && !res.results.telegram.sent) details.push("Telegram failed");
+                if (res.results.discord.configured && !res.results.discord.sent) details.push("Discord failed");
+                if (!res.results.telegram.configured && !res.results.discord.configured) details.push("No channels configured");
+                setMessage({ type: "error", text: `${res.message} ${details.join(", ")}` });
+              }
+            } catch {
+              setMessage({ type: "error", text: "Failed to send test notification. Check that the notification service is running." });
+            }
+          }}
+          className="rounded bg-[var(--secondary)] px-4 py-2 text-sm hover:bg-[var(--accent)] transition-colors"
+        >
+          Send Test Notification
+        </button>
+      </div>
 
       {/* Environment Settings Section */}
       <div className="mt-6 pt-4 border-t border-[var(--border)]">

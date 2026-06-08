@@ -207,8 +207,8 @@ function RiskSection() {
           desc="If an asset falls below its 200-day trend line or shows bearish momentum, it's marked as 'tanking'. No buys are allowed, and open positions are flagged for immediate exit."
         />
         <RiskCard
-          title="Robinhood Capital Guard"
-          desc="If a suggested trade exceeds 5% of your Robinhood buying power, it's automatically cancelled with a CAPITAL OVERSPEND warning — preventing oversized bets."
+          title="Portfolio Capital Guard"
+          desc="If a suggested trade exceeds 5% of your portfolio balance, it's automatically cancelled with a CAPITAL OVERSPEND warning — preventing oversized bets."
         />
       </div>
       <Tip>
@@ -224,11 +224,6 @@ function SettingsSection() {
     <DocSection title="Configuring Services">
       <p>The platform connects to several external services. Here&apos;s what each one does:</p>
       <div className="space-y-3">
-        <ServiceDoc
-          name="Robinhood"
-          purpose="Executes real trades and checks your buying power"
-          setup="Enter your login email, password, and optional 2FA secret in Settings or the Getting Started wizard"
-        />
         <ServiceDoc
           name="Binance"
           purpose="Provides real-time crypto prices and historical candle data"
@@ -251,8 +246,8 @@ function SettingsSection() {
         />
       </div>
       <Tip>
-        You don&apos;t need all services configured to use the platform. Robinhood is needed for
-        live trading; others can be added gradually.
+        You don&apos;t need all services configured to use the platform. Market data APIs
+        enable analysis; notification services are optional.
       </Tip>
     </DocSection>
   );
@@ -275,7 +270,7 @@ function GlossarySection() {
         <Term word="Profit Factor" def="Total money won divided by total money lost. Above 1.0 means you're making more than you're losing overall." />
         <Term word="Tanking" def="When an asset is in a severe downtrend. The system detects this automatically and stops all buying." />
         <Term word="Paper Trading" def="Simulated trading with virtual money. Lets you test strategies without risking real capital." />
-        <Term word="Buying Power" def="The amount of cash available in your Robinhood account for new trades." />
+        <Term word="Account Balance" def="The amount of capital available for new trades, configurable in Settings." />
       </div>
     </DocSection>
   );

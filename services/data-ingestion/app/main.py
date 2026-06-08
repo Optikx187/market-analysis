@@ -17,7 +17,7 @@ from app.config import settings
 from app.database import get_db, init_db, async_session
 from app.models import Asset, AssetType, Candle
 from app.ingestion import refresh_asset_data, load_candles
-from app.ingestion import get_binance_symbol
+from app.ingestion import get_binance_symbol, get_crypto_name
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -168,13 +168,14 @@ async def lookup_symbol(ticker: str, asset_type: str = "stock"):
     ticker = ticker.upper()
     if asset_type.lower() == "crypto":
         symbol = get_binance_symbol(ticker)
+        crypto_name = get_crypto_name(ticker)
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": symbol})
                 resp.raise_for_status()
-            return SymbolLookupResponse(ticker=ticker, name=ticker, asset_type="crypto", recognized=True)
+            return SymbolLookupResponse(ticker=ticker, name=crypto_name, asset_type="crypto", recognized=True)
         except Exception:
-            return SymbolLookupResponse(ticker=ticker, name=ticker, asset_type="crypto", recognized=False)
+            return SymbolLookupResponse(ticker=ticker, name=crypto_name, asset_type="crypto", recognized=False)
     info = {}
     try:
         info = yf.Ticker(ticker).fast_info or {}

@@ -18,6 +18,35 @@ logger = logging.getLogger(__name__)
 BINANCE_REST_URL = "https://api.binance.com/api/v3"
 CRYPTO_BINANCE_MAP = {"BTC": "BTCUSDT", "ETH": "ETHUSDT"}
 
+CRYPTO_NAMES = {
+    "BTC": "Bitcoin",
+    "ETH": "Ethereum",
+    "BNB": "Binance Coin",
+    "SOL": "Solana",
+    "XRP": "Ripple",
+    "ADA": "Cardano",
+    "DOGE": "Dogecoin",
+    "DOT": "Polkadot",
+    "AVAX": "Avalanche",
+    "MATIC": "Polygon",
+    "LINK": "Chainlink",
+    "UNI": "Uniswap",
+    "ATOM": "Cosmos",
+    "LTC": "Litecoin",
+    "FIL": "Filecoin",
+    "NEAR": "NEAR Protocol",
+    "APT": "Aptos",
+    "ARB": "Arbitrum",
+    "OP": "Optimism",
+    "SHIB": "Shiba Inu",
+    "PEPE": "Pepe",
+}
+
+
+def get_crypto_name(ticker: str) -> str:
+    base = ticker.upper().replace("-USD", "").replace("USD", "")
+    return CRYPTO_NAMES.get(base, base)
+
 
 def get_binance_symbol(ticker: str) -> str:
     base = ticker.upper().replace("-USD", "").replace("USD", "")

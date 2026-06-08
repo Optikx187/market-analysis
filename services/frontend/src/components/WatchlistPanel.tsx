@@ -72,14 +72,15 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
   }, [assets, pollingEnabled, pollInterval]);
 
   useEffect(() => {
-    if (ticker.length < 2) return;
+    if (ticker.length < 2) { setName(""); return; }
     const handle = setTimeout(() => {
       lookupSymbol(ticker, assetType).then((res) => {
-        if (res.recognized && !name) setName(res.name);
-      }).catch(() => {});
+        if (res.recognized) setName(res.name);
+        else setName("");
+      }).catch(() => { setName(""); });
     }, 500);
     return () => clearTimeout(handle);
-  }, [ticker, assetType, name]);
+  }, [ticker, assetType]);
 
   const handleAdd = async () => {
     if (!ticker || !name) return;
