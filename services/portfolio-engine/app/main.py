@@ -640,14 +640,24 @@ async def update_portfolio_balance(req: BalanceUpdateRequest, db: AsyncSession =
         raise HTTPException(400, "Balance cannot be negative")
     portfolio = await get_or_create_portfolio(db)
     old_balance = portfolio.balance
-    portfolio.balance = req.balance
+
+    # Account for capital locked in open paper trades
+    open_result = await db.execute(select(Trade).where(Trade.status == TradeStatus.OPEN))
+    open_trades = open_result.scalars().all()
+    locked_capital = sum(t.quantity * t.entry_price for t in open_trades)
+
     portfolio.equity = req.balance
+    portfolio.balance = req.balance - locked_capital
+    if portfolio.balance < 0:
+        portfolio.balance = 0.0
     if req.balance > portfolio.peak_equity:
         portfolio.peak_equity = req.balance
     await db.commit()
     return {
         "previous_balance": round(old_balance, 2),
-        "new_balance": round(req.balance, 2),
+        "new_balance": round(portfolio.balance, 2),
+        "equity": round(req.balance, 2),
+        "locked_in_positions": round(locked_capital, 2),
         "message": f"Balance updated from ${old_balance:,.2f} to ${req.balance:,.2f}",
     }
 
