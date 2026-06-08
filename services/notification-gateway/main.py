@@ -43,16 +43,14 @@ class NotificationPayload(BaseModel):
     stop_loss: float
     optimal_size_usd: float
     kelly_pct: float
-    robinhood_buying_power: Optional[float] = None
     paper_trade_executed: bool = False
 
 
+class TestNotificationPayload(BaseModel):
+    message: str = "This is a test notification from Market Analysis platform."
+
+
 def format_alert(p: NotificationPayload) -> str:
-    cash_line = (
-        f"[Robinhood Balance Check] Buying Power Available: ${p.robinhood_buying_power:,.2f}"
-        if p.robinhood_buying_power is not None
-        else "[Robinhood Balance Check] Not connected"
-    )
     paper_line = (
         "[Paper Wallet] Virtual position logged."
         if p.paper_trade_executed
@@ -66,7 +64,6 @@ def format_alert(p: NotificationPayload) -> str:
         f"Stop-Loss: ${p.stop_loss:,.2f}\n"
         f"Optimal Sizing: ${p.optimal_size_usd:,.2f} ({p.kelly_pct}% allocation)\n"
         f"---\n"
-        f"{cash_line}\n"
         f"{paper_line}"
     )
 
@@ -129,4 +126,31 @@ async def notify(payload: NotificationPayload):
         "message_preview": message[:200],
         "telegram_sent": tg_ok,
         "discord_sent": dc_ok,
+    }
+
+
+@app.post("/api/notify/test")
+async def test_notification(payload: TestNotificationPayload = TestNotificationPayload()):
+    """Send a test notification to verify Discord and Telegram are configured correctly."""
+    message = f"\U0001f527 [TEST] {payload.message}"
+    tg_ok = await send_telegram(message)
+    dc_ok = await send_discord(message)
+    results = {
+        "telegram": {
+            "configured": bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID),
+            "sent": tg_ok,
+        },
+        "discord": {
+            "configured": bool(settings.DISCORD_WEBHOOK_URL),
+            "sent": dc_ok,
+        },
+    }
+    any_configured = results["telegram"]["configured"] or results["discord"]["configured"]
+    all_ok = any_configured and \
+             (results["telegram"]["sent"] or not results["telegram"]["configured"]) and \
+             (results["discord"]["sent"] or not results["discord"]["configured"])
+    return {
+        "success": all_ok,
+        "results": results,
+        "message": "Test notifications sent successfully." if all_ok else "One or more notification channels failed.",
     }

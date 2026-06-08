@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
-import { fetchPortfolio, type Portfolio } from "@/lib/api";
+import { fetchPortfolio, updateBalance, type Portfolio } from "@/lib/api";
 
 export default function PortfolioPanel() {
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
   const [equityHistory, setEquityHistory] = useState<number[]>([]);
+  const [editingBalance, setEditingBalance] = useState(false);
+  const [newBalance, setNewBalance] = useState("");
+  const [balanceMsg, setBalanceMsg] = useState("");
 
   useEffect(() => {
     const loadPortfolio = () => {
@@ -42,11 +45,63 @@ export default function PortfolioPanel() {
   return (
     <div className="rounded-lg border bg-[var(--card)] p-4">
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-lg font-semibold">Paper Trading Simulation</h2>
+        <h2 className="text-lg font-semibold">Portfolio & Trading</h2>
         <div className="flex items-center gap-2">
           <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-          <span className="text-xs text-green-400">Simulation Active</span>
+          <span className="text-xs text-green-400">Active</span>
         </div>
+      </div>
+
+      {/* Balance Update */}
+      <div className="mb-4 p-3 rounded border border-[var(--border)] bg-[var(--background)]">
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-xs text-[var(--muted-foreground)]">Account Balance</span>
+            <div className="text-lg font-semibold">${portfolio.balance.toLocaleString()}</div>
+          </div>
+          {!editingBalance ? (
+            <button
+              onClick={() => { setEditingBalance(true); setNewBalance(portfolio.balance.toString()); setBalanceMsg(""); }}
+              className="rounded bg-[var(--secondary)] px-3 py-1.5 text-xs hover:bg-[var(--accent)]"
+            >
+              Update Balance
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <span className="text-xs">$</span>
+              <input
+                type="number"
+                value={newBalance}
+                onChange={(e) => setNewBalance(e.target.value)}
+                className="w-28 rounded border bg-[var(--input)] px-2 py-1 text-sm"
+                min="0"
+                step="100"
+              />
+              <button
+                onClick={async () => {
+                  const val = parseFloat(newBalance);
+                  if (isNaN(val) || val < 0) return;
+                  try {
+                    const res = await updateBalance(val);
+                    setBalanceMsg(res.message);
+                    setEditingBalance(false);
+                    fetchPortfolio().then(setPortfolio);
+                  } catch {
+                    setBalanceMsg("Failed to update balance.");
+                  }
+                }}
+                className="rounded bg-green-600 text-white px-2 py-1 text-xs"
+              >
+                Save
+              </button>
+              <button onClick={() => setEditingBalance(false)} className="text-xs text-[var(--muted-foreground)]">Cancel</button>
+            </div>
+          )}
+        </div>
+        {balanceMsg && <div className="text-xs text-green-400 mt-1">{balanceMsg}</div>}
+        <p className="text-xs text-[var(--muted-foreground)] mt-1">
+          Set this to your actual trading capital. Recommendations will be sized based on this balance.
+        </p>
       </div>
 
       {/* Equity Curve Visualization */}

@@ -15,15 +15,6 @@ ENV_EXAMPLE = Path(__file__).resolve().parent.parent / ".env.example"
 
 CREDENTIAL_GROUPS = [
     {
-        "name": "Robinhood (Trade Execution)",
-        "description": "All trades are executed through Robinhood. Required for live trading.",
-        "keys": [
-            ("ROBINHOOD_USERNAME", "Robinhood username", False),
-            ("ROBINHOOD_PASSWORD", "Robinhood password", True),
-            ("ROBINHOOD_TOTP", "Robinhood 2FA/TOTP secret (from authenticator app)", True),
-        ],
-    },
-    {
         "name": "Binance (Crypto Market Data)",
         "description": "Used for real-time crypto price streaming (BTC, ETH, etc).",
         "keys": [
@@ -62,7 +53,7 @@ DEFAULTS = {
     "ATR_VOLATILITY_THRESHOLD": "2.0",
     "TRAILING_STOP_PCT": "0.02",
     "INITIAL_BALANCE": "10000.0",
-    "ROBINHOOD_CAPITAL_LIMIT_PCT": "0.05",
+    "LOSS_TOLERANCE_PCT": "0.02",
 }
 
 

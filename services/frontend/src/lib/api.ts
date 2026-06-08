@@ -91,6 +91,7 @@ export interface Portfolio {
   max_drawdown: number;
   profit_factor: number;
   peak_equity: number;
+  open_positions?: number;
   equity_curve: Array<{ timestamp: string; equity: number }>;
 }
 
@@ -104,7 +105,6 @@ export interface AlertLog {
   target_price: number | null;
   optimal_size_usd: number | null;
   kelly_pct: number | null;
-  robinhood_buying_power: number | null;
   capital_overspend: boolean;
   message: string | null;
   created_at: string | null;
@@ -120,7 +120,6 @@ export interface SignalDecision {
   target_price: number;
   optimal_size_usd: number;
   kelly_pct: number;
-  robinhood_buying_power: number | null;
   capital_overspend: boolean;
   reason: string;
   paper_trade_executed: boolean;
@@ -197,5 +196,39 @@ export const fetchEnvSettings = () =>
 
 export const updateEnvSetting = (key: string, value: number) =>
   api.post<{ key: string; value: number; message: string }>("/settings/env", { key, value }).then((r) => r.data);
+
+// Portfolio balance management
+export const updateBalance = (balance: number) =>
+  api.post<{ previous_balance: number; new_balance: number; message: string }>("/portfolio/balance", { balance }).then((r) => r.data);
+
+export interface TradeRecommendation {
+  ticker: string;
+  account_balance: number;
+  loss_tolerance_pct: number;
+  max_loss_amount: number;
+  current_price: number;
+  suggested_stop_loss: number;
+  suggested_target: number;
+  suggested_quantity: number;
+  suggested_position_usd: number;
+  position_pct_of_balance: number;
+  risk_reward_ratio: number;
+}
+
+export const fetchTradeRecommendation = (ticker: string, currentPrice: number) =>
+  api.get<TradeRecommendation>("/portfolio/recommendation", { params: { ticker, current_price: currentPrice } }).then((r) => r.data);
+
+// Notification testing
+export interface TestNotificationResult {
+  success: boolean;
+  results: {
+    telegram: { configured: boolean; sent: boolean };
+    discord: { configured: boolean; sent: boolean };
+  };
+  message: string;
+}
+
+export const testNotifications = (message?: string) =>
+  api.post<TestNotificationResult>("/notify/test", message ? { message } : {}).then((r) => r.data);
 
 export default api;

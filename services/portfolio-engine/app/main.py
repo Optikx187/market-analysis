@@ -54,6 +54,7 @@ class PortfolioResponse(BaseModel):
     max_drawdown: float
     profit_factor: float
     peak_equity: float
+    open_positions: int
     equity_curve: list[dict]
 
 
@@ -85,7 +86,6 @@ class SignalDecision(BaseModel):
     target_price: float
     optimal_size_usd: float
     kelly_pct: float
-    robinhood_buying_power: Optional[float]
     capital_overspend: bool
     reason: str
     paper_trade_executed: bool
@@ -101,7 +101,6 @@ class AlertLogResponse(BaseModel):
     target_price: Optional[float]
     optimal_size_usd: Optional[float]
     kelly_pct: Optional[float]
-    robinhood_buying_power: Optional[float]
     capital_overspend: bool
     message: Optional[str]
     created_at: Optional[datetime.datetime]
@@ -125,6 +124,8 @@ PROVIDER_KEYS = {
     "telegram": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
     "discord": ["DISCORD_WEBHOOK_URL"],
 }
+
+LOSS_TOLERANCE_KEY = "LOSS_TOLERANCE_PCT"
 
 
 def _provider_for_key(key: str) -> str:
@@ -244,7 +245,7 @@ async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)
     # Simple capital guardrail: position size should not exceed 5% of portfolio value
     portfolio = await db.execute(select(Portfolio).limit(1))
     portfolio_row = portfolio.scalar_one_or_none()
-    portfolio_value = portfolio_row.total_equity if portfolio_row else settings.INITIAL_BALANCE
+    portfolio_value = portfolio_row.equity if portfolio_row else settings.INITIAL_BALANCE
     
     position_limit = portfolio_value * 0.05  # 5% position limit
     overspend = signal.optimal_size_usd and signal.optimal_size_usd > position_limit
@@ -275,7 +276,6 @@ async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)
         target_price=signal.target_price,
         optimal_size_usd=signal.optimal_size_usd,
         kelly_pct=signal.kelly_pct,
-        robinhood_buying_power=None,
         capital_overspend=overspend,
         message=" | ".join(reason_parts),
     )
@@ -292,7 +292,6 @@ async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)
         target_price=signal.target_price,
         optimal_size_usd=signal.optimal_size_usd,
         kelly_pct=signal.kelly_pct,
-        robinhood_buying_power=None,
         capital_overspend=overspend,
         reason=" | ".join(reason_parts),
         paper_trade_executed=paper_trade_executed,
@@ -304,6 +303,9 @@ async def get_portfolio(db: AsyncSession = Depends(get_db)):
     portfolio = await get_or_create_portfolio(db)
     total_trades = portfolio.win_count + portfolio.loss_count
     win_rate = (portfolio.win_count / total_trades * 100) if total_trades > 0 else 0
+
+    open_result = await db.execute(select(Trade).where(Trade.status == TradeStatus.OPEN))
+    open_positions = len(open_result.scalars().all())
 
     result = await db.execute(select(Trade).where(Trade.status == TradeStatus.CLOSED))
     closed = result.scalars().all()
@@ -330,6 +332,7 @@ async def get_portfolio(db: AsyncSession = Depends(get_db)):
         max_drawdown=round(portfolio.max_drawdown, 2),
         profit_factor=round(profit_factor, 2),
         peak_equity=round(portfolio.peak_equity, 2),
+        open_positions=open_positions,
         equity_curve=equity_curve,
     )
 
@@ -384,7 +387,7 @@ async def credential_status_all(db: AsyncSession = Depends(get_db)):
                 errors[key] = row.last_error
         providers[provider] = {
             "configured": len(configured) > 0,
-            "verified": bool(verified) or (len(configured) == len(keys) and provider != "robinhood"),
+            "verified": bool(verified) or (len(configured) == len(keys)),
             "configured_keys": configured,
             "verified_keys": verified,
             "masked": masked,
@@ -463,10 +466,8 @@ def _write_env(path: Path, env: dict[str, str]) -> None:
 
 @app.post("/api/settings/credentials/save")
 async def save_credentials(req: CredentialSaveRequest, db: AsyncSession = Depends(get_db)):
-    """Save non-Robinhood credentials to DB and .env without overwriting verified secrets by default."""
-    allowed_keys = {key for keys in PROVIDER_KEYS.values() for key in keys} - {
-        "ROBINHOOD_USERNAME", "ROBINHOOD_PASSWORD", "ROBINHOOD_TOTP",
-    }
+    """Save credentials to DB and .env without overwriting verified secrets by default."""
+    allowed_keys = {key for keys in PROVIDER_KEYS.values() for key in keys}
     filtered = {k: v for k, v in req.credentials.items() if k in allowed_keys and v}
     if not filtered:
         raise HTTPException(400, "No valid credentials provided")
@@ -541,6 +542,7 @@ ADJUSTABLE_SETTINGS = {
     "ATR_VOLATILITY_THRESHOLD": {"type": "float", "default": 2.0, "description": "ATR threshold for volatility filtering"},
     "TRAILING_STOP_PCT": {"type": "float", "default": 0.02, "description": "Trailing stop percentage (as decimal)"},
     "INITIAL_BALANCE": {"type": "float", "default": 10000.0, "description": "Initial paper trading balance"},
+    "LOSS_TOLERANCE_PCT": {"type": "float", "default": 0.02, "description": "Max loss tolerance per trade as % of balance (e.g. 0.02 = 2%)"},
 }
 
 @app.get("/api/settings/env")
@@ -625,3 +627,74 @@ async def update_env_setting(payload: dict):
     _write_env(env_path, env)
     
     return {"key": key, "value": value, "message": f"{key} updated successfully"}
+
+
+class BalanceUpdateRequest(BaseModel):
+    balance: float
+
+
+@app.post("/api/portfolio/balance")
+async def update_portfolio_balance(req: BalanceUpdateRequest, db: AsyncSession = Depends(get_db)):
+    """Update the current portfolio balance. Use this to sync real account balance."""
+    if req.balance < 0:
+        raise HTTPException(400, "Balance cannot be negative")
+    portfolio = await get_or_create_portfolio(db)
+    old_balance = portfolio.balance
+
+    # Account for capital locked in open paper trades
+    open_result = await db.execute(select(Trade).where(Trade.status == TradeStatus.OPEN))
+    open_trades = open_result.scalars().all()
+    locked_capital = sum(t.quantity * t.entry_price for t in open_trades)
+
+    portfolio.equity = req.balance
+    portfolio.balance = req.balance - locked_capital
+    if portfolio.balance < 0:
+        portfolio.balance = 0.0
+    if req.balance > portfolio.peak_equity:
+        portfolio.peak_equity = req.balance
+    await db.commit()
+    return {
+        "previous_balance": round(old_balance, 2),
+        "new_balance": round(portfolio.balance, 2),
+        "equity": round(req.balance, 2),
+        "locked_in_positions": round(locked_capital, 2),
+        "message": f"Balance updated from ${old_balance:,.2f} to ${req.balance:,.2f}",
+    }
+
+
+@app.get("/api/portfolio/recommendation")
+async def trade_recommendation(
+    ticker: str,
+    current_price: float,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get a balance-aware trade recommendation with suggested $ amounts."""
+    portfolio = await get_or_create_portfolio(db)
+    env_path = _find_env_path()
+    env = _read_env(env_path)
+    loss_tolerance = float(env.get("LOSS_TOLERANCE_PCT", "0.02"))
+    risk_reward = float(env.get("RISK_REWARD_RATIO", "3.0"))
+    atr_multiplier = float(env.get("ATR_STOP_MULTIPLIER", "1.5"))
+
+    max_loss_amount = portfolio.balance * loss_tolerance
+    stop_distance_pct = loss_tolerance * atr_multiplier
+    suggested_stop = current_price * (1 - stop_distance_pct)
+    suggested_target = current_price * (1 + stop_distance_pct * risk_reward)
+    risk_per_unit = current_price - suggested_stop
+    suggested_quantity = max_loss_amount / risk_per_unit if risk_per_unit > 0 else 0
+    suggested_position_usd = suggested_quantity * current_price
+    position_pct = (suggested_position_usd / portfolio.balance * 100) if portfolio.balance > 0 else 0
+
+    return {
+        "ticker": ticker,
+        "account_balance": round(portfolio.balance, 2),
+        "loss_tolerance_pct": loss_tolerance,
+        "max_loss_amount": round(max_loss_amount, 2),
+        "current_price": round(current_price, 2),
+        "suggested_stop_loss": round(suggested_stop, 2),
+        "suggested_target": round(suggested_target, 2),
+        "suggested_quantity": round(suggested_quantity, 4),
+        "suggested_position_usd": round(suggested_position_usd, 2),
+        "position_pct_of_balance": round(position_pct, 2),
+        "risk_reward_ratio": risk_reward,
+    }
