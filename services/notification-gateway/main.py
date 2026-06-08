@@ -145,7 +145,9 @@ async def test_notification(payload: TestNotificationPayload = TestNotificationP
             "sent": dc_ok,
         },
     }
-    all_ok = (results["telegram"]["sent"] or not results["telegram"]["configured"]) and \
+    any_configured = results["telegram"]["configured"] or results["discord"]["configured"]
+    all_ok = any_configured and \
+             (results["telegram"]["sent"] or not results["telegram"]["configured"]) and \
              (results["discord"]["sent"] or not results["discord"]["configured"])
     return {
         "success": all_ok,

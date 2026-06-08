@@ -54,6 +54,7 @@ class PortfolioResponse(BaseModel):
     max_drawdown: float
     profit_factor: float
     peak_equity: float
+    open_positions: int
     equity_curve: list[dict]
 
 
@@ -244,7 +245,7 @@ async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)
     # Simple capital guardrail: position size should not exceed 5% of portfolio value
     portfolio = await db.execute(select(Portfolio).limit(1))
     portfolio_row = portfolio.scalar_one_or_none()
-    portfolio_value = portfolio_row.total_equity if portfolio_row else settings.INITIAL_BALANCE
+    portfolio_value = portfolio_row.equity if portfolio_row else settings.INITIAL_BALANCE
     
     position_limit = portfolio_value * 0.05  # 5% position limit
     overspend = signal.optimal_size_usd and signal.optimal_size_usd > position_limit
@@ -303,6 +304,9 @@ async def get_portfolio(db: AsyncSession = Depends(get_db)):
     total_trades = portfolio.win_count + portfolio.loss_count
     win_rate = (portfolio.win_count / total_trades * 100) if total_trades > 0 else 0
 
+    open_result = await db.execute(select(Trade).where(Trade.status == TradeStatus.OPEN))
+    open_positions = len(open_result.scalars().all())
+
     result = await db.execute(select(Trade).where(Trade.status == TradeStatus.CLOSED))
     closed = result.scalars().all()
     gross_profit = sum(t.pnl for t in closed if t.pnl and t.pnl > 0)
@@ -328,6 +332,7 @@ async def get_portfolio(db: AsyncSession = Depends(get_db)):
         max_drawdown=round(portfolio.max_drawdown, 2),
         profit_factor=round(profit_factor, 2),
         peak_equity=round(portfolio.peak_equity, 2),
+        open_positions=open_positions,
         equity_curve=equity_curve,
     )
 
