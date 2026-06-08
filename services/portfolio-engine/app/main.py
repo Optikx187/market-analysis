@@ -667,8 +667,9 @@ async def trade_recommendation(
     atr_multiplier = float(env.get("ATR_STOP_MULTIPLIER", "1.5"))
 
     max_loss_amount = portfolio.balance * loss_tolerance
-    suggested_target = current_price * (1 + (loss_tolerance * risk_reward))
-    suggested_stop = current_price * (1 - loss_tolerance)
+    stop_distance_pct = loss_tolerance * atr_multiplier
+    suggested_stop = current_price * (1 - stop_distance_pct)
+    suggested_target = current_price * (1 + stop_distance_pct * risk_reward)
     risk_per_unit = current_price - suggested_stop
     suggested_quantity = max_loss_amount / risk_per_unit if risk_per_unit > 0 else 0
     suggested_position_usd = suggested_quantity * current_price

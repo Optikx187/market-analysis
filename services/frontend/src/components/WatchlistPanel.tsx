@@ -75,7 +75,8 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
     if (ticker.length < 2) { setName(""); return; }
     const handle = setTimeout(() => {
       lookupSymbol(ticker, assetType).then((res) => {
-        if (res.recognized) setName(res.name);
+        if (res.name && res.name !== res.ticker) setName(res.name);
+        else if (res.recognized) setName(res.name);
         else setName("");
       }).catch(() => { setName(""); });
     }, 500);
