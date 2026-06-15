@@ -59,7 +59,41 @@ Expect: Empty JSON array `[]`. Users add tickers via UI or API.
 ```bash
 curl -s http://localhost:8002/api/portfolio
 ```
-Expect: `balance: 10000.0`, `equity: 10000.0`, `win_count: 0`, `loss_count: 0`.
+Expect: `balance: 10000.0`, `equity: 10000.0`, `open_positions: 0`, `win_count: 0`, `loss_count: 0`.
+
+### 5b. Crypto Symbol Lookup
+```bash
+curl -s "http://localhost:8000/api/symbols/lookup/BTC?asset_type=crypto"
+```
+Expect: `{"ticker": "BTC", "name": "Bitcoin", "asset_type": "crypto", "recognized": true/false}`.
+The `name` field should return a friendly name from the built-in CRYPTO_NAMES map even if Binance is unreachable (`recognized: false`).
+
+### 5c. Test Notifications
+```bash
+curl -s -X POST http://localhost:8003/api/notify/test
+```
+Expect: `{"success": true, "results": {"telegram": {"configured": true, "sent": true}, "discord": {"configured": true, "sent": true}}}`.
+If credentials are not set: `success: false` and unconfigured channels show `configured: false`.
+
+### 5d. Balance Update
+```bash
+curl -s -X POST http://localhost:8002/api/portfolio/balance \
+  -H "Content-Type: application/json" \
+  -d '{"balance": 50000}'
+```
+Expect: `{"previous_balance": 10000.0, "new_balance": 50000.0, "equity": 50000.0, "locked_in_positions": 0.0, ...}`.
+If open trades exist, `new_balance` will be less than the requested value (capital locked in positions is deducted).
+
+### 5e. Trade Recommendation
+```bash
+curl -s "http://localhost:8002/api/portfolio/recommendation?ticker=ETH&current_price=3500"
+```
+Expect (with defaults TRAILING_STOP_PCT=0.02, ATR_STOP_MULTIPLIER=1.5, LOSS_TOLERANCE_PCT=0.02):
+- `position_pct_of_balance: 66.67` (NOT 100%)
+- `suggested_stop_loss: 3395.0` (3% below entry)
+- `suggested_target: 3815.0`
+
+Changing LOSS_TOLERANCE_PCT should affect position size: higher tolerance → larger position (capped at 100%).
 
 ### 6. Inter-Service Communication (B -> A)
 ```bash
@@ -111,14 +145,24 @@ Dashboard at http://localhost:3000. Requires internet for live market data.
 5. After completing, dashboard should load. Wizard should not appear again on reload.
 
 ### Watchlist Panel
+- Typing a crypto ticker (e.g., "ETH") auto-fills the Name field with a friendly name (e.g., "Ethereum")
+- Changing the ticker updates the name without needing to clear the field first
+- Add button validates with Binance before adding (shows error if ticker unverified)
 - Add button stays inside the panel boundary (no clipping at 1024px width)
 - Enter key works in Ticker and Name fields to add
 - Inputs wrap to a second row on narrow viewports
 
-### Settings Tab — Credential Forms
-- Each service has a Configure/Update button
+### Settings Tab — Credential Forms & Test Notifications
+- Each service (Binance, Alpaca, Telegram, Discord) has a Configure/Update button
 - Clicking opens an inline form with help text
 - Saving shows success message and refreshes status indicators
+- "Send Test Notification" button sends test message to configured Discord + Telegram
+- Environment Settings section allows editing risk parameters (RISK_REWARD_RATIO, ATR_STOP_MULTIPLIER, etc.)
+
+### Portfolio Panel — Balance Update
+- "Update Balance" button opens inline editor with current balance
+- Enter new amount and click Save → green confirmation message
+- Balance, equity, and equity curve all update immediately
 
 ### Help & Docs Tab
 - 7 sections: How It Works, Watchlist, Trading Signals, Paper Trading, Risk Management, Configuration, Glossary

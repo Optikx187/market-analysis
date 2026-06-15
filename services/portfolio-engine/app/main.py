@@ -676,13 +676,18 @@ async def trade_recommendation(
     risk_reward = float(env.get("RISK_REWARD_RATIO", "3.0"))
     atr_multiplier = float(env.get("ATR_STOP_MULTIPLIER", "1.5"))
 
+    trailing_stop_pct = float(env.get("TRAILING_STOP_PCT", "0.02"))
+
     max_loss_amount = portfolio.balance * loss_tolerance
-    stop_distance_pct = loss_tolerance * atr_multiplier
+    stop_distance_pct = trailing_stop_pct * atr_multiplier
     suggested_stop = current_price * (1 - stop_distance_pct)
     suggested_target = current_price * (1 + stop_distance_pct * risk_reward)
     risk_per_unit = current_price - suggested_stop
     suggested_quantity = max_loss_amount / risk_per_unit if risk_per_unit > 0 else 0
     suggested_position_usd = suggested_quantity * current_price
+    if portfolio.balance > 0 and suggested_position_usd > portfolio.balance:
+        suggested_quantity = portfolio.balance / current_price
+        suggested_position_usd = portfolio.balance
     position_pct = (suggested_position_usd / portfolio.balance * 100) if portfolio.balance > 0 else 0
 
     return {
