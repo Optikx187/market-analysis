@@ -245,7 +245,7 @@ export default function SettingsPanel() {
         <div className="mt-6 pt-4 border-t border-[var(--border)]">
           <h3 className="text-sm font-medium mb-2">Notification Channels</h3>
           <p className="text-xs text-[var(--muted-foreground)] mb-3">
-            Enable or disable individual notification channels. At least one channel should be active.
+            Enable or disable individual notification channels. Toggles are runtime-only and reset on service restart.
           </p>
           <div className="space-y-2">
             {Object.entries(channels).map(([name, ch]) => (
