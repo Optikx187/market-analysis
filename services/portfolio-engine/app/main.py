@@ -381,7 +381,6 @@ async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends
     db.add(trade)
     position_cost = payload.entry_price * payload.quantity
     portfolio.balance -= position_cost
-    portfolio.equity = portfolio.balance + position_cost
     await db.commit()
     await db.refresh(trade)
     return trade

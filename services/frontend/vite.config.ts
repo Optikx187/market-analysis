@@ -19,6 +19,7 @@ export default defineConfig({
       "/api/data": "http://data-ingestion:8000",
       "/api/symbols": "http://data-ingestion:8000",
       "/api/quotes": "http://data-ingestion:8000",
+      "/api/status": "http://data-ingestion:8000",
       "/api/analyze": "http://quant-engine:8001",
       "/api/risk-profile": "http://quant-engine:8001",
       "/api/portfolio": "http://portfolio-engine:8002",
