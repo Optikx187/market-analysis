@@ -6,8 +6,11 @@ import {
   fetchEnvSettings,
   updateEnvSetting,
   testNotifications,
+  fetchChannelStatus,
+  toggleChannel,
   type CredentialStatus,
   type EnvSetting,
+  type ChannelStatus,
 } from "@/lib/api";
 
 interface EditingService {
@@ -72,10 +75,14 @@ export default function SettingsPanel() {
   const [editingEnv, setEditingEnv] = useState<string | null>(null);
   const [envFormValues, setEnvFormValues] = useState<Record<string, string>>({});
 
+  // Channel toggle state
+  const [channels, setChannels] = useState<Record<string, ChannelStatus> | null>(null);
+
   const loadStatus = () => fetchCredentialStatus().then(setStatus).catch(() => {});
   const loadEnvSettings = () => fetchEnvSettings().then(setEnvSettings).catch(() => {});
+  const loadChannels = () => fetchChannelStatus().then(setChannels).catch(() => {});
 
-  useEffect(() => { loadStatus(); loadEnvSettings(); }, []);
+  useEffect(() => { loadStatus(); loadEnvSettings(); loadChannels(); }, []);
 
   const handleEdit = (service: EditingService) => {
     const providerStatus = status?.[service.provider];
@@ -232,6 +239,46 @@ export default function SettingsPanel() {
           Send Test Notification
         </button>
       </div>
+
+      {/* Notification Channel Toggles */}
+      {channels && (
+        <div className="mt-6 pt-4 border-t border-[var(--border)]">
+          <h3 className="text-sm font-medium mb-2">Notification Channels</h3>
+          <p className="text-xs text-[var(--muted-foreground)] mb-3">
+            Enable or disable individual notification channels. At least one channel should be active.
+          </p>
+          <div className="space-y-2">
+            {Object.entries(channels).map(([name, ch]) => (
+              <div key={name} className="flex items-center justify-between py-2 px-3 rounded bg-[var(--background)]">
+                <div className="flex items-center gap-2">
+                  <div className={`h-2 w-2 rounded-full ${ch.configured && ch.enabled ? "bg-green-500" : ch.configured ? "bg-yellow-500" : "bg-[var(--muted-foreground)]"}`} />
+                  <span className="text-sm font-medium capitalize">{name}</span>
+                  {!ch.configured && <span className="text-xs text-[var(--muted-foreground)]">(not configured)</span>}
+                </div>
+                <button
+                  onClick={async () => {
+                    try {
+                      await toggleChannel(name, !ch.enabled);
+                      loadChannels();
+                      setMessage({ type: "success", text: `${name} ${!ch.enabled ? "enabled" : "disabled"}` });
+                    } catch {
+                      setMessage({ type: "error", text: `Failed to toggle ${name}` });
+                    }
+                  }}
+                  disabled={!ch.configured}
+                  className={`px-3 py-1 text-xs rounded transition-colors ${
+                    ch.enabled
+                      ? "bg-green-600 text-white hover:bg-green-700"
+                      : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:bg-[var(--accent)]"
+                  } disabled:opacity-40 disabled:cursor-not-allowed`}
+                >
+                  {ch.enabled ? "Enabled" : "Disabled"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Environment Settings Section */}
       <div className="mt-6 pt-4 border-t border-[var(--border)]">

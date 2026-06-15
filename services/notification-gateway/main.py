@@ -4,6 +4,7 @@ Listens for approved signals from Service C and formats/sends notifications.
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -20,6 +21,8 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_CHAT_ID: Optional[str] = None
     DISCORD_WEBHOOK_URL: Optional[str] = None
+    NOTIFY_TELEGRAM_ENABLED: bool = True
+    NOTIFY_DISCORD_ENABLED: bool = True
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
@@ -51,26 +54,30 @@ class TestNotificationPayload(BaseModel):
 
 
 def format_alert(p: NotificationPayload) -> str:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     paper_line = (
         "[Paper Wallet] Virtual position logged."
         if p.paper_trade_executed
         else "[Paper Wallet] No position taken."
     )
     return (
-        f"\U0001f6a8 [MICROSERVICE ALERT] {p.ticker}\n"
+        f"\U0001f6a8 [MARKET ALERT] {p.ticker}\n"
+        f"Generated: {now}\n"
         f"Action: {p.direction} | Status: {p.status}\n"
-        f"Trigger Price: ${p.trigger_price:,.2f} | "
-        f"Target Profit: ${p.target_price:,.2f} | "
-        f"Stop-Loss: ${p.stop_loss:,.2f}\n"
-        f"Optimal Sizing: ${p.optimal_size_usd:,.2f} ({p.kelly_pct}% allocation)\n"
+        f"Trigger Price: ${p.trigger_price:,.2f}\n"
+        f"Target Profit: ${p.target_price:,.2f} | Stop-Loss: ${p.stop_loss:,.2f}\n"
+        f"Position Size: ${p.optimal_size_usd:,.2f} ({p.kelly_pct}% of balance)\n"
         f"---\n"
         f"{paper_line}"
     )
 
 
-async def send_telegram(message: str) -> bool:
+async def send_telegram(message: str, force: bool = False) -> bool:
     if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_CHAT_ID:
         logger.debug("Telegram not configured")
+        return False
+    if not force and not settings.NOTIFY_TELEGRAM_ENABLED:
+        logger.info("Telegram disabled via NOTIFY_TELEGRAM_ENABLED")
         return False
     url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": settings.TELEGRAM_CHAT_ID, "text": message}
@@ -85,9 +92,12 @@ async def send_telegram(message: str) -> bool:
         return False
 
 
-async def send_discord(message: str) -> bool:
+async def send_discord(message: str, force: bool = False) -> bool:
     if not settings.DISCORD_WEBHOOK_URL:
         logger.debug("Discord not configured")
+        return False
+    if not force and not settings.NOTIFY_DISCORD_ENABLED:
+        logger.info("Discord disabled via NOTIFY_DISCORD_ENABLED")
         return False
     try:
         async with httpx.AsyncClient() as client:
@@ -133,8 +143,8 @@ async def notify(payload: NotificationPayload):
 async def test_notification(payload: TestNotificationPayload = TestNotificationPayload()):
     """Send a test notification to verify Discord and Telegram are configured correctly."""
     message = f"\U0001f527 [TEST] {payload.message}"
-    tg_ok = await send_telegram(message)
-    dc_ok = await send_discord(message)
+    tg_ok = await send_telegram(message, force=True)
+    dc_ok = await send_discord(message, force=True)
     results = {
         "telegram": {
             "configured": bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID),
@@ -153,4 +163,42 @@ async def test_notification(payload: TestNotificationPayload = TestNotificationP
         "success": all_ok,
         "results": results,
         "message": "Test notifications sent successfully." if all_ok else "One or more notification channels failed.",
+    }
+
+
+class ChannelToggle(BaseModel):
+    channel: str
+    enabled: bool
+
+
+@app.get("/api/notify/channels")
+async def get_channel_status():
+    """Return notification channel configuration and toggle status."""
+    return {
+        "telegram": {
+            "configured": bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID),
+            "enabled": settings.NOTIFY_TELEGRAM_ENABLED,
+        },
+        "discord": {
+            "configured": bool(settings.DISCORD_WEBHOOK_URL),
+            "enabled": settings.NOTIFY_DISCORD_ENABLED,
+        },
+    }
+
+
+@app.post("/api/notify/channels/toggle")
+async def toggle_channel(payload: ChannelToggle):
+    """Enable or disable a notification channel at runtime."""
+    channel = payload.channel.lower()
+    if channel == "telegram":
+        settings.NOTIFY_TELEGRAM_ENABLED = payload.enabled
+    elif channel == "discord":
+        settings.NOTIFY_DISCORD_ENABLED = payload.enabled
+    else:
+        from fastapi import HTTPException
+        raise HTTPException(400, f"Unknown channel: {channel}")
+    return {
+        "channel": channel,
+        "enabled": payload.enabled,
+        "message": f"{channel.title()} notifications {'enabled' if payload.enabled else 'disabled'}.",
     }

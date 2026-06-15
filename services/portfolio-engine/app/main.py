@@ -349,6 +349,41 @@ async def list_trades(
     return result.scalars().all()
 
 
+class ManualTradeInput(BaseModel):
+    ticker: str
+    direction: str  # "BUY" or "SELL"
+    entry_price: float
+    quantity: float
+    stop_loss: Optional[float] = None
+    target_price: Optional[float] = None
+
+
+@app.post("/api/trades/manual", response_model=TradeResponse)
+async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends(get_db)):
+    """Log a manually executed trade for tracking purposes."""
+    portfolio = await get_or_create_portfolio(db)
+    direction = SignalDirection(payload.direction.upper())
+    stop = payload.stop_loss or payload.entry_price * 0.95
+    target = payload.target_price or payload.entry_price * 1.15
+    trade = Trade(
+        ticker=payload.ticker.upper(),
+        direction=direction,
+        entry_price=payload.entry_price,
+        quantity=payload.quantity,
+        stop_loss=stop,
+        target_price=target,
+        status=TradeStatus.OPEN,
+    )
+    db.add(trade)
+    position_cost = payload.entry_price * payload.quantity
+    if direction == SignalDirection.BUY:
+        portfolio.balance -= position_cost
+        portfolio.equity = portfolio.balance + position_cost
+    await db.commit()
+    await db.refresh(trade)
+    return trade
+
+
 @app.get("/api/alerts", response_model=list[AlertLogResponse])
 async def list_alerts(limit: int = 50, db: AsyncSession = Depends(get_db)):
     result = await db.execute(

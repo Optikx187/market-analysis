@@ -231,4 +231,40 @@ export interface TestNotificationResult {
 export const testNotifications = (message?: string) =>
   api.post<TestNotificationResult>("/notify/test", message ? { message } : {}).then((r) => r.data);
 
+// Manual trade logging
+export interface ManualTradeInput {
+  ticker: string;
+  direction: string;
+  entry_price: number;
+  quantity: number;
+  stop_loss?: number;
+  target_price?: number;
+}
+
+export const logManualTrade = (trade: ManualTradeInput) =>
+  api.post<Trade>("/trades/manual", trade).then((r) => r.data);
+
+// Notification channel toggles
+export interface ChannelStatus {
+  configured: boolean;
+  enabled: boolean;
+}
+
+export const fetchChannelStatus = () =>
+  api.get<Record<string, ChannelStatus>>("/notify/channels").then((r) => r.data);
+
+export const toggleChannel = (channel: string, enabled: boolean) =>
+  api.post<{ channel: string; enabled: boolean; message: string }>("/notify/channels/toggle", { channel, enabled }).then((r) => r.data);
+
+// System status
+export interface SystemStatus {
+  service: string;
+  started_at: string;
+  current_time: string;
+  last_api_calls: Record<string, string>;
+}
+
+export const fetchSystemStatus = () =>
+  api.get<SystemStatus>("/status").then((r) => r.data);
+
 export default api;

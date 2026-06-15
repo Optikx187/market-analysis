@@ -22,6 +22,13 @@ from app.ingestion import get_binance_symbol, get_crypto_name
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+_api_call_log: dict[str, str] = {}
+_service_start_time: str = datetime.now(timezone.utc).isoformat()
+
+
+def record_api_success(provider: str) -> None:
+    _api_call_log[provider] = datetime.now(timezone.utc).isoformat()
+
 
 class AssetCreate(BaseModel):
     ticker: str
@@ -173,6 +180,7 @@ async def lookup_symbol(ticker: str, asset_type: str = "stock"):
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": symbol})
                 resp.raise_for_status()
+            record_api_success("binance")
             return SymbolLookupResponse(ticker=ticker, name=crypto_name, asset_type="crypto", recognized=True)
         except Exception:
             return SymbolLookupResponse(ticker=ticker, name=crypto_name, asset_type="crypto", recognized=False)
@@ -186,6 +194,8 @@ async def lookup_symbol(ticker: str, asset_type: str = "stock"):
         name = yf.Ticker(ticker).info.get("shortName") or ticker
     except Exception:
         pass
+    if info:
+        record_api_success("yahoo")
     return SymbolLookupResponse(ticker=ticker, name=name, asset_type="stock", recognized=bool(info))
 
 
@@ -199,6 +209,7 @@ async def get_quote(ticker: str, asset_type: str = "stock"):
             resp = await client.get("https://api.binance.com/api/v3/ticker/24hr", params={"symbol": symbol})
             resp.raise_for_status()
             data = resp.json()
+        record_api_success("binance")
         return QuoteResponse(
             ticker=ticker,
             name=ticker,
@@ -209,6 +220,8 @@ async def get_quote(ticker: str, asset_type: str = "stock"):
             updated_at=now,
         )
     info = yf.Ticker(ticker).fast_info
+    if info:
+        record_api_success("yahoo")
     last = getattr(info, "last_price", None) or (info.get("last_price") if isinstance(info, dict) else None)
     previous = getattr(info, "previous_close", None) or (info.get("previous_close") if isinstance(info, dict) else None)
     volume = getattr(info, "last_volume", None) or (info.get("last_volume") if isinstance(info, dict) else None)
@@ -227,6 +240,17 @@ async def get_quote(ticker: str, asset_type: str = "stock"):
         volume=float(volume) if volume else None,
         updated_at=now,
     )
+
+
+@app.get("/api/status")
+async def system_status():
+    """Return service uptime and last successful API call timestamps."""
+    return {
+        "service": "data-ingestion",
+        "started_at": _service_start_time,
+        "current_time": datetime.now(timezone.utc).isoformat(),
+        "last_api_calls": _api_call_log,
+    }
 
 
 @app.get("/api/settings/credentials")
