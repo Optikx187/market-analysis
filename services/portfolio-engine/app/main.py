@@ -380,6 +380,8 @@ async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends
     )
     db.add(trade)
     position_cost = payload.entry_price * payload.quantity
+    if position_cost > portfolio.balance:
+        raise HTTPException(400, f"Insufficient balance: need ${position_cost:,.2f} but only ${portfolio.balance:,.2f} available")
     portfolio.balance -= position_cost
     await db.commit()
     await db.refresh(trade)
