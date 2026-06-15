@@ -363,8 +363,12 @@ async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends
     """Log a manually executed trade for tracking purposes."""
     portfolio = await get_or_create_portfolio(db)
     direction = SignalDirection(payload.direction.upper())
-    stop = payload.stop_loss or payload.entry_price * 0.95
-    target = payload.target_price or payload.entry_price * 1.15
+    if direction == SignalDirection.SELL:
+        stop = payload.stop_loss or payload.entry_price * 1.05
+        target = payload.target_price or payload.entry_price * 0.85
+    else:
+        stop = payload.stop_loss or payload.entry_price * 0.95
+        target = payload.target_price or payload.entry_price * 1.15
     trade = Trade(
         ticker=payload.ticker.upper(),
         direction=direction,
@@ -376,9 +380,8 @@ async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends
     )
     db.add(trade)
     position_cost = payload.entry_price * payload.quantity
-    if direction == SignalDirection.BUY:
-        portfolio.balance -= position_cost
-        portfolio.equity = portfolio.balance + position_cost
+    portfolio.balance -= position_cost
+    portfolio.equity = portfolio.balance + position_cost
     await db.commit()
     await db.refresh(trade)
     return trade
