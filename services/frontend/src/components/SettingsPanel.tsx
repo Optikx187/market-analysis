@@ -8,9 +8,13 @@ import {
   testNotifications,
   fetchChannelStatus,
   toggleChannel,
+  fetchSystemStatus,
+  fetchReplyTrades,
   type CredentialStatus,
   type EnvSetting,
   type ChannelStatus,
+  type SystemStatus,
+  type ReplyTradesResponse,
 } from "@/lib/api";
 
 interface EditingService {
@@ -78,11 +82,21 @@ export default function SettingsPanel() {
   // Channel toggle state
   const [channels, setChannels] = useState<Record<string, ChannelStatus> | null>(null);
 
+  // System health state
+  const [sysStatus, setSysStatus] = useState<SystemStatus | null>(null);
+  const [replyTrades, setReplyTrades] = useState<ReplyTradesResponse | null>(null);
+
   const loadStatus = () => fetchCredentialStatus().then(setStatus).catch(() => {});
   const loadEnvSettings = () => fetchEnvSettings().then(setEnvSettings).catch(() => {});
   const loadChannels = () => fetchChannelStatus().then(setChannels).catch(() => {});
+  const loadSysStatus = () => fetchSystemStatus().then(setSysStatus).catch(() => {});
+  const loadReplyTrades = () => fetchReplyTrades().then(setReplyTrades).catch(() => {});
 
-  useEffect(() => { loadStatus(); loadEnvSettings(); loadChannels(); }, []);
+  useEffect(() => {
+    loadStatus(); loadEnvSettings(); loadChannels(); loadSysStatus(); loadReplyTrades();
+    const interval = setInterval(() => { loadSysStatus(); loadReplyTrades(); }, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleEdit = (service: EditingService) => {
     const providerStatus = status?.[service.provider];
@@ -350,6 +364,113 @@ export default function SettingsPanel() {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+      </div>
+
+      {/* System Health — Issue #12 */}
+      <div className="mt-6 pt-4 border-t border-[var(--border)]">
+        <h3 className="text-sm font-medium mb-2">System Health</h3>
+        <p className="text-xs text-[var(--muted-foreground)] mb-3">
+          Live connectivity status for external data providers. Data is auto-backfilled when a provider reconnects.
+        </p>
+        {!sysStatus ? (
+          <div className="text-sm text-[var(--muted-foreground)]">Loading system status...</div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-2 mb-3">
+              <div className="rounded bg-[var(--background)] p-3">
+                <div className="text-xs text-[var(--muted-foreground)]">Service Started</div>
+                <div className="text-sm font-medium">{new Date(sysStatus.started_at).toLocaleString()}</div>
+              </div>
+              <div className="rounded bg-[var(--background)] p-3">
+                <div className="text-xs text-[var(--muted-foreground)]">Uptime</div>
+                <div className="text-sm font-medium">
+                  {(() => {
+                    const ms = new Date(sysStatus.current_time).getTime() - new Date(sysStatus.started_at).getTime();
+                    const hrs = Math.floor(ms / 3600000);
+                    const mins = Math.floor((ms % 3600000) / 60000);
+                    return `${hrs}h ${mins}m`;
+                  })()}
+                </div>
+              </div>
+            </div>
+            {sysStatus.connectivity && (
+              <div className="space-y-2 mb-3">
+                {Object.entries(sysStatus.connectivity).map(([provider, conn]) => (
+                  <div key={provider} className="flex items-center justify-between py-2 px-3 rounded bg-[var(--background)]">
+                    <div className="flex items-center gap-2">
+                      <div className={`h-2 w-2 rounded-full ${conn.online ? "bg-green-500" : "bg-red-500"}`} />
+                      <span className="text-sm font-medium capitalize">{provider}</span>
+                    </div>
+                    <div className="text-xs text-[var(--muted-foreground)]">
+                      {conn.online ? "Online" : "Offline"}
+                      {conn.last_checked && ` · checked ${new Date(conn.last_checked).toLocaleTimeString()}`}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {sysStatus.downtime_log && sysStatus.downtime_log.length > 0 && (
+              <div className="mt-2">
+                <div className="text-xs font-medium text-[var(--muted-foreground)] mb-1">Recent Downtime Events</div>
+                <div className="space-y-1">
+                  {sysStatus.downtime_log.slice(-5).map((d, i) => (
+                    <div key={i} className="text-xs py-1 px-2 rounded bg-[var(--background)] flex justify-between">
+                      <span className="capitalize">{d.provider}</span>
+                      <span className="text-[var(--muted-foreground)]">
+                        {new Date(d.went_offline).toLocaleTimeString()} → {new Date(d.came_online).toLocaleTimeString()}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Telegram Bot Reply Trades — Issue #11 */}
+      <div className="mt-6 pt-4 border-t border-[var(--border)]">
+        <h3 className="text-sm font-medium mb-2">Telegram Trade Replies</h3>
+        <p className="text-xs text-[var(--muted-foreground)] mb-3">
+          Trades logged via Telegram bot commands (<code>/bought</code>, <code>/sold</code>).
+          Bot status: {replyTrades?.bot_active ? (
+            <span className="text-green-400">● Active</span>
+          ) : (
+            <span className="text-[var(--muted-foreground)]">○ Inactive</span>
+          )}
+        </p>
+        {replyTrades && replyTrades.trades.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-[var(--muted-foreground)]">
+                  <th className="text-left py-1">Time</th>
+                  <th className="text-left py-1">User</th>
+                  <th className="text-left py-1">Ticker</th>
+                  <th className="text-left py-1">Dir</th>
+                  <th className="text-right py-1">Price</th>
+                  <th className="text-right py-1">Qty</th>
+                </tr>
+              </thead>
+              <tbody>
+                {replyTrades.trades.slice(-10).reverse().map((t, i) => (
+                  <tr key={i} className="border-t border-[var(--border)]">
+                    <td className="py-1">{new Date(t.timestamp).toLocaleTimeString()}</td>
+                    <td className="py-1">@{t.user}</td>
+                    <td className="py-1 font-medium">{t.ticker}</td>
+                    <td className={`py-1 ${t.direction === "BUY" ? "text-green-400" : "text-red-400"}`}>{t.direction}</td>
+                    <td className="py-1 text-right">${t.entry_price.toLocaleString()}</td>
+                    <td className="py-1 text-right">{t.quantity}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="text-xs text-[var(--muted-foreground)]">
+            No trades logged via Telegram yet. Use <code>/bought BTC 65000 0.1</code> to log a trade.
           </div>
         )}
       </div>

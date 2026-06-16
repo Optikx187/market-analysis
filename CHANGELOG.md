@@ -2,6 +2,23 @@
 
 All notable changes to Market Analysis are documented here.
 
+## [2.2.0] — 2026-06-16
+
+### Added
+- **Telegram bot trade replies** — Reply to alerts with `/bought` or `/sold` commands to log trades directly from Telegram (#11)
+  - `/bought BTC 65000 0.1` → logs BUY 0.1 BTC @ $65,000
+  - `/sold ETH 3500 1` → logs SELL 1 ETH @ $3,500 with SELL-specific defaults
+  - `/trades` → lists open trades from portfolio
+  - Reply trade history visible in Settings → "Telegram Trade Replies" section
+- **System health monitoring** — Background health check loop pings Binance/Yahoo every 60s (#12)
+  - Live connectivity indicators (online/offline per provider) in Settings → "System Health"
+  - Downtime log tracking offline → online transitions
+  - Auto-backfill of historical data when a provider reconnects after downtime
+  - Uptime counter and service start time display
+
+### Fixed
+- **Direction validation** — Manual trade endpoint now rejects SUPPRESSED and invalid directions with HTTP 400
+
 ## [2.1.0] — 2026-06-08
 
 ### Added

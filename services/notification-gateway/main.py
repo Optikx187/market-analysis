@@ -1,9 +1,12 @@
 """Notification Gateway — dual-broadcasts alerts to Discord + Telegram.
 
 Listens for approved signals from Service C and formats/sends notifications.
+Also runs a Telegram bot listener for trade replies (/bought, /sold commands).
 """
 
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -29,7 +32,28 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-app = FastAPI(title="Notification Gateway", version="2.0.0")
+_bot_task: Optional[asyncio.Task] = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _bot_task
+    if settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID:
+        from bot import start_telegram_bot
+        _bot_task = asyncio.create_task(
+            start_telegram_bot(settings.TELEGRAM_BOT_TOKEN, settings.TELEGRAM_CHAT_ID)
+        )
+        logger.info("Telegram bot listener scheduled")
+    yield
+    if _bot_task and not _bot_task.done():
+        _bot_task.cancel()
+        try:
+            await _bot_task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="Notification Gateway", version="2.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -201,4 +225,14 @@ async def toggle_channel(payload: ChannelToggle):
         "channel": channel,
         "enabled": payload.enabled,
         "message": f"{channel.title()} notifications {'enabled' if payload.enabled else 'disabled'}.",
+    }
+
+
+@app.get("/api/notify/reply-trades")
+async def get_reply_trades():
+    """Return trades logged via Telegram bot replies."""
+    from bot import get_reply_trade_log
+    return {
+        "trades": get_reply_trade_log(),
+        "bot_active": _bot_task is not None and not _bot_task.done(),
     }

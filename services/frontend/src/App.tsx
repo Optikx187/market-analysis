@@ -8,7 +8,7 @@ import HelpPanel from "@/components/HelpPanel";
 import GettingStartedPanel from "@/components/GettingStartedPanel";
 import { fetchOnboardingStatus } from "@/lib/api";
 
-const APP_VERSION = "2.1.0";
+const APP_VERSION = "2.2.0";
 
 type Tab = "alerts" | "trades" | "settings" | "help";
 
