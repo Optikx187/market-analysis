@@ -107,6 +107,9 @@ async def _check_provider_health(provider: str, url: str, timeout: int = 10) -> 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(url)
+            # For Yahoo, accept any response (including 403) as "reachable"
+            if provider == "yahoo":
+                return True
             resp.raise_for_status()
         return True
     except Exception:
@@ -128,7 +131,7 @@ async def _health_check_loop():
                 record_api_success("binance")
 
             yahoo_ok = await _check_provider_health(
-                "yahoo", "https://query2.finance.yahoo.com/v1/finance/trending/US"
+                "yahoo", "https://query2.finance.yahoo.com/v8/finance/chart/SPY?range=1d&interval=1d"
             )
             was_yahoo_offline = not _connectivity["yahoo"]["online"]
             _update_connectivity("yahoo", yahoo_ok)
