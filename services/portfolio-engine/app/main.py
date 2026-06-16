@@ -364,7 +364,10 @@ async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends
     portfolio = await get_or_create_portfolio(db)
     if payload.entry_price <= 0 or payload.quantity <= 0:
         raise HTTPException(400, "Entry price and quantity must be positive")
-    direction = SignalDirection(payload.direction.upper())
+    direction_str = payload.direction.upper()
+    if direction_str not in ("BUY", "SELL"):
+        raise HTTPException(400, f"Direction must be BUY or SELL, got: {direction_str}")
+    direction = SignalDirection(direction_str)
     if direction == SignalDirection.SELL:
         stop = payload.stop_loss if payload.stop_loss is not None else payload.entry_price * 1.05
         target = payload.target_price if payload.target_price is not None else payload.entry_price * 0.85
