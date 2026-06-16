@@ -115,7 +115,7 @@ curl -s -X POST http://localhost:8002/api/settings/credentials/save \
   -H "Content-Type: application/json" \
   -d '{"credentials": {"BINANCE_API_KEY": "test_key_123"}}'
 ```
-Expect: `{"saved": ["BINANCE_API_KEY"], "message": "Credentials saved..."}`.
+Expect: `{"saved": ["BINANCE_API_KEY"], "message": "Credentials saved..."}`. 
 
 ### 8. Onboarding Status
 ```bash
@@ -129,11 +129,45 @@ docker compose build
 ```
 Expect: All 5 services build successfully.
 
+### 9b. Docker Image Verification
+When Dockerfiles are modified (e.g., new files added via COPY), verify the file is actually in the image:
+```bash
+# Build individual service image
+docker build -t <service>-test services/<service>
+
+# Verify module imports work inside the container
+docker run --rm <service>-test python -c "import <module>; print('OK')"
+
+# To confirm the old Dockerfile was broken, build without the fix and test:
+# docker build -t <service>-broken -f - services/<service> <<'EOF'
+# ... old Dockerfile contents ...
+# EOF
+# docker run --rm <service>-broken python -c "import <module>"  # should fail
+```
+
 ### 10. Full Docker Compose (requires .env)
 ```bash
 docker compose up --build
 ```
 Dashboard at http://localhost:3000. Requires internet for live market data.
+
+### 11. System Health / Connectivity Status
+```bash
+curl -s http://localhost:8000/api/status | python3 -m json.tool
+```
+Expect (after ~10s for health check loop to run):
+- `connectivity.yahoo.online: true` — Yahoo uses `any_response_ok=True` so any HTTP response (including 403/429) counts as reachable
+- `connectivity.binance.online: true/false` — depends on Binance API accessibility from your environment
+- `last_api_calls` shows timestamps of last successful API calls
+- `downtime_log` shows recent offline→online transitions
+
+**Note**: Yahoo Finance endpoints often return 429 (rate limit) or 403 (geo-restriction). The health check treats any HTTP response as "reachable" — only network/DNS failures mark Yahoo as offline. This matches how `yfinance` works internally. To test this logic directly:
+```python
+from app.main import _check_provider_health
+# any_response_ok=True + 429 response → True (reachable)
+# any_response_ok=False + 429 response → False (old broken behavior)
+# any_response_ok=True + unreachable host → False (correct)
+```
 
 ## Frontend Testing (Browser)
 
@@ -158,6 +192,8 @@ Dashboard at http://localhost:3000. Requires internet for live market data.
 - Saving shows success message and refreshes status indicators
 - "Send Test Notification" button sends test message to configured Discord + Telegram
 - Environment Settings section allows editing risk parameters (RISK_REWARD_RATIO, ATR_STOP_MULTIPLIER, etc.)
+- "System Health" section shows live provider status (Binance/Yahoo online/offline)
+- "Telegram Trade Replies" section shows trades submitted via bot (auto-refreshes every 30s)
 
 ### Portfolio Panel — Balance Update
 - "Update Balance" button opens inline editor with current balance
@@ -179,3 +215,4 @@ Dashboard at http://localhost:3000. Requires internet for live market data.
 - **Port conflicts**: Kill existing processes before starting (`pkill -f 'uvicorn.*800[0-3]'`).
 - **Credential security**: Credentials are written to .env (chmod 600) and never committed to git.
 - **Vite proxy**: The dev server proxies `/api/settings` to portfolio-engine:8002. When testing locally, override Docker hostnames with localhost in vite.config.ts.
+- **Docker inter-service URLs**: In Docker Compose, services reference each other by service name (e.g., `http://portfolio-engine:8002`), not localhost. When adding new modules to a service, ensure the Dockerfile copies all required files.
