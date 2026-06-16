@@ -103,12 +103,18 @@ async def initial_fetch():
             logger.error(f"Failed initial fetch for {asset.ticker}: {e}")
 
 
-async def _check_provider_health(provider: str, url: str, timeout: int = 10) -> bool:
+async def _check_provider_health(
+    provider: str, url: str, timeout: int = 10, *, any_response_ok: bool = False
+) -> bool:
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(url)
+            if any_response_ok:
+                return True
             resp.raise_for_status()
         return True
+    except httpx.HTTPStatusError:
+        return False
     except Exception:
         return False
 
@@ -128,7 +134,9 @@ async def _health_check_loop():
                 record_api_success("binance")
 
             yahoo_ok = await _check_provider_health(
-                "yahoo", "https://query2.finance.yahoo.com/v1/finance/trending/US"
+                "yahoo",
+                "https://query2.finance.yahoo.com/v8/finance/chart/SPY",
+                any_response_ok=True,
             )
             was_yahoo_offline = not _connectivity["yahoo"]["online"]
             _update_connectivity("yahoo", yahoo_ok)
