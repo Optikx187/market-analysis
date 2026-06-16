@@ -349,6 +349,50 @@ async def list_trades(
     return result.scalars().all()
 
 
+class ManualTradeInput(BaseModel):
+    ticker: str
+    direction: str  # "BUY" or "SELL"
+    entry_price: float
+    quantity: float
+    stop_loss: Optional[float] = None
+    target_price: Optional[float] = None
+
+
+@app.post("/api/trades/manual", response_model=TradeResponse)
+async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends(get_db)):
+    """Log a manually executed trade for tracking purposes."""
+    portfolio = await get_or_create_portfolio(db)
+    if payload.entry_price <= 0 or payload.quantity <= 0:
+        raise HTTPException(400, "Entry price and quantity must be positive")
+    direction_str = payload.direction.upper()
+    if direction_str not in ("BUY", "SELL"):
+        raise HTTPException(400, f"Direction must be BUY or SELL, got: {direction_str}")
+    direction = SignalDirection(direction_str)
+    if direction == SignalDirection.SELL:
+        stop = payload.stop_loss if payload.stop_loss is not None else payload.entry_price * 1.05
+        target = payload.target_price if payload.target_price is not None else payload.entry_price * 0.85
+    else:
+        stop = payload.stop_loss if payload.stop_loss is not None else payload.entry_price * 0.95
+        target = payload.target_price if payload.target_price is not None else payload.entry_price * 1.15
+    trade = Trade(
+        ticker=payload.ticker.upper(),
+        direction=direction,
+        entry_price=payload.entry_price,
+        quantity=payload.quantity,
+        stop_loss=stop,
+        target_price=target,
+        status=TradeStatus.OPEN,
+    )
+    db.add(trade)
+    position_cost = payload.entry_price * payload.quantity
+    if position_cost > portfolio.balance:
+        raise HTTPException(400, f"Insufficient balance: need ${position_cost:,.2f} but only ${portfolio.balance:,.2f} available")
+    portfolio.balance -= position_cost
+    await db.commit()
+    await db.refresh(trade)
+    return trade
+
+
 @app.get("/api/alerts", response_model=list[AlertLogResponse])
 async def list_alerts(limit: int = 50, db: AsyncSession = Depends(get_db)):
     result = await db.execute(

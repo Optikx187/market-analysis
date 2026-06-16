@@ -8,12 +8,19 @@ import HelpPanel from "@/components/HelpPanel";
 import GettingStartedPanel from "@/components/GettingStartedPanel";
 import { fetchOnboardingStatus } from "@/lib/api";
 
+const APP_VERSION = "2.1.0";
+
 type Tab = "alerts" | "trades" | "settings" | "help";
 
 function App() {
   const [tab, setTab] = useState<Tab>("alerts");
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    console.log(`%cMarket Analysis v${APP_VERSION}`, "font-weight:bold;font-size:14px;color:#22c55e");
+    console.log("Quant signals · Half-Kelly sizing · Capital preservation");
+  }, []);
 
   useEffect(() => {
     const dismissed = localStorage.getItem("onboarding_complete");
@@ -109,7 +116,7 @@ function App() {
 
       <footer className="border-t border-[var(--border)] py-4 mt-8">
         <div className="container mx-auto px-4 text-center text-xs text-[var(--muted-foreground)]">
-          Market Analysis Microservices v2.0 &middot; Capital Preservation First &middot; Docker Orchestrated
+          Market Analysis v{APP_VERSION} &middot; Capital Preservation First &middot; Docker Orchestrated
         </div>
       </footer>
     </div>

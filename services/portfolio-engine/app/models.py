@@ -70,7 +70,6 @@ class AlertLog(Base):
     target_price = Column(Float, nullable=True)
     optimal_size_usd = Column(Float, nullable=True)
     kelly_pct = Column(Float, nullable=True)
-    robinhood_buying_power = Column(Float, nullable=True)
     capital_overspend = Column(Boolean, default=False)
     message = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
