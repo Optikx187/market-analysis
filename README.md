@@ -24,6 +24,7 @@ A highly performant, decoupled microservices platform for algorithmic market ana
 - Streams live pricing via WebSocket (Binance for crypto, Yahoo Finance for stocks)
 - Stores 365 days of historical OHLCV data
 - **Crypto Name Resolution**: Built-in mapping for 21 popular coins (BTC→Bitcoin, ETH→Ethereum, etc.)
+- **System Health Monitoring**: Background loop pings Binance/Yahoo every 60s, tracks online/offline transitions, and auto-backfills missed data on reconnect
 - Empty watchlist by default — users add any tickers via UI (examples: SPY, BTC, ETH)
 - Broadcasts data to Service B
 
@@ -48,7 +49,8 @@ A highly performant, decoupled microservices platform for algorithmic market ana
 - React / Vite / Tailwind CSS dashboard
 - Real-time charts, dynamic watchlist CRUD with crypto autofill, portfolio balance tracking
 - Dual-broadcast Discord + Telegram notifications with test endpoint
-- Settings panel for credential management and environment configuration
+- **Telegram Bot Listener**: Reply to alerts with `/bought BTC 65000 0.1` or `/sold ETH 3500 1` to log trades directly from Telegram
+- Settings panel for credential management, environment configuration, system health, and trade reply history
 
 ## Quick Start
 
@@ -166,6 +168,19 @@ The frontend dev server runs on **http://localhost:5173** with hot reload. API r
 | `GET` | `/health` | Health check |
 | `POST` | `/api/notify` | Send alert to configured channels |
 | `POST` | `/api/notify/test` | Send test notification to verify Discord/Telegram |
+| `GET` | `/api/notify/channels` | Channel toggle status |
+| `POST` | `/api/notify/channels/toggle` | Enable/disable a channel `{channel, enabled}` |
+| `GET` | `/api/notify/reply-trades` | Trades logged via Telegram bot replies |
+
+#### Telegram Bot Commands
+
+When the bot is active (requires `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`), users can reply to the bot in Telegram:
+
+| Command | Example | Description |
+|---------|---------|-------------|
+| `/bought` | `/bought BTC 65000 0.1` | Log a BUY trade |
+| `/sold` | `/sold ETH 3500 1 3400 3600` | Log a SELL trade (with optional stop/target) |
+| `/trades` | `/trades` | List open trades |
 
 ## Service Communication
 

@@ -25,9 +25,39 @@ logger = logging.getLogger(__name__)
 _api_call_log: dict[str, str] = {}
 _service_start_time: str = datetime.now(timezone.utc).isoformat()
 
+# Connectivity tracking for Issue #12
+_connectivity: dict[str, dict] = {
+    "binance": {"online": False, "last_checked": None, "last_online": None, "last_offline": None},
+    "yahoo": {"online": False, "last_checked": None, "last_online": None, "last_offline": None},
+}
+_downtime_log: list[dict] = []
+
 
 def record_api_success(provider: str) -> None:
     _api_call_log[provider] = datetime.now(timezone.utc).isoformat()
+
+
+def _update_connectivity(provider: str, is_online: bool) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    state = _connectivity.get(provider)
+    if not state:
+        return
+    was_online = state["online"]
+    state["last_checked"] = now
+    state["online"] = is_online
+    if is_online:
+        state["last_online"] = now
+        if not was_online and state["last_offline"]:
+            _downtime_log.append({
+                "provider": provider,
+                "went_offline": state["last_offline"],
+                "came_online": now,
+            })
+            if len(_downtime_log) > 100:
+                _downtime_log.pop(0)
+    else:
+        if was_online or state["last_offline"] is None:
+            state["last_offline"] = now
 
 
 class AssetCreate(BaseModel):
@@ -73,10 +103,71 @@ async def initial_fetch():
             logger.error(f"Failed initial fetch for {asset.ticker}: {e}")
 
 
+async def _check_provider_health(provider: str, url: str, timeout: int = 10) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
+async def _health_check_loop():
+    """Periodically check external API connectivity and auto-backfill on reconnect."""
+    await asyncio.sleep(5)  # initial delay
+    first_check = True
+    while True:
+        try:
+            binance_ok = await _check_provider_health(
+                "binance", "https://api.binance.com/api/v3/ping"
+            )
+            was_binance_offline = not _connectivity["binance"]["online"]
+            _update_connectivity("binance", binance_ok)
+            if binance_ok:
+                record_api_success("binance")
+
+            yahoo_ok = await _check_provider_health(
+                "yahoo", "https://query2.finance.yahoo.com/v1/finance/trending/US"
+            )
+            was_yahoo_offline = not _connectivity["yahoo"]["online"]
+            _update_connectivity("yahoo", yahoo_ok)
+            if yahoo_ok:
+                record_api_success("yahoo")
+
+            # Auto-backfill on reconnect (skip first check — initial_fetch handles startup)
+            if not first_check:
+                if (binance_ok and was_binance_offline) or (yahoo_ok and was_yahoo_offline):
+                    logger.info("Provider reconnected — triggering data backfill")
+                    asyncio.create_task(_backfill_all_assets())
+            first_check = False
+
+        except Exception as e:
+            logger.error(f"Health check error: {e}")
+        await asyncio.sleep(60)  # check every 60 seconds
+
+
+async def _backfill_all_assets():
+    """Re-fetch historical data for all active assets after a connectivity restore."""
+    try:
+        async with async_session() as db:
+            result = await db.execute(select(Asset).where(Asset.is_active == True))
+            assets = result.scalars().all()
+        for asset in assets:
+            try:
+                await refresh_asset_data(asset.ticker, asset.asset_type)
+                logger.info(f"Backfilled data for {asset.ticker}")
+            except Exception as e:
+                logger.warning(f"Backfill failed for {asset.ticker}: {e}")
+    except Exception as e:
+        logger.error(f"Backfill error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     asyncio.create_task(initial_fetch())
+    asyncio.create_task(_health_check_loop())
     yield
 
 
@@ -244,12 +335,14 @@ async def get_quote(ticker: str, asset_type: str = "stock"):
 
 @app.get("/api/status")
 async def system_status():
-    """Return service uptime and last successful API call timestamps."""
+    """Return service uptime, API call timestamps, and connectivity state."""
     return {
         "service": "data-ingestion",
         "started_at": _service_start_time,
         "current_time": datetime.now(timezone.utc).isoformat(),
         "last_api_calls": _api_call_log,
+        "connectivity": _connectivity,
+        "downtime_log": _downtime_log[-10:],
     }
 
 

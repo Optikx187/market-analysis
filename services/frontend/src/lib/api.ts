@@ -257,14 +257,49 @@ export const toggleChannel = (channel: string, enabled: boolean) =>
   api.post<{ channel: string; enabled: boolean; message: string }>("/notify/channels/toggle", { channel, enabled }).then((r) => r.data);
 
 // System status
+export interface ProviderConnectivity {
+  online: boolean;
+  last_checked: string | null;
+  last_online: string | null;
+  last_offline: string | null;
+}
+
+export interface DowntimeEntry {
+  provider: string;
+  went_offline: string;
+  came_online: string;
+}
+
 export interface SystemStatus {
   service: string;
   started_at: string;
   current_time: string;
   last_api_calls: Record<string, string>;
+  connectivity: Record<string, ProviderConnectivity>;
+  downtime_log: DowntimeEntry[];
 }
 
 export const fetchSystemStatus = () =>
   api.get<SystemStatus>("/status").then((r) => r.data);
+
+// Telegram bot reply trades
+export interface ReplyTrade {
+  timestamp: string;
+  user: string;
+  channel: string;
+  ticker: string;
+  direction: string;
+  entry_price: number;
+  quantity: number;
+  result: Record<string, unknown>;
+}
+
+export interface ReplyTradesResponse {
+  trades: ReplyTrade[];
+  bot_active: boolean;
+}
+
+export const fetchReplyTrades = () =>
+  api.get<ReplyTradesResponse>("/notify/reply-trades").then((r) => r.data);
 
 export default api;

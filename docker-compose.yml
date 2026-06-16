@@ -65,11 +65,15 @@ services:
       - "8003:8003"
     env_file:
       - .env
+    environment:
+      - PORTFOLIO_ENGINE_URL=http://portfolio-engine:8002
     networks:
       - trading_network
     depends_on:
       data-ingestion:
         condition: service_healthy
+      portfolio-engine:
+        condition: service_started
 
   # SERVICE D: Frontend (React + Nginx reverse proxy)
   frontend:
