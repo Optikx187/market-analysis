@@ -116,6 +116,7 @@ async def _check_provider_health(provider: str, url: str, timeout: int = 10) -> 
 async def _health_check_loop():
     """Periodically check external API connectivity and auto-backfill on reconnect."""
     await asyncio.sleep(5)  # initial delay
+    first_check = True
     while True:
         try:
             binance_ok = await _check_provider_health(
@@ -134,10 +135,12 @@ async def _health_check_loop():
             if yahoo_ok:
                 record_api_success("yahoo")
 
-            # Auto-backfill on reconnect
-            if (binance_ok and was_binance_offline) or (yahoo_ok and was_yahoo_offline):
-                logger.info("Provider reconnected — triggering data backfill")
-                asyncio.create_task(_backfill_all_assets())
+            # Auto-backfill on reconnect (skip first check — initial_fetch handles startup)
+            if not first_check:
+                if (binance_ok and was_binance_offline) or (yahoo_ok and was_yahoo_offline):
+                    logger.info("Provider reconnected — triggering data backfill")
+                    asyncio.create_task(_backfill_all_assets())
+            first_check = False
 
         except Exception as e:
             logger.error(f"Health check error: {e}")

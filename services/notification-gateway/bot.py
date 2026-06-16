@@ -10,6 +10,7 @@ Usage from Telegram:
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -23,7 +24,9 @@ from telegram.ext import (
 
 logger = logging.getLogger(__name__)
 
-PORTFOLIO_ENGINE_URL = "http://localhost:8002"
+PORTFOLIO_ENGINE_URL = os.environ.get("PORTFOLIO_ENGINE_URL", "http://portfolio-engine:8002")
+
+_authorized_chat_id: Optional[str] = None
 
 # In-memory log of trades submitted via Telegram
 _reply_trade_log: list[dict] = []
@@ -100,8 +103,16 @@ def _parse_trade_args(args: list[str]) -> tuple[str, float, float, Optional[floa
     return ticker, price, qty, stop, target
 
 
+def _check_authorized(update: Update) -> bool:
+    if _authorized_chat_id is None:
+        return True
+    return str(update.effective_chat.id) == _authorized_chat_id
+
+
 async def _handle_bought(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /bought TICKER PRICE QTY [STOP TARGET]"""
+    if not _check_authorized(update):
+        return
     if not context.args:
         await update.message.reply_text(
             "Usage: /bought TICKER PRICE QTY [STOP_LOSS TARGET_PRICE]\n"
@@ -130,6 +141,8 @@ async def _handle_bought(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def _handle_sold(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /sold TICKER PRICE QTY [STOP TARGET]"""
+    if not _check_authorized(update):
+        return
     if not context.args:
         await update.message.reply_text(
             "Usage: /sold TICKER PRICE QTY [STOP_LOSS TARGET_PRICE]\n"
@@ -158,6 +171,8 @@ async def _handle_sold(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def _handle_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /trades — list recent open trades from portfolio-engine."""
+    if not _check_authorized(update):
+        return
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(f"{PORTFOLIO_ENGINE_URL}/api/trades")
@@ -185,7 +200,9 @@ def get_reply_trade_log() -> list[dict]:
 
 async def start_telegram_bot(token: str, chat_id: str) -> None:
     """Start the Telegram bot polling loop (runs forever)."""
-    logger.info("Starting Telegram bot listener for trade replies...")
+    global _authorized_chat_id
+    _authorized_chat_id = chat_id
+    logger.info("Starting Telegram bot listener for trade replies (chat_id=%s)...", chat_id)
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("bought", _handle_bought))
     app.add_handler(CommandHandler("sold", _handle_sold))
