@@ -362,13 +362,15 @@ class ManualTradeInput(BaseModel):
 async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends(get_db)):
     """Log a manually executed trade for tracking purposes."""
     portfolio = await get_or_create_portfolio(db)
+    if payload.entry_price <= 0 or payload.quantity <= 0:
+        raise HTTPException(400, "Entry price and quantity must be positive")
     direction = SignalDirection(payload.direction.upper())
     if direction == SignalDirection.SELL:
-        stop = payload.stop_loss or payload.entry_price * 1.05
-        target = payload.target_price or payload.entry_price * 0.85
+        stop = payload.stop_loss if payload.stop_loss is not None else payload.entry_price * 1.05
+        target = payload.target_price if payload.target_price is not None else payload.entry_price * 0.85
     else:
-        stop = payload.stop_loss or payload.entry_price * 0.95
-        target = payload.target_price or payload.entry_price * 1.15
+        stop = payload.stop_loss if payload.stop_loss is not None else payload.entry_price * 0.95
+        target = payload.target_price if payload.target_price is not None else payload.entry_price * 1.15
     trade = Trade(
         ticker=payload.ticker.upper(),
         direction=direction,
