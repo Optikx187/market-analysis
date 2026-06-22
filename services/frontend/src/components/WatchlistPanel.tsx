@@ -32,6 +32,7 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
   const [pollInterval, setPollInterval] = useState(30); // seconds
   const [candleCounts, setCandleCounts] = useState<Record<string, number>>({});
   const [refreshing, setRefreshing] = useState<string | null>(null);
+  const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
 
   const load = () => fetchAssets().then(setAssets).catch(() => setFeedback("Unable to load watchlist."));
   
@@ -243,7 +244,7 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
         </button>
       </div>
 
-      <div className="space-y-2">
+      <div className="max-h-[420px] overflow-y-auto space-y-1">
         {assets.length === 0 && (
           <div className="rounded border border-dashed p-4 text-center text-sm text-[var(--muted-foreground)]">
             <p className="mb-1">Your watchlist is empty.</p>
@@ -252,43 +253,55 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
         )}
         {assets.map((a) => {
           const q = quotes[a.ticker];
+          const isExpanded = expandedTicker === a.ticker;
           return (
-            <div key={a.ticker} className="rounded border p-2">
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="font-medium">{a.ticker}</span>
-                  <span className="text-xs text-[var(--muted-foreground)] ml-2">{a.name}</span>
-                  <span className="text-xs ml-2 px-1.5 py-0.5 rounded bg-[var(--secondary)]">{a.asset_type}</span>
-                  {candleCounts[a.ticker] !== undefined && (
-                    <span className={`text-xs ml-2 px-1.5 py-0.5 rounded ${candleCounts[a.ticker] >= 201 ? "bg-green-600/20 text-green-400" : "bg-yellow-600/20 text-yellow-400"}`}>
-                      {candleCounts[a.ticker]} candles
+            <div key={a.ticker} className="rounded border">
+              {/* Compact row — always visible */}
+              <div
+                className="flex items-center gap-2 px-2 py-1.5 cursor-pointer hover:bg-[var(--secondary)]/30"
+                onClick={() => setExpandedTicker(isExpanded ? null : a.ticker)}
+              >
+                <span className="font-medium text-sm w-14 shrink-0">{a.ticker}</span>
+                <span className="text-xs text-[var(--muted-foreground)] truncate flex-1 min-w-0">{a.name}</span>
+                <span className="text-sm font-medium tabular-nums w-24 text-right">
+                  {q?.price ? `$${q.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : <span className="text-[var(--muted-foreground)] text-xs">Loading...</span>}
+                </span>
+                <span className={`text-xs tabular-nums w-16 text-right ${q?.change_pct !== undefined && q?.change_pct !== null ? (q.change_pct >= 0 ? "text-green-400" : "text-red-400") : "text-[var(--muted-foreground)]"}`}>
+                  {q?.change_pct !== undefined && q?.change_pct !== null ? `${q.change_pct >= 0 ? "+" : ""}${q.change_pct}%` : "—"}
+                </span>
+                <span className="text-[10px] px-1 py-0.5 rounded bg-[var(--secondary)] text-[var(--muted-foreground)] shrink-0">{a.asset_type}</span>
+                <svg className={`w-3 h-3 shrink-0 text-[var(--muted-foreground)] transition-transform ${isExpanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+              </div>
+              {/* Expanded details */}
+              {isExpanded && (
+                <div className="border-t border-[var(--border)] px-2 py-2 space-y-2">
+                  <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+                    <span>Vol: {q?.volume ? q.volume.toLocaleString() : "N/A"}</span>
+                    <span>·</span>
+                    <span className={candleCounts[a.ticker] >= 201 ? "text-green-400" : "text-yellow-400"}>
+                      {candleCounts[a.ticker] ?? 0} candles
                     </span>
-                  )}
+                  </div>
+                  <div className="flex gap-1">
+                    <button onClick={(e) => { e.stopPropagation(); handleRefresh(a.ticker); }} disabled={refreshing === a.ticker}
+                      className="rounded bg-[var(--secondary)] px-2 py-0.5 text-xs hover:bg-[var(--accent)]">
+                      {refreshing === a.ticker ? "Fetching..." : "Refresh Data"}
+                    </button>
+                    <button onClick={(e) => { e.stopPropagation(); handleAnalyze(a.ticker); }} disabled={analyzing === a.ticker || (candleCounts[a.ticker] || 0) < 201}
+                      className={`rounded px-2 py-0.5 text-xs ${
+                        (candleCounts[a.ticker] || 0) >= 201
+                          ? "bg-[var(--accent)] hover:bg-[var(--primary)] hover:text-[var(--primary-foreground)]"
+                          : "bg-[var(--secondary)] opacity-50 cursor-not-allowed"
+                      }`}>
+                      {analyzing === a.ticker ? "Analyzing..." : "Analyze"}
+                    </button>
+                    <button onClick={(e) => { e.stopPropagation(); handleRemove(a.ticker); }}
+                      className="rounded bg-[var(--destructive)] text-[var(--destructive-foreground)] px-2 py-0.5 text-xs">
+                      Remove
+                    </button>
+                  </div>
                 </div>
-                <div className="flex gap-1">
-                  <button onClick={() => handleRefresh(a.ticker)} disabled={refreshing === a.ticker}
-                    className="rounded bg-[var(--secondary)] px-2 py-0.5 text-xs hover:bg-[var(--accent)]">
-                    {refreshing === a.ticker ? "..." : "Refresh Data"}
-                  </button>
-                  <button onClick={() => handleAnalyze(a.ticker)} disabled={analyzing === a.ticker || (candleCounts[a.ticker] || 0) < 201}
-                    className={`rounded px-2 py-0.5 text-xs ${
-                      (candleCounts[a.ticker] || 0) >= 201 
-                        ? "bg-[var(--accent)] hover:bg-[var(--primary)] hover:text-[var(--primary-foreground)]" 
-                        : "bg-[var(--secondary)] opacity-50 cursor-not-allowed"
-                    }`}>
-                    {analyzing === a.ticker ? "..." : "Analyze"}
-                  </button>
-                  <button onClick={() => handleRemove(a.ticker)}
-                    className="rounded bg-[var(--destructive)] text-[var(--destructive-foreground)] px-2 py-0.5 text-xs">
-                    Remove
-                  </button>
-                </div>
-              </div>
-              <div className="mt-1 grid grid-cols-3 gap-2 text-xs text-[var(--muted-foreground)]">
-                <div>Price: <span className="text-[var(--foreground)]">{q?.price ? `$${q.price.toLocaleString()}` : ""}</span></div>
-                <div>24h/Day: <span className={q?.change_pct && q.change_pct >= 0 ? "text-green-400" : "text-red-400"}>{q?.change_pct ?? ""}%</span></div>
-                <div>Volume: <span className="text-[var(--foreground)]">{q?.volume ? q.volume.toLocaleString() : ""}</span></div>
-              </div>
+              )}
             </div>
           );
         })}

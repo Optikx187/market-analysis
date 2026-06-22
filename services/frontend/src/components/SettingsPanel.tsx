@@ -86,15 +86,28 @@ export default function SettingsPanel() {
   const [sysStatus, setSysStatus] = useState<SystemStatus | null>(null);
   const [replyTrades, setReplyTrades] = useState<ReplyTradesResponse | null>(null);
 
+  // Test notification state
+  const [testingSending, setTestingSending] = useState(false);
+  const [testResult, setTestResult] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  // System health refresh state
+  const [healthRefreshing, setHealthRefreshing] = useState(false);
+  const [healthLastUpdated, setHealthLastUpdated] = useState<Date | null>(null);
+
   const loadStatus = () => fetchCredentialStatus().then(setStatus).catch(() => {});
   const loadEnvSettings = () => fetchEnvSettings().then(setEnvSettings).catch(() => {});
   const loadChannels = () => fetchChannelStatus().then(setChannels).catch(() => {});
-  const loadSysStatus = () => fetchSystemStatus().then(setSysStatus).catch(() => {});
+  const loadSysStatus = () => fetchSystemStatus().then((d) => { setSysStatus(d); return true as const; }).catch(() => false as const);
   const loadReplyTrades = () => fetchReplyTrades().then(setReplyTrades).catch(() => {});
 
   useEffect(() => {
-    loadStatus(); loadEnvSettings(); loadChannels(); loadSysStatus(); loadReplyTrades();
-    const interval = setInterval(() => { loadSysStatus(); loadReplyTrades(); }, 30000);
+    loadStatus(); loadEnvSettings(); loadChannels();
+    loadSysStatus().then((ok) => { if (ok) setHealthLastUpdated(new Date()); });
+    loadReplyTrades();
+    const interval = setInterval(() => {
+      loadSysStatus().then((ok) => { if (ok) setHealthLastUpdated(new Date()); });
+      loadReplyTrades();
+    }, 15000);
     return () => clearInterval(interval);
   }, []);
 
@@ -232,26 +245,41 @@ export default function SettingsPanel() {
         </p>
         <button
           onClick={async () => {
-            setMessage(null);
+            setTestResult(null);
+            setTestingSending(true);
             try {
               const res = await testNotifications();
               if (res.success) {
-                setMessage({ type: "success", text: res.message });
+                setTestResult({ type: "success", text: res.message });
               } else {
                 const details: string[] = [];
                 if (res.results.telegram.configured && !res.results.telegram.sent) details.push("Telegram failed");
                 if (res.results.discord.configured && !res.results.discord.sent) details.push("Discord failed");
                 if (!res.results.telegram.configured && !res.results.discord.configured) details.push("No channels configured");
-                setMessage({ type: "error", text: `${res.message} ${details.join(", ")}` });
+                setTestResult({ type: "error", text: `${res.message} ${details.join(", ")}` });
               }
             } catch {
-              setMessage({ type: "error", text: "Failed to send test notification. Check that the notification service is running." });
+              setTestResult({ type: "error", text: "Failed to send test notification. Check that the notification service is running." });
+            } finally {
+              setTestingSending(false);
             }
           }}
-          className="rounded bg-[var(--secondary)] px-4 py-2 text-sm hover:bg-[var(--accent)] transition-colors"
+          disabled={testingSending}
+          className={`rounded px-4 py-2 text-sm font-medium transition-colors ${
+            testingSending
+              ? "bg-[var(--primary)] text-[var(--primary-foreground)] opacity-70 cursor-wait"
+              : "bg-[var(--secondary)] hover:bg-[var(--accent)]"
+          }`}
         >
-          Send Test Notification
+          {testingSending ? "Sending..." : "Send Test Notification"}
         </button>
+        {testResult && (
+          <div className={`mt-2 rounded border p-2 text-xs ${
+            testResult.type === "success" ? "border-green-600 bg-green-600/10 text-green-400" : "border-red-600 bg-red-600/10 text-red-400"
+          }`}>
+            {testResult.text}
+          </div>
+        )}
       </div>
 
       {/* Notification Channel Toggles */}
@@ -370,9 +398,30 @@ export default function SettingsPanel() {
 
       {/* System Health — Issue #12 */}
       <div className="mt-6 pt-4 border-t border-[var(--border)]">
-        <h3 className="text-sm font-medium mb-2">System Health</h3>
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-medium">System Health</h3>
+          <div className="flex items-center gap-2">
+            {healthLastUpdated && (
+              <span className="text-[10px] text-[var(--muted-foreground)]">
+                Updated {healthLastUpdated.toLocaleTimeString()}
+              </span>
+            )}
+            <button
+              onClick={async () => {
+                setHealthRefreshing(true);
+                const ok = await loadSysStatus();
+                if (ok) setHealthLastUpdated(new Date());
+                setHealthRefreshing(false);
+              }}
+              disabled={healthRefreshing}
+              className="rounded bg-[var(--secondary)] px-2 py-0.5 text-[10px] hover:bg-[var(--accent)] disabled:opacity-50"
+            >
+              {healthRefreshing ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
+        </div>
         <p className="text-xs text-[var(--muted-foreground)] mb-3">
-          Live connectivity status for external data providers. Data is auto-backfilled when a provider reconnects.
+          Live connectivity status for external data providers. Auto-refreshes every 15s.
         </p>
         {!sysStatus ? (
           <div className="text-sm text-[var(--muted-foreground)]">Loading system status...</div>
