@@ -27,6 +27,7 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
   const [lastDecision, setLastDecision] = useState<SignalDecision | null>(null);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
   const [feedback, setFeedback] = useState("");
+  const [lookupError, setLookupError] = useState("");
   const [pollingEnabled, setPollingEnabled] = useState(true);
   const [pollInterval, setPollInterval] = useState(30); // seconds
   const [candleCounts, setCandleCounts] = useState<Record<string, number>>({});
@@ -72,13 +73,20 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
   }, [assets, pollingEnabled, pollInterval]);
 
   useEffect(() => {
-    if (ticker.length < 2) { setName(""); return; }
+    if (ticker.length < 2) { setName(""); setLookupError(""); return; }
     const handle = setTimeout(() => {
       lookupSymbol(ticker, assetType).then((res) => {
-        if (res.name && res.name !== res.ticker) setName(res.name);
-        else if (res.recognized) setName(res.name);
-        else setName("");
-      }).catch(() => { setName(""); });
+        if (res.recognized && res.name && res.name !== res.ticker) {
+          setName(res.name);
+          setLookupError("");
+        } else if (res.recognized) {
+          setName(res.name);
+          setLookupError("");
+        } else {
+          setName("");
+          setLookupError(`"${ticker}" not recognized as a valid ${assetType} ticker.`);
+        }
+      }).catch(() => { setName(""); setLookupError(""); });
     }, 500);
     return () => clearTimeout(handle);
   }, [ticker, assetType]);
@@ -104,6 +112,7 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
       setTicker("");
       setName("");
       setFeedback("");
+      setLookupError("");
       load();
     } catch (e: any) {
       setFeedback(e?.response?.data?.detail || "Failed to add ticker.");
@@ -111,8 +120,13 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
   };
 
   const handleRemove = async (t: string) => {
-    await removeAsset(t);
-    load();
+    try {
+      await removeAsset(t);
+      setFeedback("");
+      load();
+    } catch (e: any) {
+      setFeedback(e?.response?.data?.detail || `Failed to remove ${t}. Please try again.`);
+    }
   };
 
   const handleAnalyze = async (t: string) => {
@@ -196,11 +210,12 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
         </div>
       </div>
       {feedback && <div className="mb-3 rounded border border-yellow-600 bg-yellow-600/10 p-2 text-xs text-yellow-300">{feedback}</div>}
+      {lookupError && <div className="mb-3 rounded border border-red-600 bg-red-600/10 p-2 text-xs text-red-300">{lookupError}</div>}
 
       <div className="flex flex-wrap gap-2 mb-4">
         <select
           className="rounded border bg-[var(--input)] px-2 py-1 text-sm"
-          value={assetType} onChange={(e) => { setAssetType(e.target.value); setName(""); }}
+          value={assetType} onChange={(e) => { setAssetType(e.target.value); setName(""); setLookupError(""); }}
         >
           <option value="crypto">Crypto</option>
           <option value="stock">Stock</option>

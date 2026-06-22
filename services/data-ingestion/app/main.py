@@ -17,7 +17,9 @@ from app.config import settings
 from app.database import get_db, init_db, async_session
 from app.models import Asset, AssetType, Candle
 from app.ingestion import refresh_asset_data, load_candles
-from app.ingestion import get_binance_symbol, get_crypto_name
+from app.ingestion import get_binance_symbol, get_crypto_name, CRYPTO_NAMES
+
+CRYPTO_NAMES_SET = set(CRYPTO_NAMES.keys())
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -203,11 +205,13 @@ async def add_asset(payload: AssetCreate, db: AsyncSession = Depends(get_db)):
     existing = await db.execute(
         select(Asset).where(Asset.ticker == payload.ticker.upper()),
     )
-    existing_asset = existing.scalar_one_or_none()
-    if existing_asset:
-        if existing_asset.is_active:
+    existing_assets = existing.scalars().all()
+    if existing_assets:
+        active = [a for a in existing_assets if a.is_active]
+        if active:
             raise HTTPException(400, "Asset already exists")
-        # Reactivate inactive asset
+        # Reactivate the first inactive asset
+        existing_asset = existing_assets[0]
         existing_asset.is_active = True
         existing_asset.name = payload.name
         await db.commit()
@@ -227,11 +231,14 @@ async def add_asset(payload: AssetCreate, db: AsyncSession = Depends(get_db)):
 
 @app.delete("/api/assets/{ticker}")
 async def remove_asset(ticker: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Asset).where(Asset.ticker == ticker.upper()))
-    asset = result.scalar_one_or_none()
-    if not asset:
+    result = await db.execute(
+        select(Asset).where(Asset.ticker == ticker.upper(), Asset.is_active == True)
+    )
+    assets = result.scalars().all()
+    if not assets:
         raise HTTPException(404, "Asset not found")
-    asset.is_active = False
+    for asset in assets:
+        asset.is_active = False
     await db.commit()
     return {"status": "removed", "ticker": ticker.upper()}
 
@@ -275,6 +282,7 @@ async def lookup_symbol(ticker: str, asset_type: str = "stock"):
     if asset_type.lower() == "crypto":
         symbol = get_binance_symbol(ticker)
         crypto_name = get_crypto_name(ticker)
+        is_known = ticker in CRYPTO_NAMES_SET
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": symbol})
@@ -282,20 +290,30 @@ async def lookup_symbol(ticker: str, asset_type: str = "stock"):
             record_api_success("binance")
             return SymbolLookupResponse(ticker=ticker, name=crypto_name, asset_type="crypto", recognized=True)
         except Exception:
-            return SymbolLookupResponse(ticker=ticker, name=crypto_name, asset_type="crypto", recognized=False)
-    info = {}
+            # Known crypto tickers are recognized even without Binance validation
+            return SymbolLookupResponse(ticker=ticker, name=crypto_name, asset_type="crypto", recognized=is_known)
+    has_market_data = False
     try:
-        info = yf.Ticker(ticker).fast_info or {}
+        fi = yf.Ticker(ticker).fast_info
+        has_market_data = fi is not None and hasattr(fi, "last_price") and fi.last_price is not None and fi.last_price > 0
     except Exception:
-        info = {}
+        has_market_data = False
     name = ticker
     try:
-        name = yf.Ticker(ticker).info.get("shortName") or ticker
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        name = (
+            info.get("shortName")
+            or info.get("longName")
+            or info.get("displayName")
+            or ticker
+        )
     except Exception:
         pass
-    if info:
+    recognized = has_market_data
+    if recognized:
         record_api_success("yahoo")
-    return SymbolLookupResponse(ticker=ticker, name=name, asset_type="stock", recognized=bool(info))
+    return SymbolLookupResponse(ticker=ticker, name=name, asset_type="stock", recognized=recognized)
 
 
 @app.get("/api/quotes/{ticker}", response_model=QuoteResponse)
