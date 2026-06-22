@@ -97,14 +97,15 @@ export default function SettingsPanel() {
   const loadStatus = () => fetchCredentialStatus().then(setStatus).catch(() => {});
   const loadEnvSettings = () => fetchEnvSettings().then(setEnvSettings).catch(() => {});
   const loadChannels = () => fetchChannelStatus().then(setChannels).catch(() => {});
-  const loadSysStatus = () => fetchSystemStatus().then(setSysStatus).catch(() => {});
+  const loadSysStatus = () => fetchSystemStatus().then((d) => { setSysStatus(d); return true as const; }).catch(() => false as const);
   const loadReplyTrades = () => fetchReplyTrades().then(setReplyTrades).catch(() => {});
 
   useEffect(() => {
-    loadStatus(); loadEnvSettings(); loadChannels(); loadSysStatus(); loadReplyTrades();
-    setHealthLastUpdated(new Date());
+    loadStatus(); loadEnvSettings(); loadChannels();
+    loadSysStatus().then((ok) => { if (ok) setHealthLastUpdated(new Date()); });
+    loadReplyTrades();
     const interval = setInterval(() => {
-      loadSysStatus().then(() => setHealthLastUpdated(new Date()));
+      loadSysStatus().then((ok) => { if (ok) setHealthLastUpdated(new Date()); });
       loadReplyTrades();
     }, 15000);
     return () => clearInterval(interval);
@@ -408,8 +409,8 @@ export default function SettingsPanel() {
             <button
               onClick={async () => {
                 setHealthRefreshing(true);
-                await loadSysStatus();
-                setHealthLastUpdated(new Date());
+                const ok = await loadSysStatus();
+                if (ok) setHealthLastUpdated(new Date());
                 setHealthRefreshing(false);
               }}
               disabled={healthRefreshing}
