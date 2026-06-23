@@ -6,7 +6,7 @@ const SECTIONS: { id: Section; title: string; icon: string }[] = [
   { id: "overview", title: "How It Works", icon: "📊" },
   { id: "watchlist", title: "Watchlist", icon: "👀" },
   { id: "signals", title: "Trading Signals", icon: "🚦" },
-  { id: "portfolio", title: "Paper Trading", icon: "💼" },
+  { id: "portfolio", title: "Portfolio & Trades", icon: "💼" },
   { id: "risk", title: "Risk Management", icon: "🛡️" },
   { id: "settings", title: "Configuration", icon: "⚙️" },
   { id: "glossary", title: "Glossary", icon: "📖" },
@@ -153,26 +153,25 @@ function SignalsSection() {
 
 function PortfolioSection() {
   return (
-    <DocSection title="Paper Trading (Virtual Portfolio)">
+    <DocSection title="Portfolio & Trade Tracking">
       <p>
-        Paper trading lets you practice with virtual money before risking real capital.
-        Your portfolio starts with <strong>$10,000</strong> in virtual funds.
+        The portfolio tracks your <strong>actual trades</strong> — buys and sells that you
+        report via the UI or Telegram bot. Signals generate alerts but do NOT auto-execute trades.
       </p>
-      <h4 className="text-sm font-semibold text-[var(--foreground)]">What Gets Tracked</h4>
+      <h4 className="text-sm font-semibold text-[var(--foreground)]">How It Works</h4>
       <ul className="list-disc list-inside space-y-1 text-xs">
-        <li><strong>Balance:</strong> Your available cash (starts at $10,000)</li>
-        <li><strong>Equity:</strong> Total value including open positions</li>
-        <li><strong>Win Rate:</strong> Percentage of profitable trades</li>
-        <li><strong>Max Drawdown:</strong> Largest peak-to-trough decline (lower is better)</li>
-        <li><strong>Profit Factor:</strong> Total gains divided by total losses (above 1.0 = profitable)</li>
+        <li><strong>Available Balance:</strong> Set this to your real trading capital</li>
+        <li><strong>Log Trade:</strong> Record a buy or sell when you execute one</li>
+        <li><strong>Close Position:</strong> Enter exit price to calculate realized P&L</li>
+        <li><strong>Telegram:</strong> Use <code>/bought AAPL 150 10</code> or <code>/sold AAPL 160 10</code></li>
       </ul>
       <p>
-        When a signal is generated, the system automatically executes a virtual trade at the current market price.
-        This lets you see how the strategy performs without any real risk.
+        Gains and losses are calculated from your reported entry and exit prices.
+        The system never assumes you acted on a signal — it only tracks what you tell it.
       </p>
       <Tip>
-        Paper trade for at least 30 days before using real money.
-        This gives you enough data to evaluate the strategy&apos;s performance.
+        Keep your balance updated so trade recommendations are correctly sized
+        relative to your actual capital.
       </Tip>
     </DocSection>
   );
@@ -208,7 +207,7 @@ function RiskSection() {
         />
         <RiskCard
           title="Portfolio Capital Guard"
-          desc="If a suggested trade exceeds 5% of your portfolio balance, it's automatically cancelled with a CAPITAL OVERSPEND warning — preventing oversized bets."
+          desc="If a suggested trade exceeds 5% of your available balance, it's flagged with a CAPITAL OVERSPEND warning — alerting you to avoid oversized positions."
         />
       </div>
       <Tip>

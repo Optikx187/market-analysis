@@ -244,6 +244,10 @@ export interface ManualTradeInput {
 export const logManualTrade = (trade: ManualTradeInput) =>
   api.post<Trade>("/trades/manual", trade).then((r) => r.data);
 
+// Close an open trade
+export const closeTrade = (tradeId: number, exitPrice: number) =>
+  api.post<Trade>(`/trades/${tradeId}/close`, { exit_price: exitPrice }).then((r) => r.data);
+
 // Notification channel toggles
 export interface ChannelStatus {
   configured: boolean;
