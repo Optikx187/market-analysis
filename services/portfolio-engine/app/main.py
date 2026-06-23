@@ -241,25 +241,19 @@ async def health():
 
 @app.post("/api/process-signal", response_model=SignalDecision)
 async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)):
-    """Receive a signal from quant-engine, validate against guardrails, execute paper trade."""
-    # Simple capital guardrail: position size should not exceed 5% of portfolio value
+    """Receive a signal from quant-engine, validate against guardrails, and log alert.
+
+    Trades are NOT auto-executed. The user reports actual trades via the UI or
+    Telegram bot commands (/bought, /sold).
+    """
     portfolio = await db.execute(select(Portfolio).limit(1))
     portfolio_row = portfolio.scalar_one_or_none()
     portfolio_value = portfolio_row.equity if portfolio_row else settings.INITIAL_BALANCE
-    
-    position_limit = portfolio_value * 0.05  # 5% position limit
-    overspend = signal.optimal_size_usd and signal.optimal_size_usd > position_limit
-    
-    approved = not signal.suppressed and not overspend
 
-    paper_trade_executed = False
-    if approved and signal.direction in ("BUY", "SELL"):
-        trade = await execute_paper_trade(
-            db, signal.ticker,
-            SignalDirection(signal.direction),
-            signal.trigger_price, signal.stop_loss, signal.target_price,
-        )
-        paper_trade_executed = trade is not None
+    position_limit = portfolio_value * 0.05
+    overspend = signal.optimal_size_usd and signal.optimal_size_usd > position_limit
+
+    approved = not signal.suppressed and not overspend
 
     reason_parts = [signal.reason]
     if signal.suppressed:
@@ -294,7 +288,7 @@ async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)
         kelly_pct=signal.kelly_pct,
         capital_overspend=overspend,
         reason=" | ".join(reason_parts),
-        paper_trade_executed=paper_trade_executed,
+        paper_trade_executed=False,
     )
 
 
@@ -388,6 +382,52 @@ async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends
     if position_cost > portfolio.balance:
         raise HTTPException(400, f"Insufficient balance: need ${position_cost:,.2f} but only ${portfolio.balance:,.2f} available")
     portfolio.balance -= position_cost
+    await db.commit()
+    await db.refresh(trade)
+    return trade
+
+
+class CloseTradeInput(BaseModel):
+    exit_price: float
+
+
+@app.post("/api/trades/{trade_id}/close", response_model=TradeResponse)
+async def close_trade(trade_id: int, payload: CloseTradeInput, db: AsyncSession = Depends(get_db)):
+    """Close an open trade at the given exit price, calculating realized P&L."""
+    result = await db.execute(select(Trade).where(Trade.id == trade_id))
+    trade = result.scalar_one_or_none()
+    if trade is None:
+        raise HTTPException(404, "Trade not found")
+    if trade.status != TradeStatus.OPEN:
+        raise HTTPException(400, "Trade is already closed")
+    if payload.exit_price <= 0:
+        raise HTTPException(400, "Exit price must be positive")
+
+    trade.exit_price = payload.exit_price
+    trade.status = TradeStatus.CLOSED
+    trade.closed_at = datetime.datetime.now(datetime.timezone.utc)
+
+    if trade.direction == SignalDirection.BUY:
+        trade.pnl = (payload.exit_price - trade.entry_price) * trade.quantity
+    else:
+        trade.pnl = (trade.entry_price - payload.exit_price) * trade.quantity
+    trade.pnl_pct = round((trade.pnl / (trade.entry_price * trade.quantity)) * 100, 2)
+
+    portfolio = await get_or_create_portfolio(db)
+    proceeds = payload.exit_price * trade.quantity
+    portfolio.balance += proceeds
+    portfolio.total_pnl += trade.pnl
+    portfolio.equity = portfolio.balance
+    if trade.pnl >= 0:
+        portfolio.win_count += 1
+    else:
+        portfolio.loss_count += 1
+    if portfolio.equity > portfolio.peak_equity:
+        portfolio.peak_equity = portfolio.equity
+    drawdown = ((portfolio.peak_equity - portfolio.equity) / portfolio.peak_equity * 100) if portfolio.peak_equity > 0 else 0
+    if drawdown > portfolio.max_drawdown:
+        portfolio.max_drawdown = round(drawdown, 2)
+
     await db.commit()
     await db.refresh(trade)
     return trade
@@ -679,30 +719,29 @@ class BalanceUpdateRequest(BaseModel):
 
 @app.post("/api/portfolio/balance")
 async def update_portfolio_balance(req: BalanceUpdateRequest, db: AsyncSession = Depends(get_db)):
-    """Update the current portfolio balance. Use this to sync real account balance."""
+    """Update the user's available trading balance."""
     if req.balance < 0:
         raise HTTPException(400, "Balance cannot be negative")
     portfolio = await get_or_create_portfolio(db)
     old_balance = portfolio.balance
 
-    # Account for capital locked in open paper trades
+    # Compute capital committed to open positions
     open_result = await db.execute(select(Trade).where(Trade.status == TradeStatus.OPEN))
     open_trades = open_result.scalars().all()
     locked_capital = sum(t.quantity * t.entry_price for t in open_trades)
 
-    portfolio.equity = req.balance
-    portfolio.balance = req.balance - locked_capital
-    if portfolio.balance < 0:
-        portfolio.balance = 0.0
-    if req.balance > portfolio.peak_equity:
-        portfolio.peak_equity = req.balance
+    # The user declares their total available capital; equity = balance + locked
+    portfolio.balance = req.balance
+    portfolio.equity = req.balance + locked_capital
+    if portfolio.equity > portfolio.peak_equity:
+        portfolio.peak_equity = portfolio.equity
     await db.commit()
     return {
         "previous_balance": round(old_balance, 2),
         "new_balance": round(portfolio.balance, 2),
-        "equity": round(req.balance, 2),
+        "equity": round(portfolio.equity, 2),
         "locked_in_positions": round(locked_capital, 2),
-        "message": f"Balance updated from ${old_balance:,.2f} to ${req.balance:,.2f}",
+        "message": f"Available balance updated to ${req.balance:,.2f}",
     }
 
 

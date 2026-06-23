@@ -9,12 +9,10 @@ import {
   fetchChannelStatus,
   toggleChannel,
   fetchSystemStatus,
-  fetchReplyTrades,
   type CredentialStatus,
   type EnvSetting,
   type ChannelStatus,
   type SystemStatus,
-  type ReplyTradesResponse,
 } from "@/lib/api";
 
 interface EditingService {
@@ -84,7 +82,7 @@ export default function SettingsPanel() {
 
   // System health state
   const [sysStatus, setSysStatus] = useState<SystemStatus | null>(null);
-  const [replyTrades, setReplyTrades] = useState<ReplyTradesResponse | null>(null);
+
 
   // Test notification state
   const [testingSending, setTestingSending] = useState(false);
@@ -98,15 +96,13 @@ export default function SettingsPanel() {
   const loadEnvSettings = () => fetchEnvSettings().then(setEnvSettings).catch(() => {});
   const loadChannels = () => fetchChannelStatus().then(setChannels).catch(() => {});
   const loadSysStatus = () => fetchSystemStatus().then((d) => { setSysStatus(d); return true as const; }).catch(() => false as const);
-  const loadReplyTrades = () => fetchReplyTrades().then(setReplyTrades).catch(() => {});
+
 
   useEffect(() => {
     loadStatus(); loadEnvSettings(); loadChannels();
     loadSysStatus().then((ok) => { if (ok) setHealthLastUpdated(new Date()); });
-    loadReplyTrades();
     const interval = setInterval(() => {
       loadSysStatus().then((ok) => { if (ok) setHealthLastUpdated(new Date()); });
-      loadReplyTrades();
     }, 15000);
     return () => clearInterval(interval);
   }, []);
@@ -479,50 +475,7 @@ export default function SettingsPanel() {
         )}
       </div>
 
-      {/* Telegram Bot Reply Trades — Issue #11 */}
-      <div className="mt-6 pt-4 border-t border-[var(--border)]">
-        <h3 className="text-sm font-medium mb-2">Telegram Trade Replies</h3>
-        <p className="text-xs text-[var(--muted-foreground)] mb-3">
-          Trades logged via Telegram bot commands (<code>/bought</code>, <code>/sold</code>).
-          Bot status: {replyTrades?.bot_active ? (
-            <span className="text-green-400">● Active</span>
-          ) : (
-            <span className="text-[var(--muted-foreground)]">○ Inactive</span>
-          )}
-        </p>
-        {replyTrades && replyTrades.trades.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-[var(--muted-foreground)]">
-                  <th className="text-left py-1">Time</th>
-                  <th className="text-left py-1">User</th>
-                  <th className="text-left py-1">Ticker</th>
-                  <th className="text-left py-1">Dir</th>
-                  <th className="text-right py-1">Price</th>
-                  <th className="text-right py-1">Qty</th>
-                </tr>
-              </thead>
-              <tbody>
-                {replyTrades.trades.slice(-10).reverse().map((t, i) => (
-                  <tr key={i} className="border-t border-[var(--border)]">
-                    <td className="py-1">{new Date(t.timestamp).toLocaleTimeString()}</td>
-                    <td className="py-1">@{t.user}</td>
-                    <td className="py-1 font-medium">{t.ticker}</td>
-                    <td className={`py-1 ${t.direction === "BUY" ? "text-green-400" : "text-red-400"}`}>{t.direction}</td>
-                    <td className="py-1 text-right">${t.entry_price.toLocaleString()}</td>
-                    <td className="py-1 text-right">{t.quantity}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="text-xs text-[var(--muted-foreground)]">
-            No trades logged via Telegram yet. Use <code>/bought BTC 65000 0.1</code> to log a trade.
-          </div>
-        )}
-      </div>
+      {/* Telegram trade replies moved to Portfolio panel */}
     </div>
   );
 }
