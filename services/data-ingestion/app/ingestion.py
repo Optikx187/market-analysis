@@ -1,8 +1,8 @@
-"""Data ingestion: fetch historical OHLCV data from yfinance and Binance."""
+"""Data ingestion: fetch historical OHLCV data from yfinance, Binance, and Alpaca."""
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import httpx
 import pandas as pd
@@ -10,12 +10,14 @@ import yfinance as yf
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import async_session
 from app.models import Asset, AssetType, Candle
 
 logger = logging.getLogger(__name__)
 
 BINANCE_REST_URL = "https://api.binance.com/api/v3"
+ALPACA_DATA_URL = "https://data.alpaca.markets/v2"
 CRYPTO_BINANCE_MAP = {"BTC": "BTCUSDT", "ETH": "ETHUSDT"}
 
 CRYPTO_NAMES = {
@@ -93,6 +95,53 @@ async def fetch_historical_binance(
     return pd.DataFrame(rows)
 
 
+async def fetch_historical_alpaca(
+    ticker: str, days: int = 365,
+) -> pd.DataFrame:
+    """Fetch daily bars from Alpaca Markets for stock tickers."""
+    if not settings.ALPACA_API_KEY or not settings.ALPACA_API_SECRET:
+        return pd.DataFrame()
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    url = f"{ALPACA_DATA_URL}/stocks/{ticker}/bars"
+    headers = {
+        "APCA-API-KEY-ID": settings.ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": settings.ALPACA_API_SECRET,
+    }
+    params = {
+        "timeframe": "1Day",
+        "start": start.strftime("%Y-%m-%dT00:00:00Z"),
+        "end": end.strftime("%Y-%m-%dT00:00:00Z"),
+        "limit": 10000,
+        "adjustment": "split",
+    }
+    rows: list[dict] = []
+    page_token = None
+    async with httpx.AsyncClient(timeout=30) as client:
+        while True:
+            p = {**params}
+            if page_token:
+                p["page_token"] = page_token
+            resp = await client.get(url, headers=headers, params=p)
+            resp.raise_for_status()
+            data = resp.json()
+            for bar in data.get("bars") or []:
+                rows.append({
+                    "timestamp": datetime.fromisoformat(bar["t"].replace("Z", "+00:00")),
+                    "open": float(bar["o"]),
+                    "high": float(bar["h"]),
+                    "low": float(bar["l"]),
+                    "close": float(bar["c"]),
+                    "volume": float(bar["v"]),
+                })
+            page_token = data.get("next_page_token")
+            if not page_token:
+                break
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
 async def fetch_historical(ticker: str, asset_type: AssetType) -> pd.DataFrame:
     if asset_type == AssetType.CRYPTO:
         symbol = get_binance_symbol(ticker)
@@ -104,6 +153,14 @@ async def fetch_historical(ticker: str, asset_type: AssetType) -> pd.DataFrame:
             logger.warning(f"Binance failed for {symbol}, fallback to yfinance: {e}")
         yf_ticker = f"{ticker}-USD" if not ticker.endswith("-USD") else ticker
         return await fetch_historical_yfinance(yf_ticker, "1y", "1d")
+    # Stocks: try Alpaca first (if keys configured), then yfinance
+    try:
+        df = await fetch_historical_alpaca(ticker)
+        if not df.empty:
+            logger.info(f"Alpaca returned {len(df)} bars for {ticker}")
+            return df
+    except Exception as e:
+        logger.warning(f"Alpaca failed for {ticker}, fallback to yfinance: {e}")
     return await fetch_historical_yfinance(ticker, "1y", "1d")
 
 

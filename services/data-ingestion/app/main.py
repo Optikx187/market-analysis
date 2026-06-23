@@ -31,6 +31,7 @@ _service_start_time: str = datetime.now(timezone.utc).isoformat()
 _connectivity: dict[str, dict] = {
     "binance": {"online": False, "last_checked": None, "last_online": None, "last_offline": None},
     "yahoo": {"online": False, "last_checked": None, "last_online": None, "last_offline": None},
+    "alpaca": {"online": False, "last_checked": None, "last_online": None, "last_offline": None},
 }
 _downtime_log: list[dict] = []
 
@@ -145,6 +146,17 @@ async def _health_check_loop():
             if yahoo_ok:
                 record_api_success("yahoo")
 
+            # Alpaca health check (only if configured)
+            alpaca_ok = False
+            if settings.ALPACA_API_KEY and settings.ALPACA_API_SECRET:
+                alpaca_ok = await _check_provider_health(
+                    "alpaca",
+                    "https://paper-api.alpaca.markets/v2/clock",
+                )
+                _update_connectivity("alpaca", alpaca_ok)
+                if alpaca_ok:
+                    record_api_success("alpaca")
+
             # Auto-backfill on reconnect (skip first check — initial_fetch handles startup)
             if not first_check:
                 if (binance_ok and was_binance_offline) or (yahoo_ok and was_yahoo_offline):
@@ -229,6 +241,54 @@ async def add_asset(payload: AssetCreate, db: AsyncSession = Depends(get_db)):
     return asset
 
 
+class AssetImportItem(BaseModel):
+    ticker: str
+    name: str
+    asset_type: str
+
+
+@app.get("/api/assets/export")
+async def export_assets(db: AsyncSession = Depends(get_db)):
+    """Export all active assets as a JSON list."""
+    result = await db.execute(select(Asset).where(Asset.is_active == True).order_by(Asset.ticker))
+    assets = result.scalars().all()
+    return [{"ticker": a.ticker, "name": a.name, "asset_type": a.asset_type} for a in assets]
+
+
+@app.post("/api/assets/import")
+async def import_assets(items: list[AssetImportItem], db: AsyncSession = Depends(get_db)):
+    """Bulk-import assets. Skips duplicates and reactivates soft-deleted tickers."""
+    added = []
+    skipped = []
+    reactivated = []
+    for item in items:
+        t = item.ticker.upper()
+        existing = await db.execute(select(Asset).where(Asset.ticker == t))
+        existing_assets = existing.scalars().all()
+        if existing_assets:
+            active = [a for a in existing_assets if a.is_active]
+            if active:
+                skipped.append(t)
+                continue
+            ex = existing_assets[0]
+            ex.is_active = True
+            ex.name = item.name
+            reactivated.append(t)
+            continue
+        asset_type = AssetType.CRYPTO if item.asset_type.lower() == "crypto" else AssetType.STOCK
+        asset = Asset(ticker=t, name=item.name, asset_type=asset_type)
+        db.add(asset)
+        added.append(t)
+    await db.commit()
+    # Trigger background data refresh for new/reactivated assets
+    for t in added + reactivated:
+        r = await db.execute(select(Asset).where(Asset.ticker == t))
+        a = r.scalar_one_or_none()
+        if a:
+            asyncio.create_task(refresh_asset_data(a.ticker, a.asset_type))
+    return {"added": added, "reactivated": reactivated, "skipped": skipped, "total_imported": len(added) + len(reactivated)}
+
+
 @app.delete("/api/assets/{ticker}")
 async def remove_asset(ticker: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
@@ -276,6 +336,36 @@ async def get_candles(
     return records
 
 
+@app.get("/api/assets/candle-counts")
+async def get_all_candle_counts(db: AsyncSession = Depends(get_db)):
+    """Return candle counts for all active assets in a single request."""
+    result = await db.execute(select(Asset).where(Asset.is_active == True))
+    assets = result.scalars().all()
+    counts: dict[str, int] = {}
+    for asset in assets:
+        count_result = await db.execute(
+            select(Candle.id).where(Candle.ticker == asset.ticker, Candle.interval == "1d")
+        )
+        counts[asset.ticker] = len(count_result.all())
+    return counts
+
+
+@app.post("/api/assets/refresh-all")
+async def refresh_all_assets(db: AsyncSession = Depends(get_db)):
+    """Refresh historical data for all active assets."""
+    result = await db.execute(select(Asset).where(Asset.is_active == True))
+    assets = result.scalars().all()
+    results: dict[str, dict] = {}
+    for asset in assets:
+        try:
+            await refresh_asset_data(asset.ticker, asset.asset_type)
+            df = await load_candles(db, asset.ticker, "1d")
+            results[asset.ticker] = {"status": "success", "candles": len(df)}
+        except Exception as e:
+            results[asset.ticker] = {"status": "error", "error": str(e)}
+    return {"refreshed": len([r for r in results.values() if r["status"] == "success"]), "total": len(assets), "details": results}
+
+
 @app.get("/api/symbols/lookup/{ticker}", response_model=SymbolLookupResponse)
 async def lookup_symbol(ticker: str, asset_type: str = "stock"):
     ticker = ticker.upper()
@@ -316,6 +406,43 @@ async def lookup_symbol(ticker: str, asset_type: str = "stock"):
     return SymbolLookupResponse(ticker=ticker, name=name, asset_type="stock", recognized=recognized)
 
 
+async def _alpaca_stock_quote(ticker: str) -> QuoteResponse | None:
+    """Try to get a stock quote from Alpaca. Returns None if unconfigured or fails."""
+    if not settings.ALPACA_API_KEY or not settings.ALPACA_API_SECRET:
+        return None
+    headers = {
+        "APCA-API-KEY-ID": settings.ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": settings.ALPACA_API_SECRET,
+    }
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            snap_resp = await client.get(
+                f"https://data.alpaca.markets/v2/stocks/{ticker}/snapshot",
+                headers=headers,
+            )
+            snap_resp.raise_for_status()
+            snap = snap_resp.json()
+        trade = snap.get("latestTrade") or {}
+        prev_bar = snap.get("prevDailyBar") or {}
+        daily_bar = snap.get("dailyBar") or {}
+        price = trade.get("p")
+        prev_close = prev_bar.get("c")
+        volume = daily_bar.get("v")
+        change_pct = round(((price - prev_close) / prev_close) * 100, 2) if price and prev_close else None
+        record_api_success("alpaca")
+        return QuoteResponse(
+            ticker=ticker, name=ticker, asset_type="stock",
+            price=float(price) if price else None,
+            change_pct=change_pct,
+            volume=float(volume) if volume else None,
+            updated_at=now,
+        )
+    except Exception as e:
+        logger.debug(f"Alpaca quote failed for {ticker}: {e}")
+        return None
+
+
 @app.get("/api/quotes/{ticker}", response_model=QuoteResponse)
 async def get_quote(ticker: str, asset_type: str = "stock"):
     ticker = ticker.upper()
@@ -336,6 +463,10 @@ async def get_quote(ticker: str, asset_type: str = "stock"):
             volume=float(data.get("volume")) if data.get("volume") else None,
             updated_at=now,
         )
+    # Stocks: try Alpaca first, then Yahoo
+    alpaca_quote = await _alpaca_stock_quote(ticker)
+    if alpaca_quote:
+        return alpaca_quote
     info = yf.Ticker(ticker).fast_info
     if info:
         record_api_success("yahoo")

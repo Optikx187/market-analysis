@@ -135,6 +135,14 @@ export const fetchCandles = (ticker: string) =>
   api.get(`/candles/${ticker}`).then((r) => r.data);
 export const refreshData = (ticker: string) =>
   api.post(`/assets/${ticker}/refresh`).then((r) => r.data);
+export const refreshAllData = () =>
+  api.post<{ refreshed: number; total: number; details: Record<string, { status: string; candles?: number; error?: string }> }>("/assets/refresh-all").then((r) => r.data);
+export const fetchCandleCounts = () =>
+  api.get<Record<string, number>>("/assets/candle-counts").then((r) => r.data);
+export const exportAssets = () =>
+  api.get<Array<{ ticker: string; name: string; asset_type: string }>>("/assets/export").then((r) => r.data);
+export const importAssets = (items: Array<{ ticker: string; name: string; asset_type: string }>) =>
+  api.post<{ added: string[]; reactivated: string[]; skipped: string[]; total_imported: number }>("/assets/import", items).then((r) => r.data);
 export const fetchQuote = (ticker: string, asset_type: string = "stock") =>
   api.get<Quote>(`/quotes/${ticker}`, { params: { asset_type } }).then((r) => r.data);
 export const lookupSymbol = (ticker: string, asset_type: string = "stock") =>

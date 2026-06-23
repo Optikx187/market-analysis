@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   fetchAssets,
   addAsset,
@@ -7,8 +7,11 @@ import {
   processSignal,
   fetchQuote,
   lookupSymbol,
-  fetchCandles,
+  fetchCandleCounts,
   refreshData,
+  refreshAllData,
+  exportAssets,
+  importAssets,
   type Asset,
   type Quote,
   type SignalDecision,
@@ -29,47 +32,51 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
   const [feedback, setFeedback] = useState("");
   const [lookupError, setLookupError] = useState("");
   const [pollingEnabled, setPollingEnabled] = useState(true);
-  const [pollInterval, setPollInterval] = useState(30); // seconds
+  const [pollInterval, setPollInterval] = useState(30);
   const [candleCounts, setCandleCounts] = useState<Record<string, number>>({});
   const [refreshing, setRefreshing] = useState<string | null>(null);
+  const [refreshingAll, setRefreshingAll] = useState(false);
   const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const load = () => fetchAssets().then(setAssets).catch(() => setFeedback("Unable to load watchlist."));
-  
+
   const loadCandleCounts = async () => {
-    const counts: Record<string, number> = {};
-    for (const asset of assets) {
-      try {
-        const candles = await fetchCandles(asset.ticker);
-        counts[asset.ticker] = candles?.length || 0;
-      } catch {
-        counts[asset.ticker] = 0;
-      }
+    try {
+      const counts = await fetchCandleCounts();
+      setCandleCounts(counts);
+    } catch {
+      // Fallback: no counts available
     }
-    setCandleCounts(counts);
   };
 
   useEffect(() => { load(); }, []);
   useEffect(() => { 
     if (assets.length > 0) loadCandleCounts();
-  }, [assets]);
+  }, [assets.length]);
 
-  // Polling effect for live price updates
+  // Polling: batch quote fetches with Promise.all
   useEffect(() => {
     if (!pollingEnabled || assets.length === 0) return;
     
     const fetchQuotes = () => {
-      assets.forEach((a) => {
-        fetchQuote(a.ticker, a.asset_type).then((q) => setQuotes((p) => ({ ...p, [a.ticker]: q }))).catch(() => {});
+      Promise.all(
+        assets.map((a) =>
+          fetchQuote(a.ticker, a.asset_type)
+            .then((q) => ({ ticker: a.ticker, quote: q }))
+            .catch(() => null)
+        )
+      ).then((results) => {
+        const updated: Record<string, Quote> = {};
+        for (const r of results) {
+          if (r) updated[r.ticker] = r.quote;
+        }
+        setQuotes((prev) => ({ ...prev, ...updated }));
       });
     };
     
-    // Initial fetch
     fetchQuotes();
-    
-    // Set up interval
     const interval = setInterval(fetchQuotes, pollInterval * 1000);
-    
     return () => clearInterval(interval);
   }, [assets, pollingEnabled, pollInterval]);
 
@@ -96,7 +103,6 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
     if (!ticker || !name) return;
     setFeedback("");
     
-    // Validate ticker exists via API before adding
     try {
       const lookup = await lookupSymbol(ticker, assetType);
       if (!lookup.recognized) {
@@ -134,7 +140,6 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
     setAnalyzing(t);
     setFeedback("");
     try {
-      // Check if we have enough candle data
       const candleCount = candleCounts[t] || 0;
       if (candleCount < 201) {
         setFeedback(`${t}: Insufficient data (${candleCount} candles, need 201+). Click "Refresh Data" to fetch historical data.`);
@@ -182,6 +187,70 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
     }
   };
 
+  const handleRefreshAll = async () => {
+    setRefreshingAll(true);
+    setFeedback(`Refreshing data for all ${assets.length} tickers...`);
+    try {
+      const result = await refreshAllData();
+      const details = result.details;
+      const newCounts: Record<string, number> = {};
+      for (const [t, d] of Object.entries(details)) {
+        if (d.candles !== undefined) newCounts[t] = d.candles;
+      }
+      setCandleCounts((prev) => ({ ...prev, ...newCounts }));
+      setFeedback(`Refreshed ${result.refreshed}/${result.total} tickers successfully.`);
+    } catch (e: any) {
+      setFeedback(e?.response?.data?.detail || "Failed to refresh all data.");
+    } finally {
+      setRefreshingAll(false);
+    }
+  };
+
+  const handleExport = async () => {
+    try {
+      const data = await exportAssets();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `watchlist-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setFeedback(`Exported ${data.length} tickers.`);
+    } catch {
+      setFeedback("Failed to export watchlist.");
+    }
+  };
+
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const items = JSON.parse(text);
+      if (!Array.isArray(items) || items.length === 0) {
+        setFeedback("Invalid file: expected a JSON array of tickers.");
+        return;
+      }
+      // Validate shape
+      for (const item of items) {
+        if (!item.ticker || !item.name || !item.asset_type) {
+          setFeedback('Invalid format: each item needs "ticker", "name", and "asset_type" fields.');
+          return;
+        }
+      }
+      const result = await importAssets(items);
+      setFeedback(
+        `Imported ${result.total_imported} tickers (${result.added.length} new, ${result.reactivated.length} reactivated, ${result.skipped.length} skipped).`
+      );
+      load();
+    } catch {
+      setFeedback("Failed to import: invalid JSON file.");
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
   return (
     <div className="rounded-lg border bg-[var(--card)] p-4">
       <div className="flex items-center justify-between mb-3">
@@ -210,6 +279,36 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
           </select>
         </div>
       </div>
+
+      {/* Action bar: Refresh All, Export, Import */}
+      {assets.length > 0 && (
+        <div className="flex gap-2 mb-3">
+          <button
+            onClick={handleRefreshAll}
+            disabled={refreshingAll}
+            className="rounded bg-[var(--secondary)] px-2 py-1 text-xs hover:bg-[var(--accent)] disabled:opacity-50"
+          >
+            {refreshingAll ? "Refreshing..." : "Refresh All"}
+          </button>
+          <button
+            onClick={handleExport}
+            className="rounded bg-[var(--secondary)] px-2 py-1 text-xs hover:bg-[var(--accent)]"
+          >
+            Export
+          </button>
+          <label className="rounded bg-[var(--secondary)] px-2 py-1 text-xs hover:bg-[var(--accent)] cursor-pointer">
+            Import
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json"
+              onChange={handleImport}
+              className="hidden"
+            />
+          </label>
+        </div>
+      )}
+
       {feedback && <div className="mb-3 rounded border border-yellow-600 bg-yellow-600/10 p-2 text-xs text-yellow-300">{feedback}</div>}
       {lookupError && <div className="mb-3 rounded border border-red-600 bg-red-600/10 p-2 text-xs text-red-300">{lookupError}</div>}
 
@@ -244,13 +343,25 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
         </button>
       </div>
 
+      {/* Empty state with import option */}
+      {assets.length === 0 && (
+        <div className="rounded border border-dashed p-4 text-center text-sm text-[var(--muted-foreground)]">
+          <p className="mb-1">Your watchlist is empty.</p>
+          <p className="text-xs mb-2">Add tickers above to start tracking. Examples: <strong>BTC</strong>, <strong>ETH</strong>, <strong>SPY</strong>, <strong>AAPL</strong></p>
+          <label className="inline-block rounded bg-[var(--secondary)] px-3 py-1 text-xs hover:bg-[var(--accent)] cursor-pointer">
+            Import from file
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json"
+              onChange={handleImport}
+              className="hidden"
+            />
+          </label>
+        </div>
+      )}
+
       <div className="max-h-[420px] overflow-y-auto space-y-1">
-        {assets.length === 0 && (
-          <div className="rounded border border-dashed p-4 text-center text-sm text-[var(--muted-foreground)]">
-            <p className="mb-1">Your watchlist is empty.</p>
-            <p className="text-xs">Add tickers above to start tracking. Examples: <strong> BTC</strong>, <strong>ETH</strong>, <strong>SPY</strong>, <strong>AAPL</strong></p>
-          </div>
-        )}
         {assets.map((a) => {
           const q = quotes[a.ticker];
           const isExpanded = expandedTicker === a.ticker;
