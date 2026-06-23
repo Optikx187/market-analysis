@@ -152,6 +152,7 @@ async def _health_check_loop():
                 alpaca_ok = await _check_provider_health(
                     "alpaca",
                     "https://paper-api.alpaca.markets/v2/clock",
+                    any_response_ok=True,
                 )
                 _update_connectivity("alpaca", alpaca_ok)
                 if alpaca_ok:
