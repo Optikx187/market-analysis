@@ -129,7 +129,8 @@ async def _health_check_loop():
     while True:
         try:
             binance_ok = await _check_provider_health(
-                "binance", "https://api.binance.com/api/v3/ping"
+                "binance", "https://api.binance.com/api/v3/ping",
+                any_response_ok=True,
             )
             was_binance_offline = not _connectivity["binance"]["online"]
             _update_connectivity("binance", binance_ok)
@@ -450,31 +451,65 @@ async def get_quote(ticker: str, asset_type: str = "stock"):
     now = datetime.now(timezone.utc).isoformat()
     if asset_type.lower() == "crypto":
         symbol = get_binance_symbol(ticker)
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get("https://api.binance.com/api/v3/ticker/24hr", params={"symbol": symbol})
-            resp.raise_for_status()
-            data = resp.json()
-        record_api_success("binance")
-        return QuoteResponse(
-            ticker=ticker,
-            name=ticker,
-            asset_type="crypto",
-            price=float(data.get("lastPrice")) if data.get("lastPrice") else None,
-            change_pct=float(data.get("priceChangePercent")) if data.get("priceChangePercent") else None,
-            volume=float(data.get("volume")) if data.get("volume") else None,
-            updated_at=now,
-        )
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get("https://api.binance.com/api/v3/ticker/24hr", params={"symbol": symbol})
+                resp.raise_for_status()
+                data = resp.json()
+            record_api_success("binance")
+            return QuoteResponse(
+                ticker=ticker,
+                name=get_crypto_name(ticker),
+                asset_type="crypto",
+                price=float(data.get("lastPrice")) if data.get("lastPrice") else None,
+                change_pct=float(data.get("priceChangePercent")) if data.get("priceChangePercent") else None,
+                volume=float(data.get("volume")) if data.get("volume") else None,
+                updated_at=now,
+            )
+        except Exception as e:
+            logger.warning(f"Binance quote failed for {ticker}, falling back to yfinance: {e}")
+        # Fallback: yfinance for crypto
+        yf_ticker = f"{ticker}-USD" if not ticker.endswith("-USD") else ticker
+        try:
+            info = yf.Ticker(yf_ticker).fast_info
+            last = getattr(info, "last_price", None)
+            previous = getattr(info, "previous_close", None)
+            volume = getattr(info, "last_volume", None)
+            change_pct = round(((last - previous) / previous) * 100, 2) if last and previous else None
+            record_api_success("yahoo")
+            return QuoteResponse(
+                ticker=ticker,
+                name=get_crypto_name(ticker),
+                asset_type="crypto",
+                price=float(last) if last else None,
+                change_pct=change_pct,
+                volume=float(volume) if volume else None,
+                updated_at=now,
+            )
+        except Exception as e:
+            logger.warning(f"yfinance quote also failed for {ticker}: {e}")
+            return QuoteResponse(
+                ticker=ticker, name=get_crypto_name(ticker), asset_type="crypto",
+                price=None, change_pct=None, volume=None, updated_at=now,
+            )
     # Stocks: try Alpaca first, then Yahoo
     alpaca_quote = await _alpaca_stock_quote(ticker)
     if alpaca_quote:
         return alpaca_quote
-    info = yf.Ticker(ticker).fast_info
-    if info:
-        record_api_success("yahoo")
-    last = getattr(info, "last_price", None) or (info.get("last_price") if isinstance(info, dict) else None)
-    previous = getattr(info, "previous_close", None) or (info.get("previous_close") if isinstance(info, dict) else None)
-    volume = getattr(info, "last_volume", None) or (info.get("last_volume") if isinstance(info, dict) else None)
-    change_pct = ((last - previous) / previous * 100) if last and previous else None
+    try:
+        info = yf.Ticker(ticker).fast_info
+        if info:
+            record_api_success("yahoo")
+        last = getattr(info, "last_price", None) or (info.get("last_price") if isinstance(info, dict) else None)
+        previous = getattr(info, "previous_close", None) or (info.get("previous_close") if isinstance(info, dict) else None)
+        volume = getattr(info, "last_volume", None) or (info.get("last_volume") if isinstance(info, dict) else None)
+        change_pct = ((last - previous) / previous * 100) if last and previous else None
+    except Exception as e:
+        logger.warning(f"yfinance quote failed for {ticker}: {e}")
+        last = None
+        previous = None
+        volume = None
+        change_pct = None
     name = ticker
     try:
         name = yf.Ticker(ticker).info.get("shortName") or ticker
