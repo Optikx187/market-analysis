@@ -205,6 +205,7 @@ async def load_candles(
 
 
 async def refresh_asset_data(ticker: str, asset_type: AssetType):
+    ticker = ticker.strip()
     df = await fetch_historical(ticker, asset_type)
     if df.empty:
         logger.warning(f"No data for {ticker}")

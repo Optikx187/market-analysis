@@ -81,9 +81,10 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
   }, [assets, pollingEnabled, pollInterval]);
 
   useEffect(() => {
-    if (ticker.length < 2) { setName(""); setLookupError(""); return; }
+    const trimmed = ticker.trim();
+    if (trimmed.length < 2) { setName(""); setLookupError(""); return; }
     const handle = setTimeout(() => {
-      lookupSymbol(ticker, assetType).then((res) => {
+      lookupSymbol(trimmed, assetType).then((res) => {
         if (res.recognized && res.name && res.name !== res.ticker) {
           setName(res.name);
           setLookupError("");
@@ -92,7 +93,7 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
           setLookupError("");
         } else {
           setName("");
-          setLookupError(`"${ticker}" not recognized as a valid ${assetType} ticker.`);
+          setLookupError(`"${trimmed}" not recognized as a valid ${assetType} ticker.`);
         }
       }).catch(() => { setName(""); setLookupError(""); });
     }, 500);
@@ -100,13 +101,15 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
   }, [ticker, assetType]);
 
   const handleAdd = async () => {
-    if (!ticker || !name) return;
+    const trimmedTicker = ticker.trim();
+    const trimmedName = name.trim();
+    if (!trimmedTicker || !trimmedName) return;
     setFeedback("");
     
     try {
-      const lookup = await lookupSymbol(ticker, assetType);
+      const lookup = await lookupSymbol(trimmedTicker, assetType);
       if (!lookup.recognized) {
-        setFeedback(`Ticker "${ticker}" not found on ${assetType === "crypto" ? "Binance" : "market data provider"}. Please check the symbol and try again.`);
+        setFeedback(`Ticker "${trimmedTicker}" not found on ${assetType === "crypto" ? "Binance" : "market data provider"}. Please check the symbol and try again.`);
         return;
       }
     } catch (e: any) {
@@ -115,7 +118,7 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
     }
     
     try {
-      await addAsset(ticker, name, assetType);
+      await addAsset(trimmedTicker, trimmedName, assetType);
       setTicker("");
       setName("");
       setFeedback("");
