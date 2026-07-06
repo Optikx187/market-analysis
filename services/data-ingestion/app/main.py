@@ -95,7 +95,24 @@ class QuoteResponse(BaseModel):
     updated_at: str
 
 
+async def _cleanup_ticker_whitespace():
+    """Strip leading/trailing whitespace from all ticker symbols in the database."""
+    async with async_session() as db:
+        result = await db.execute(select(Asset))
+        assets = result.scalars().all()
+        fixed = 0
+        for asset in assets:
+            stripped = asset.ticker.strip()
+            if stripped != asset.ticker:
+                asset.ticker = stripped
+                fixed += 1
+        if fixed:
+            await db.commit()
+            logger.info(f"Cleaned whitespace from {fixed} ticker(s)")
+
+
 async def initial_fetch():
+    await _cleanup_ticker_whitespace()
     async with async_session() as db:
         result = await db.execute(select(Asset).where(Asset.is_active == True))
         assets = result.scalars().all()
@@ -217,7 +234,7 @@ async def list_assets(db: AsyncSession = Depends(get_db)):
 @app.post("/api/assets", response_model=AssetResponse)
 async def add_asset(payload: AssetCreate, db: AsyncSession = Depends(get_db)):
     existing = await db.execute(
-        select(Asset).where(Asset.ticker == payload.ticker.upper()),
+        select(Asset).where(Asset.ticker == payload.ticker.strip().upper()),
     )
     existing_assets = existing.scalars().all()
     if existing_assets:
@@ -234,7 +251,7 @@ async def add_asset(payload: AssetCreate, db: AsyncSession = Depends(get_db)):
         return existing_asset
     asset_type = AssetType.CRYPTO if payload.asset_type.lower() == "crypto" else AssetType.STOCK
     asset = Asset(
-        ticker=payload.ticker.upper(), name=payload.name, asset_type=asset_type,
+        ticker=payload.ticker.strip().upper(), name=payload.name.strip(), asset_type=asset_type,
     )
     db.add(asset)
     await db.commit()
@@ -264,7 +281,7 @@ async def import_assets(items: list[AssetImportItem], db: AsyncSession = Depends
     skipped = []
     reactivated = []
     for item in items:
-        t = item.ticker.upper()
+        t = item.ticker.strip().upper()
         existing = await db.execute(select(Asset).where(Asset.ticker == t))
         existing_assets = existing.scalars().all()
         if existing_assets:
@@ -289,53 +306,6 @@ async def import_assets(items: list[AssetImportItem], db: AsyncSession = Depends
         if a:
             asyncio.create_task(refresh_asset_data(a.ticker, a.asset_type))
     return {"added": added, "reactivated": reactivated, "skipped": skipped, "total_imported": len(added) + len(reactivated)}
-
-
-@app.delete("/api/assets/{ticker}")
-async def remove_asset(ticker: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Asset).where(Asset.ticker == ticker.upper(), Asset.is_active == True)
-    )
-    assets = result.scalars().all()
-    if not assets:
-        raise HTTPException(404, "Asset not found")
-    for asset in assets:
-        asset.is_active = False
-    await db.commit()
-    return {"status": "removed", "ticker": ticker.upper()}
-
-
-@app.post("/api/assets/{ticker}/refresh")
-async def refresh_asset(ticker: str, db: AsyncSession = Depends(get_db)):
-    """Manually refresh historical data for an asset."""
-    result = await db.execute(select(Asset).where(Asset.ticker == ticker.upper()))
-    asset = result.scalar_one_or_none()
-    if not asset:
-        raise HTTPException(404, "Asset not found")
-    if not asset.is_active:
-        raise HTTPException(400, "Asset is not active")
-    
-    try:
-        await refresh_asset_data(asset.ticker, asset.asset_type)
-        # Check how many candles were stored
-        df = await load_candles(db, asset.ticker, "1d")
-        return {"status": "success", "ticker": ticker.upper(), "candles": len(df)}
-    except Exception as e:
-        raise HTTPException(500, f"Failed to refresh data: {str(e)}")
-
-
-@app.get("/api/candles/{ticker}")
-async def get_candles(
-    ticker: str, interval: str = "1d", db: AsyncSession = Depends(get_db),
-):
-    df = await load_candles(db, ticker.upper(), interval)
-    if df.empty:
-        return []
-    records = df.to_dict(orient="records")
-    for r in records:
-        if hasattr(r["timestamp"], "isoformat"):
-            r["timestamp"] = r["timestamp"].isoformat()
-    return records
 
 
 @app.get("/api/assets/candle-counts")
@@ -368,9 +338,56 @@ async def refresh_all_assets(db: AsyncSession = Depends(get_db)):
     return {"refreshed": len([r for r in results.values() if r["status"] == "success"]), "total": len(assets), "details": results}
 
 
+@app.delete("/api/assets/{ticker}")
+async def remove_asset(ticker: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Asset).where(Asset.ticker == ticker.strip().upper(), Asset.is_active == True)
+    )
+    assets = result.scalars().all()
+    if not assets:
+        raise HTTPException(404, "Asset not found")
+    for asset in assets:
+        asset.is_active = False
+    await db.commit()
+    return {"status": "removed", "ticker": ticker.strip().upper()}
+
+
+@app.post("/api/assets/{ticker}/refresh")
+async def refresh_asset(ticker: str, db: AsyncSession = Depends(get_db)):
+    """Manually refresh historical data for an asset."""
+    result = await db.execute(select(Asset).where(Asset.ticker == ticker.strip().upper()))
+    asset = result.scalar_one_or_none()
+    if not asset:
+        raise HTTPException(404, "Asset not found")
+    if not asset.is_active:
+        raise HTTPException(400, "Asset is not active")
+    
+    try:
+        await refresh_asset_data(asset.ticker, asset.asset_type)
+        # Check how many candles were stored
+        df = await load_candles(db, asset.ticker, "1d")
+        return {"status": "success", "ticker": ticker.strip().upper(), "candles": len(df)}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to refresh data: {str(e)}")
+
+
+@app.get("/api/candles/{ticker}")
+async def get_candles(
+    ticker: str, interval: str = "1d", db: AsyncSession = Depends(get_db),
+):
+    df = await load_candles(db, ticker.strip().upper(), interval)
+    if df.empty:
+        return []
+    records = df.to_dict(orient="records")
+    for r in records:
+        if hasattr(r["timestamp"], "isoformat"):
+            r["timestamp"] = r["timestamp"].isoformat()
+    return records
+
+
 @app.get("/api/symbols/lookup/{ticker}", response_model=SymbolLookupResponse)
 async def lookup_symbol(ticker: str, asset_type: str = "stock"):
-    ticker = ticker.upper()
+    ticker = ticker.strip().upper()
     if asset_type.lower() == "crypto":
         symbol = get_binance_symbol(ticker)
         crypto_name = get_crypto_name(ticker)
@@ -447,7 +464,7 @@ async def _alpaca_stock_quote(ticker: str) -> QuoteResponse | None:
 
 @app.get("/api/quotes/{ticker}", response_model=QuoteResponse)
 async def get_quote(ticker: str, asset_type: str = "stock"):
-    ticker = ticker.upper()
+    ticker = ticker.strip().upper()
     now = datetime.now(timezone.utc).isoformat()
     if asset_type.lower() == "crypto":
         symbol = get_binance_symbol(ticker)
@@ -472,9 +489,18 @@ async def get_quote(ticker: str, asset_type: str = "stock"):
         yf_ticker = f"{ticker}-USD" if not ticker.endswith("-USD") else ticker
         try:
             info = yf.Ticker(yf_ticker).fast_info
-            last = getattr(info, "last_price", None)
-            previous = getattr(info, "previous_close", None)
-            volume = getattr(info, "last_volume", None)
+            try:
+                last = info.last_price
+            except Exception:
+                last = None
+            try:
+                previous = info.previous_close
+            except Exception:
+                previous = None
+            try:
+                volume = info.last_volume
+            except Exception:
+                volume = None
             change_pct = round(((last - previous) / previous) * 100, 2) if last and previous else None
             record_api_success("yahoo")
             return QuoteResponse(
@@ -500,9 +526,18 @@ async def get_quote(ticker: str, asset_type: str = "stock"):
         info = yf.Ticker(ticker).fast_info
         if info:
             record_api_success("yahoo")
-        last = getattr(info, "last_price", None) or (info.get("last_price") if isinstance(info, dict) else None)
-        previous = getattr(info, "previous_close", None) or (info.get("previous_close") if isinstance(info, dict) else None)
-        volume = getattr(info, "last_volume", None) or (info.get("last_volume") if isinstance(info, dict) else None)
+        try:
+            last = info.last_price
+        except Exception:
+            last = None
+        try:
+            previous = info.previous_close
+        except Exception:
+            previous = None
+        try:
+            volume = info.last_volume
+        except Exception:
+            volume = None
         change_pct = ((last - previous) / previous * 100) if last and previous else None
     except Exception as e:
         logger.warning(f"yfinance quote failed for {ticker}: {e}")
@@ -550,9 +585,9 @@ async def credential_status():
 
 @app.post("/api/data/refresh/{ticker}")
 async def refresh_data(ticker: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Asset).where(Asset.ticker == ticker.upper()))
+    result = await db.execute(select(Asset).where(Asset.ticker == ticker.strip().upper()))
     asset = result.scalar_one_or_none()
     if not asset:
         raise HTTPException(404, "Asset not found")
     await refresh_asset_data(asset.ticker, asset.asset_type)
-    return {"status": "refreshed", "ticker": ticker.upper()}
+    return {"status": "refreshed", "ticker": ticker.strip().upper()}

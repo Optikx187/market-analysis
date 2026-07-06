@@ -67,12 +67,12 @@ export default function PortfolioPanel() {
     setTradeSubmitting(true);
     try {
       await logManualTrade({
-        ticker: tradeForm.ticker.toUpperCase(),
+        ticker: tradeForm.ticker.trim().toUpperCase(),
         direction: tradeForm.direction,
         entry_price: parseFloat(tradeForm.entry_price),
         quantity: parseFloat(tradeForm.quantity),
       });
-      setTradeFormMsg({ type: "success", text: `${tradeForm.direction} logged for ${tradeForm.ticker.toUpperCase()}` });
+      setTradeFormMsg({ type: "success", text: `${tradeForm.direction} logged for ${tradeForm.ticker.trim().toUpperCase()}` });
       setTradeForm({ ticker: "", direction: "BUY", entry_price: "", quantity: "" });
       loadAll();
     } catch (err: unknown) {
