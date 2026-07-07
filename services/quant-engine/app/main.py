@@ -210,19 +210,19 @@ async def _run_scan() -> dict:
 
             signal_data = {
                 "ticker": ticker,
-                "direction": result.direction or "NONE",
-                "status": result.status,
-                "trigger_price": result.trigger_price,
-                "stop_loss": result.stop_loss,
-                "target_price": result.target_price,
-                "reason": result.reason,
-                "risk_reward": result.risk_reward,
-                "atr_value": result.atr_value,
-                "rsi_value": result.rsi_value,
-                "suppressed": result.suppressed,
-                "kelly_pct": result.kelly_pct,
-                "optimal_size_usd": result.optimal_size_usd,
-                "volatility_scalar": result.volatility_scalar,
+                "direction": str(result.direction) if result.direction else "NONE",
+                "status": str(result.status),
+                "trigger_price": float(result.trigger_price),
+                "stop_loss": float(result.stop_loss),
+                "target_price": float(result.target_price),
+                "reason": str(result.reason),
+                "risk_reward": float(result.risk_reward),
+                "atr_value": float(result.atr_value),
+                "rsi_value": float(result.rsi_value),
+                "suppressed": bool(result.suppressed),
+                "kelly_pct": float(result.kelly_pct),
+                "optimal_size_usd": float(result.optimal_size_usd),
+                "volatility_scalar": float(result.volatility_scalar),
                 "asset_type": asset_type,
             }
 
@@ -232,13 +232,13 @@ async def _run_scan() -> dict:
             if approved and not result.suppressed:
                 notify_data = {
                     "ticker": ticker,
-                    "direction": result.direction or "NONE",
-                    "status": result.status,
-                    "trigger_price": result.trigger_price,
-                    "target_price": result.target_price,
-                    "stop_loss": result.stop_loss,
-                    "optimal_size_usd": result.optimal_size_usd,
-                    "kelly_pct": result.kelly_pct,
+                    "direction": str(result.direction) if result.direction else "NONE",
+                    "status": str(result.status),
+                    "trigger_price": float(result.trigger_price),
+                    "target_price": float(result.target_price),
+                    "stop_loss": float(result.stop_loss),
+                    "optimal_size_usd": float(result.optimal_size_usd),
+                    "kelly_pct": float(result.kelly_pct),
                     "paper_trade_executed": False,
                 }
                 sent = await _send_notification(notify_data)
@@ -247,10 +247,10 @@ async def _run_scan() -> dict:
 
             signal_details.append({
                 "ticker": ticker,
-                "direction": result.direction,
-                "status": result.status,
-                "approved": approved,
-                "suppressed": result.suppressed,
+                "direction": str(result.direction) if result.direction else "NONE",
+                "status": str(result.status),
+                "approved": bool(approved),
+                "suppressed": bool(result.suppressed),
             })
 
         except Exception as e:
