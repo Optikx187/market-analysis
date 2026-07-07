@@ -24,8 +24,22 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_CHAT_ID: Optional[str] = None
     DISCORD_WEBHOOK_URL: Optional[str] = None
+    SLACK_WEBHOOK_URL: Optional[str] = None
+    SMTP_HOST: Optional[str] = None
+    SMTP_PORT: int = 587
+    SMTP_USER: Optional[str] = None
+    SMTP_PASSWORD: Optional[str] = None
+    EMAIL_TO: Optional[str] = None
+    EMAIL_FROM: Optional[str] = None
+    TWILIO_ACCOUNT_SID: Optional[str] = None
+    TWILIO_AUTH_TOKEN: Optional[str] = None
+    TWILIO_FROM_NUMBER: Optional[str] = None
+    SMS_TO_NUMBER: Optional[str] = None
     NOTIFY_TELEGRAM_ENABLED: bool = True
     NOTIFY_DISCORD_ENABLED: bool = True
+    NOTIFY_SLACK_ENABLED: bool = True
+    NOTIFY_EMAIL_ENABLED: bool = True
+    NOTIFY_SMS_ENABLED: bool = True
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
@@ -147,28 +161,40 @@ async def credential_status():
     return {
         "telegram": bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID),
         "discord": bool(settings.DISCORD_WEBHOOK_URL),
+        "slack": bool(settings.SLACK_WEBHOOK_URL),
+        "email": bool(settings.SMTP_HOST and settings.EMAIL_TO),
+        "sms": bool(settings.TWILIO_ACCOUNT_SID and settings.SMS_TO_NUMBER),
     }
 
 
 @app.post("/api/notify")
 async def notify(payload: NotificationPayload):
-    """Dual-broadcast a formatted alert to Discord and Telegram simultaneously."""
+    """Broadcast a formatted alert to all configured channels."""
     message = format_alert(payload)
     tg_ok = await send_telegram(message)
     dc_ok = await send_discord(message)
+    sl_ok = await send_slack(message)
+    em_ok = await send_email(f"Market Alert: {payload.ticker} {payload.direction}", message)
+    sm_ok = await send_sms(message)
     return {
         "message_preview": message[:200],
         "telegram_sent": tg_ok,
         "discord_sent": dc_ok,
+        "slack_sent": sl_ok,
+        "email_sent": em_ok,
+        "sms_sent": sm_ok,
     }
 
 
 @app.post("/api/notify/test")
 async def test_notification(payload: TestNotificationPayload = TestNotificationPayload()):
-    """Send a test notification to verify Discord and Telegram are configured correctly."""
+    """Send a test notification to verify all configured channels."""
     message = f"\U0001f527 [TEST] {payload.message}"
     tg_ok = await send_telegram(message, force=True)
     dc_ok = await send_discord(message, force=True)
+    sl_ok = await send_slack(message, force=True)
+    em_ok = await send_email("[TEST] Market Analysis", message, force=True)
+    sm_ok = await send_sms(message, force=True)
     results = {
         "telegram": {
             "configured": bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID),
@@ -178,11 +204,25 @@ async def test_notification(payload: TestNotificationPayload = TestNotificationP
             "configured": bool(settings.DISCORD_WEBHOOK_URL),
             "sent": dc_ok,
         },
+        "slack": {
+            "configured": bool(settings.SLACK_WEBHOOK_URL),
+            "sent": sl_ok,
+        },
+        "email": {
+            "configured": bool(settings.SMTP_HOST and settings.EMAIL_TO),
+            "sent": em_ok,
+        },
+        "sms": {
+            "configured": bool(settings.TWILIO_ACCOUNT_SID and settings.SMS_TO_NUMBER),
+            "sent": sm_ok,
+        },
     }
-    any_configured = results["telegram"]["configured"] or results["discord"]["configured"]
-    all_ok = any_configured and \
-             (results["telegram"]["sent"] or not results["telegram"]["configured"]) and \
-             (results["discord"]["sent"] or not results["discord"]["configured"])
+    configured_channels = [ch for ch, info in results.items() if info["configured"]]
+    any_configured = len(configured_channels) > 0
+    all_ok = any_configured and all(
+        results[ch]["sent"] or not results[ch]["configured"]
+        for ch in results
+    )
     return {
         "success": all_ok,
         "results": results,
@@ -207,6 +247,18 @@ async def get_channel_status():
             "configured": bool(settings.DISCORD_WEBHOOK_URL),
             "enabled": settings.NOTIFY_DISCORD_ENABLED,
         },
+        "slack": {
+            "configured": bool(settings.SLACK_WEBHOOK_URL),
+            "enabled": settings.NOTIFY_SLACK_ENABLED,
+        },
+        "email": {
+            "configured": bool(settings.SMTP_HOST and settings.EMAIL_TO),
+            "enabled": settings.NOTIFY_EMAIL_ENABLED,
+        },
+        "sms": {
+            "configured": bool(settings.TWILIO_ACCOUNT_SID and settings.SMS_TO_NUMBER),
+            "enabled": settings.NOTIFY_SMS_ENABLED,
+        },
     }
 
 
@@ -214,13 +266,18 @@ async def get_channel_status():
 async def toggle_channel(payload: ChannelToggle):
     """Enable or disable a notification channel at runtime."""
     channel = payload.channel.lower()
-    if channel == "telegram":
-        settings.NOTIFY_TELEGRAM_ENABLED = payload.enabled
-    elif channel == "discord":
-        settings.NOTIFY_DISCORD_ENABLED = payload.enabled
-    else:
+    channel_map = {
+        "telegram": "NOTIFY_TELEGRAM_ENABLED",
+        "discord": "NOTIFY_DISCORD_ENABLED",
+        "slack": "NOTIFY_SLACK_ENABLED",
+        "email": "NOTIFY_EMAIL_ENABLED",
+        "sms": "NOTIFY_SMS_ENABLED",
+    }
+    attr = channel_map.get(channel)
+    if not attr:
         from fastapi import HTTPException
         raise HTTPException(400, f"Unknown channel: {channel}")
+    setattr(settings, attr, payload.enabled)
     return {
         "channel": channel,
         "enabled": payload.enabled,
@@ -235,4 +292,123 @@ async def get_reply_trades():
     return {
         "trades": get_reply_trade_log(),
         "bot_active": _bot_task is not None and not _bot_task.done(),
+    }
+
+
+# --- Phase 9: Additional Notification Channels ---
+
+async def send_slack(message: str, force: bool = False) -> bool:
+    if not settings.SLACK_WEBHOOK_URL:
+        return False
+    if not force and not settings.NOTIFY_SLACK_ENABLED:
+        return False
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                settings.SLACK_WEBHOOK_URL, json={"text": message}, timeout=10,
+            )
+            resp.raise_for_status()
+        logger.info("Slack notification sent")
+        return True
+    except Exception as e:
+        logger.error(f"Slack failed: {e}")
+        return False
+
+
+async def send_email(subject: str, body: str, force: bool = False) -> bool:
+    if not settings.SMTP_HOST or not settings.EMAIL_TO:
+        return False
+    if not force and not settings.NOTIFY_EMAIL_ENABLED:
+        return False
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = settings.EMAIL_FROM or settings.SMTP_USER or "market-analysis@localhost"
+        msg["To"] = settings.EMAIL_TO
+        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
+            server.starttls()
+            if settings.SMTP_USER and settings.SMTP_PASSWORD:
+                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+            server.send_message(msg)
+        logger.info("Email notification sent")
+        return True
+    except Exception as e:
+        logger.error(f"Email failed: {e}")
+        return False
+
+
+async def send_sms(message: str, force: bool = False) -> bool:
+    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN or not settings.SMS_TO_NUMBER:
+        return False
+    if not force and not settings.NOTIFY_SMS_ENABLED:
+        return False
+    try:
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{settings.TWILIO_ACCOUNT_SID}/Messages.json"
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                url,
+                data={
+                    "To": settings.SMS_TO_NUMBER,
+                    "From": settings.TWILIO_FROM_NUMBER,
+                    "Body": message[:1600],
+                },
+                auth=(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN),
+                timeout=15,
+            )
+            resp.raise_for_status()
+        logger.info("SMS notification sent")
+        return True
+    except Exception as e:
+        logger.error(f"SMS failed: {e}")
+        return False
+
+
+@app.post("/api/notify/signal")
+async def notify_signal(payload: NotificationPayload):
+    """Broadcast a signal alert to ALL configured channels."""
+    message = format_alert(payload)
+    tg_ok = await send_telegram(message)
+    dc_ok = await send_discord(message)
+    sl_ok = await send_slack(message)
+    em_ok = await send_email(f"Market Alert: {payload.ticker} {payload.direction}", message)
+    sm_ok = await send_sms(message)
+    return {
+        "telegram_sent": tg_ok,
+        "discord_sent": dc_ok,
+        "slack_sent": sl_ok,
+        "email_sent": em_ok,
+        "sms_sent": sm_ok,
+    }
+
+
+class PriceAlertNotification(BaseModel):
+    ticker: str
+    condition: str
+    threshold: float
+    current_price: float
+
+
+@app.post("/api/notify/price-alert")
+async def notify_price_alert(payload: PriceAlertNotification):
+    """Send a price alert notification to all channels."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    message = (
+        f"\U0001f4b0 [PRICE ALERT] {payload.ticker}\n"
+        f"{now}\n"
+        f"Price crossed {payload.condition} ${payload.threshold:,.2f}\n"
+        f"Current Price: ${payload.current_price:,.2f}"
+    )
+    tg_ok = await send_telegram(message)
+    dc_ok = await send_discord(message)
+    sl_ok = await send_slack(message)
+    em_ok = await send_email(f"Price Alert: {payload.ticker} {payload.condition} ${payload.threshold}", message)
+    sm_ok = await send_sms(message)
+    return {
+        "telegram_sent": tg_ok,
+        "discord_sent": dc_ok,
+        "slack_sent": sl_ok,
+        "email_sent": em_ok,
+        "sms_sent": sm_ok,
     }

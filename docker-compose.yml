@@ -30,11 +30,17 @@ services:
       - .env
     environment:
       - DATA_INGESTION_URL=http://data-ingestion:8000
+      - PORTFOLIO_ENGINE_URL=http://portfolio-engine:8002
+      - NOTIFICATION_GATEWAY_URL=http://notification-gateway:8003
     networks:
       - trading_network
     depends_on:
       data-ingestion:
         condition: service_healthy
+      portfolio-engine:
+        condition: service_started
+      notification-gateway:
+        condition: service_started
 
   # SERVICE C: Portfolio & Integration Engine
   portfolio-engine:

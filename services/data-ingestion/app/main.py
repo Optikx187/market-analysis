@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db, init_db, async_session
-from app.models import Asset, AssetType, Candle
+from app.models import Asset, AssetType, Candle, PriceAlert
 from app.ingestion import refresh_asset_data, load_candles
 from app.ingestion import get_binance_symbol, get_crypto_name, CRYPTO_NAMES
 
@@ -591,3 +591,216 @@ async def refresh_data(ticker: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Asset not found")
     await refresh_asset_data(asset.ticker, asset.asset_type)
     return {"status": "refreshed", "ticker": ticker.strip().upper()}
+
+
+# --- Phase 3: Price Alerts ---
+
+class PriceAlertCreate(BaseModel):
+    ticker: str
+    condition: str  # "above" or "below"
+    threshold: float
+
+
+class PriceAlertResponse(BaseModel):
+    id: int
+    ticker: str
+    condition: str
+    threshold: float
+    triggered: bool
+    created_at: str | None
+    triggered_at: str | None
+    model_config = {"from_attributes": True}
+
+
+@app.get("/api/price-alerts/check")
+async def check_price_alerts(db: AsyncSession = Depends(get_db)):
+    """Check all active price alerts against current prices and trigger if met."""
+    result = await db.execute(
+        select(PriceAlert).where(PriceAlert.triggered == False)
+    )
+    alerts = result.scalars().all()
+    triggered_alerts = []
+    for alert in alerts:
+        try:
+            info = yf.Ticker(alert.ticker).fast_info
+            try:
+                price = info.last_price
+            except Exception:
+                price = None
+            if price is None:
+                continue
+            should_trigger = (
+                (alert.condition == "above" and price >= alert.threshold) or
+                (alert.condition == "below" and price <= alert.threshold)
+            )
+            if should_trigger:
+                alert.triggered = True
+                alert.triggered_at = datetime.now(timezone.utc)
+                triggered_alerts.append({
+                    "id": alert.id,
+                    "ticker": alert.ticker,
+                    "condition": alert.condition,
+                    "threshold": alert.threshold,
+                    "current_price": price,
+                })
+        except Exception as e:
+            logger.warning(f"Price alert check failed for {alert.ticker}: {e}")
+    if triggered_alerts:
+        await db.commit()
+    return {"checked": len(alerts), "triggered": triggered_alerts}
+
+
+@app.post("/api/price-alerts")
+async def create_price_alert(payload: PriceAlertCreate, db: AsyncSession = Depends(get_db)):
+    """Create a new price alert."""
+    condition = payload.condition.lower()
+    if condition not in ("above", "below"):
+        raise HTTPException(400, "Condition must be 'above' or 'below'")
+    alert = PriceAlert(
+        ticker=payload.ticker.strip().upper(),
+        condition=condition,
+        threshold=payload.threshold,
+    )
+    db.add(alert)
+    await db.commit()
+    await db.refresh(alert)
+    return {
+        "id": alert.id,
+        "ticker": alert.ticker,
+        "condition": alert.condition,
+        "threshold": alert.threshold,
+        "triggered": alert.triggered,
+        "created_at": alert.created_at.isoformat() if alert.created_at else None,
+        "triggered_at": None,
+    }
+
+
+@app.get("/api/price-alerts")
+async def list_price_alerts(db: AsyncSession = Depends(get_db)):
+    """List all price alerts (active and triggered)."""
+    result = await db.execute(select(PriceAlert).order_by(PriceAlert.created_at.desc()))
+    alerts = result.scalars().all()
+    return [
+        {
+            "id": a.id,
+            "ticker": a.ticker,
+            "condition": a.condition,
+            "threshold": a.threshold,
+            "triggered": a.triggered,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+            "triggered_at": a.triggered_at.isoformat() if a.triggered_at else None,
+        }
+        for a in alerts
+    ]
+
+
+@app.delete("/api/price-alerts/{alert_id}")
+async def delete_price_alert(alert_id: int, db: AsyncSession = Depends(get_db)):
+    """Delete a price alert."""
+    result = await db.execute(select(PriceAlert).where(PriceAlert.id == alert_id))
+    alert = result.scalar_one_or_none()
+    if not alert:
+        raise HTTPException(404, "Price alert not found")
+    await db.delete(alert)
+    await db.commit()
+    return {"status": "deleted", "id": alert_id}
+
+
+# --- Phase 6: Earnings Calendar ---
+
+_earnings_cache: dict[str, dict] = {}
+_earnings_cache_time: dict[str, str] = {}
+
+
+@app.get("/api/earnings/{ticker}")
+async def get_earnings(ticker: str):
+    """Get earnings calendar data for a ticker."""
+    ticker = ticker.strip().upper()
+    cached_time = _earnings_cache_time.get(ticker)
+    if cached_time:
+        cache_age = (datetime.now(timezone.utc) - datetime.fromisoformat(cached_time)).total_seconds()
+        if cache_age < 86400:  # 24h cache
+            return _earnings_cache[ticker]
+
+    try:
+        t = yf.Ticker(ticker)
+        cal = t.calendar
+        if cal is None or (isinstance(cal, dict) and not cal):
+            return {"ticker": ticker, "has_earnings": False, "next_earnings_date": None, "earnings": None}
+
+        earnings_data = {}
+        if isinstance(cal, dict):
+            earnings_data = cal
+        elif hasattr(cal, "to_dict"):
+            earnings_data = cal.to_dict()
+
+        next_date = None
+        if "Earnings Date" in earnings_data:
+            dates = earnings_data["Earnings Date"]
+            if isinstance(dates, list) and dates:
+                next_date = str(dates[0])
+            elif isinstance(dates, dict):
+                first = list(dates.values())[0] if dates else None
+                next_date = str(first) if first else None
+            else:
+                next_date = str(dates) if dates else None
+
+        result = {
+            "ticker": ticker,
+            "has_earnings": next_date is not None,
+            "next_earnings_date": next_date,
+            "earnings": earnings_data,
+        }
+        _earnings_cache[ticker] = result
+        _earnings_cache_time[ticker] = datetime.now(timezone.utc).isoformat()
+        return result
+    except Exception as e:
+        logger.warning(f"Earnings lookup failed for {ticker}: {e}")
+        return {"ticker": ticker, "has_earnings": False, "next_earnings_date": None, "earnings": None}
+
+
+@app.get("/api/earnings/upcoming/all")
+async def get_upcoming_earnings(db: AsyncSession = Depends(get_db)):
+    """Get earnings dates for all watchlist tickers within the next 14 days."""
+    result = await db.execute(select(Asset).where(Asset.is_active == True))
+    assets = result.scalars().all()
+    upcoming = []
+    now = datetime.now(timezone.utc)
+    for asset in assets:
+        try:
+            t = yf.Ticker(asset.ticker)
+            cal = t.calendar
+            if cal is None:
+                continue
+            earnings_data = cal if isinstance(cal, dict) else (cal.to_dict() if hasattr(cal, "to_dict") else {})
+            if "Earnings Date" not in earnings_data:
+                continue
+            dates = earnings_data["Earnings Date"]
+            next_date_str = None
+            if isinstance(dates, list) and dates:
+                next_date_str = str(dates[0])
+            elif isinstance(dates, dict) and dates:
+                next_date_str = str(list(dates.values())[0])
+            elif dates:
+                next_date_str = str(dates)
+            if not next_date_str:
+                continue
+            try:
+                from dateutil.parser import parse as dateparse
+                next_date = dateparse(next_date_str)
+                if next_date.tzinfo is None:
+                    next_date = next_date.replace(tzinfo=timezone.utc)
+                days_until = (next_date - now).days
+                if 0 <= days_until <= 14:
+                    upcoming.append({
+                        "ticker": asset.ticker,
+                        "name": asset.name,
+                        "earnings_date": next_date_str,
+                        "days_until": days_until,
+                    })
+            except Exception:
+                continue
+        except Exception:
+            continue
+    upcoming.sort(key=lambda x: x["days_until"])
+    return {"upcoming": upcoming, "checked": len(assets)}

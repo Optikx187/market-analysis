@@ -33,3 +33,15 @@ class Candle(Base):
     close = Column(Float, nullable=False)
     volume = Column(Float, nullable=False)
     interval = Column(String(10), default="1d")
+
+
+class PriceAlert(Base):
+    __tablename__ = "price_alerts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, index=True)
+    condition = Column(String(10), nullable=False)  # "above" or "below"
+    threshold = Column(Float, nullable=False)
+    triggered = Column(Boolean, default=False)
+    created_at = Column(DateTime, server_default=func.now())
+    triggered_at = Column(DateTime, nullable=True)

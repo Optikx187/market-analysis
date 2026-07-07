@@ -12,16 +12,20 @@ import {
   refreshAllData,
   exportAssets,
   importAssets,
+  runBacktest,
+  fetchEarnings,
   type Asset,
   type Quote,
   type SignalDecision,
+  type BacktestResult,
 } from "@/lib/api";
 
 interface Props {
   onSignalProcessed?: (decision: SignalDecision) => void;
+  onViewChart?: (ticker: string) => void;
 }
 
-export default function WatchlistPanel({ onSignalProcessed }: Props) {
+export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props) {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [ticker, setTicker] = useState("");
   const [name, setName] = useState("");
@@ -37,6 +41,8 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
   const [refreshing, setRefreshing] = useState<string | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
+  const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
+  const [earningsData, setEarningsData] = useState<Record<string, { has_earnings: boolean; next_earnings_date: string | null }>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const load = () => fetchAssets().then(setAssets).catch(() => setFeedback("Unable to load watchlist."));
@@ -54,6 +60,13 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
   useEffect(() => { 
     if (assets.length > 0) loadCandleCounts();
   }, [assets.length]);
+
+  useEffect(() => {
+    if (!expandedTicker || earningsData[expandedTicker]) return;
+    fetchEarnings(expandedTicker).then((d) => {
+      setEarningsData((prev) => ({ ...prev, [expandedTicker]: { has_earnings: d.has_earnings, next_earnings_date: d.next_earnings_date } }));
+    }).catch(() => {});
+  }, [expandedTicker]);
 
   // Polling: batch quote fetches with Promise.all
   useEffect(() => {
@@ -409,11 +422,39 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
                       }`}>
                       {analyzing === a.ticker ? "Analyzing..." : "Analyze"}
                     </button>
+                    {onViewChart && (
+                      <button onClick={(e) => { e.stopPropagation(); onViewChart(a.ticker); }}
+                        className="rounded bg-[var(--secondary)] px-2 py-0.5 text-xs hover:bg-[var(--accent)]">
+                        Chart
+                      </button>
+                    )}
+                    <button onClick={async (e) => {
+                      e.stopPropagation();
+                      setFeedback(`Running backtest for ${a.ticker}...`);
+                      try {
+                        const bt = await runBacktest(a.ticker, "6mo");
+                        setBacktestResult(bt);
+                        setFeedback(`${a.ticker} backtest: ${bt.total_signals} trades, ${bt.win_rate}% win rate, ${bt.total_return_pct >= 0 ? "+" : ""}${bt.total_return_pct}% return`);
+                      } catch { setFeedback(`${a.ticker}: backtest failed (need 201+ candles)`); }
+                    }}
+                      disabled={(candleCounts[a.ticker] || 0) < 201}
+                      className={`rounded px-2 py-0.5 text-xs ${
+                        (candleCounts[a.ticker] || 0) >= 201
+                          ? "bg-[var(--secondary)] hover:bg-[var(--accent)]"
+                          : "bg-[var(--secondary)] opacity-50 cursor-not-allowed"
+                      }`}>
+                      Backtest
+                    </button>
                     <button onClick={(e) => { e.stopPropagation(); handleRemove(a.ticker); }}
                       className="rounded bg-[var(--destructive)] text-[var(--destructive-foreground)] px-2 py-0.5 text-xs">
                       Remove
                     </button>
                   </div>
+                  {earningsData[a.ticker]?.has_earnings && (
+                    <div className="text-[10px] text-yellow-400 mt-1">
+                      Earnings: {earningsData[a.ticker].next_earnings_date}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -428,6 +469,52 @@ export default function WatchlistPanel({ onSignalProcessed }: Props) {
           <div>Kelly: {lastDecision.kelly_pct}% | Size: ${lastDecision.optimal_size_usd}</div>
           {lastDecision.capital_overspend && <div className="text-red-400 font-bold mt-1">CAPITAL OVERSPEND WARNING</div>}
           <div className="text-xs text-[var(--muted-foreground)] mt-1">{lastDecision.reason}</div>
+        </div>
+      )}
+
+      {backtestResult && (
+        <div className="mt-4 rounded border border-blue-600 p-3 text-sm">
+          <div className="flex items-center justify-between mb-2">
+            <div className="font-semibold">{backtestResult.ticker} Backtest ({backtestResult.period})</div>
+            <button onClick={() => setBacktestResult(null)} className="text-xs text-[var(--muted-foreground)]">Close</button>
+          </div>
+          <div className="grid grid-cols-4 gap-2 text-center text-xs mb-2">
+            <div className="rounded bg-[var(--background)] p-1.5">
+              <div className="text-[var(--muted-foreground)]">Trades</div>
+              <div className="font-medium">{backtestResult.total_signals}</div>
+            </div>
+            <div className="rounded bg-[var(--background)] p-1.5">
+              <div className="text-[var(--muted-foreground)]">Win Rate</div>
+              <div className="font-medium">{backtestResult.win_rate}%</div>
+            </div>
+            <div className="rounded bg-[var(--background)] p-1.5">
+              <div className="text-[var(--muted-foreground)]">Avg P&L</div>
+              <div className={`font-medium ${backtestResult.avg_pnl_pct >= 0 ? "text-green-400" : "text-red-400"}`}>
+                {backtestResult.avg_pnl_pct >= 0 ? "+" : ""}{backtestResult.avg_pnl_pct}%
+              </div>
+            </div>
+            <div className="rounded bg-[var(--background)] p-1.5">
+              <div className="text-[var(--muted-foreground)]">Return</div>
+              <div className={`font-medium ${backtestResult.total_return_pct >= 0 ? "text-green-400" : "text-red-400"}`}>
+                {backtestResult.total_return_pct >= 0 ? "+" : ""}{backtestResult.total_return_pct}%
+              </div>
+            </div>
+          </div>
+          <div className="text-xs text-[var(--muted-foreground)]">
+            {backtestResult.wins}W / {backtestResult.losses}L | Max DD: -{backtestResult.max_drawdown_pct}% | Final: ${backtestResult.final_equity.toLocaleString()}
+          </div>
+          {backtestResult.trades.length > 0 && (
+            <div className="mt-2 max-h-32 overflow-y-auto">
+              {backtestResult.trades.map((t, i) => (
+                <div key={i} className="flex items-center justify-between py-0.5 text-[10px]">
+                  <span className={t.direction === "BUY" ? "text-green-400" : "text-red-400"}>{t.direction}</span>
+                  <span>${t.entry.toFixed(2)} -&gt; ${t.exit.toFixed(2)}</span>
+                  <span className={t.pnl_pct >= 0 ? "text-green-400" : "text-red-400"}>{t.pnl_pct >= 0 ? "+" : ""}{t.pnl_pct}%</span>
+                  <span className="text-[var(--muted-foreground)]">{t.outcome}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

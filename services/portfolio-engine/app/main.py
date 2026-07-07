@@ -19,8 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db, init_db, async_session
 from app.models import (
-    Trade, TradeStatus, SignalDirection, Portfolio, EquitySnapshot, AlertLog, CredentialSecret,
+    Trade, TradeStatus, SignalDirection, Portfolio, EquitySnapshot, AlertLog, CredentialSecret, User,
 )
+from app.auth import create_token, hash_password, verify_password, get_current_user
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -329,6 +330,44 @@ async def get_portfolio(db: AsyncSession = Depends(get_db)):
         open_positions=open_positions,
         equity_curve=equity_curve,
     )
+
+
+@app.get("/api/dashboard-summary")
+async def dashboard_summary(db: AsyncSession = Depends(get_db)):
+    """Return at-a-glance portfolio metrics for the dashboard widget."""
+    portfolio = await get_or_create_portfolio(db)
+
+    open_result = await db.execute(select(Trade).where(Trade.status == TradeStatus.OPEN))
+    open_positions = len(open_result.scalars().all())
+
+    today_start = datetime.datetime.now(datetime.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_alerts = await db.execute(
+        select(func.count(AlertLog.id)).where(AlertLog.created_at >= today_start)
+    )
+    todays_signals = today_alerts.scalar() or 0
+
+    today_approved = await db.execute(
+        select(func.count(AlertLog.id)).where(
+            AlertLog.created_at >= today_start,
+            AlertLog.capital_overspend == False,
+        )
+    )
+    todays_approved = today_approved.scalar() or 0
+
+    total_trades = portfolio.win_count + portfolio.loss_count
+    win_rate = (portfolio.win_count / total_trades * 100) if total_trades > 0 else 0
+
+    return {
+        "balance": round(portfolio.balance, 2),
+        "equity": round(portfolio.equity, 2),
+        "total_pnl": round(portfolio.total_pnl, 2),
+        "total_pnl_pct": round((portfolio.total_pnl / portfolio.equity * 100) if portfolio.equity else 0, 2),
+        "open_positions": open_positions,
+        "todays_signals": todays_signals,
+        "todays_approved": todays_approved,
+        "win_rate": round(win_rate, 2),
+        "total_trades": total_trades,
+    }
 
 
 @app.get("/api/trades", response_model=list[TradeResponse])
@@ -786,3 +825,57 @@ async def trade_recommendation(
         "position_pct_of_balance": round(position_pct, 2),
         "risk_reward_ratio": risk_reward,
     }
+
+
+# --- Phase 8: Multi-User Auth ---
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    display_name: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/auth/register")
+async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    """Register a new user (only when AUTH_ENABLED=true)."""
+    if not settings.AUTH_ENABLED:
+        raise HTTPException(400, "Auth is not enabled. Set AUTH_ENABLED=true to use multi-user mode.")
+    existing = await db.execute(select(User).where(User.username == req.username))
+    if existing.scalars().first():
+        raise HTTPException(409, "Username already taken")
+    user = User(
+        username=req.username,
+        password_hash=hash_password(req.password),
+        display_name=req.display_name or req.username,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    token = create_token(str(user.id), user.username)
+    return {"token": token, "user_id": user.id, "username": user.username}
+
+
+@app.post("/api/auth/login")
+async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+    """Login and get a JWT token."""
+    if not settings.AUTH_ENABLED:
+        raise HTTPException(400, "Auth is not enabled. Set AUTH_ENABLED=true to use multi-user mode.")
+    result = await db.execute(select(User).where(User.username == req.username))
+    user = result.scalars().first()
+    if not user or not verify_password(req.password, user.password_hash):
+        raise HTTPException(401, "Invalid credentials")
+    if not user.is_active:
+        raise HTTPException(403, "Account deactivated")
+    token = create_token(str(user.id), user.username)
+    return {"token": token, "user_id": user.id, "username": user.username}
+
+
+@app.get("/api/auth/status")
+async def auth_status():
+    """Return whether multi-user auth is enabled."""
+    return {"auth_enabled": settings.AUTH_ENABLED}
