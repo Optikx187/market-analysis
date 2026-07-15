@@ -622,11 +622,18 @@ async def check_price_alerts(db: AsyncSession = Depends(get_db)):
     triggered_alerts = []
     for alert in alerts:
         try:
-            info = yf.Ticker(alert.ticker).fast_info
-            try:
-                price = info.last_price
-            except Exception:
-                price = None
+            asset_result = await db.execute(
+                select(Asset.asset_type).where(Asset.ticker == alert.ticker)
+            )
+            asset_type = asset_result.scalar_one_or_none()
+            if asset_type:
+                quote_asset_type = asset_type.value
+            elif alert.ticker in CRYPTO_NAMES_SET:
+                quote_asset_type = "crypto"
+            else:
+                quote_asset_type = "stock"
+            quote = await get_quote(alert.ticker, asset_type=quote_asset_type)
+            price = quote.price
             if price is None:
                 continue
             should_trigger = (
