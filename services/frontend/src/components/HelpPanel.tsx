@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-type Section = "overview" | "watchlist" | "signals" | "portfolio" | "risk" | "settings" | "glossary";
+type Section = "overview" | "watchlist" | "signals" | "portfolio" | "risk" | "scanner" | "settings" | "glossary";
 
 const SECTIONS: { id: Section; title: string; icon: string }[] = [
   { id: "overview", title: "How It Works", icon: "📊" },
@@ -8,6 +8,7 @@ const SECTIONS: { id: Section; title: string; icon: string }[] = [
   { id: "signals", title: "Trading Signals", icon: "🚦" },
   { id: "portfolio", title: "Portfolio & Trades", icon: "💼" },
   { id: "risk", title: "Risk Management", icon: "🛡️" },
+  { id: "scanner", title: "Scanner & Tools", icon: "🔍" },
   { id: "settings", title: "Configuration", icon: "⚙️" },
   { id: "glossary", title: "Glossary", icon: "📖" },
 ];
@@ -41,6 +42,7 @@ export default function HelpPanel() {
         {active === "signals" && <SignalsSection />}
         {active === "portfolio" && <PortfolioSection />}
         {active === "risk" && <RiskSection />}
+        {active === "scanner" && <ScannerToolsSection />}
         {active === "settings" && <SettingsSection />}
         {active === "glossary" && <GlossarySection />}
       </div>
@@ -243,10 +245,74 @@ function SettingsSection() {
           purpose="Sends trading signal alerts to your Discord channel"
           setup="Create a webhook in your Discord server's Integrations settings"
         />
+        <ServiceDoc
+          name="Slack"
+          purpose="Sends signal alerts to a Slack channel"
+          setup="Create an incoming webhook in your Slack workspace settings"
+        />
+        <ServiceDoc
+          name="Email (SMTP)"
+          purpose="Sends signal alerts via email"
+          setup="Use an SMTP server (e.g., Gmail with an app password). Port 587 with TLS."
+        />
+        <ServiceDoc
+          name="SMS (Twilio)"
+          purpose="Sends signal alerts via SMS text message"
+          setup="Sign up at twilio.com and get your Account SID, Auth Token, and a phone number"
+        />
       </div>
       <Tip>
         You don&apos;t need all services configured to use the platform. Market data APIs
         enable analysis; notification services are optional.
+      </Tip>
+    </DocSection>
+  );
+}
+
+function ScannerToolsSection() {
+  return (
+    <DocSection title="Scanner, Backtesting & Tools">
+      <h4 className="text-sm font-semibold text-[var(--foreground)]">Auto-Scanner</h4>
+      <p>
+        The <strong>Scanner</strong> tab lets you configure automatic scanning of your entire watchlist.
+        When enabled, the system analyzes all tickers at a set interval (default: every 15 minutes)
+        and sends notifications for any approved signals.
+      </p>
+      <ul className="list-disc list-inside space-y-1 text-xs">
+        <li><strong>Scan Now:</strong> Trigger an immediate scan of all tickers</li>
+        <li><strong>Auto-Scan toggle:</strong> Enable/disable the background scheduler</li>
+        <li><strong>Interval:</strong> Choose 5m, 15m, 30m, or 60m between scans</li>
+        <li><strong>Market Hours Only:</strong> Restrict stock scans to 9:30–16:00 ET (crypto scans 24/7)</li>
+        <li><strong>Deduplication:</strong> Same signal won&apos;t re-alert within 24 hours</li>
+      </ul>
+
+      <h4 className="text-sm font-semibold text-[var(--foreground)] mt-3">Price Alerts</h4>
+      <p>
+        Set custom price thresholds on any ticker. Get notified when the price crosses above or below
+        your target. Alerts are one-shot — once triggered, they&apos;re marked as complete.
+      </p>
+
+      <h4 className="text-sm font-semibold text-[var(--foreground)] mt-3">Backtesting</h4>
+      <p>
+        Click <strong>Backtest</strong> on any ticker in the watchlist to simulate how the signal model
+        would have performed historically. Shows win rate, average P&L, drawdown, and individual trades.
+      </p>
+
+      <h4 className="text-sm font-semibold text-[var(--foreground)] mt-3">Historical Charts</h4>
+      <p>
+        Click <strong>Chart</strong> on any ticker to view a price chart with volume bars.
+        Past signal prices are shown as reference lines. Choose 30, 60, 90, or 180 day ranges.
+      </p>
+
+      <h4 className="text-sm font-semibold text-[var(--foreground)] mt-3">Earnings Calendar</h4>
+      <p>
+        When you expand a ticker in the watchlist, the system checks for upcoming earnings dates.
+        A yellow badge appears if earnings are scheduled, helping you avoid volatile events.
+      </p>
+
+      <Tip>
+        Combine the scanner with price alerts for comprehensive coverage — the scanner catches
+        pattern-based signals while price alerts watch for specific price levels.
       </Tip>
     </DocSection>
   );

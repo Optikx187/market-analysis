@@ -53,6 +53,33 @@ const SERVICES: EditingService[] = [
       { key: "DISCORD_WEBHOOK_URL", label: "Webhook URL", type: "password", placeholder: "https://discord.com/api/webhooks/..." },
     ],
   },
+  {
+    name: "Slack",
+    provider: "slack",
+    fields: [
+      { key: "SLACK_WEBHOOK_URL", label: "Webhook URL", type: "password", placeholder: "https://hooks.slack.com/services/..." },
+    ],
+  },
+  {
+    name: "Email (SMTP)",
+    provider: "email",
+    fields: [
+      { key: "SMTP_HOST", label: "SMTP Host", type: "text", placeholder: "smtp.gmail.com" },
+      { key: "SMTP_USER", label: "SMTP User", type: "text", placeholder: "you@gmail.com" },
+      { key: "SMTP_PASSWORD", label: "SMTP Password", type: "password", placeholder: "app password" },
+      { key: "EMAIL_TO", label: "Send To", type: "text", placeholder: "you@gmail.com" },
+    ],
+  },
+  {
+    name: "SMS (Twilio)",
+    provider: "sms",
+    fields: [
+      { key: "TWILIO_ACCOUNT_SID", label: "Account SID", type: "text", placeholder: "ACxxxxxxxx" },
+      { key: "TWILIO_AUTH_TOKEN", label: "Auth Token", type: "password", placeholder: "auth token" },
+      { key: "TWILIO_FROM_NUMBER", label: "From Number", type: "text", placeholder: "+1234567890" },
+      { key: "SMS_TO_NUMBER", label: "To Number", type: "text", placeholder: "+1234567890" },
+    ],
+  },
 ];
 
 const SERVICE_INFO: Record<string, { subtitle: string; help: string }> = {
@@ -60,6 +87,9 @@ const SERVICE_INFO: Record<string, { subtitle: string; help: string }> = {
   Alpaca: { subtitle: "Stock market data", help: "Use paper-trading/read-only credentials when possible." },
   Telegram: { subtitle: "Signal notifications", help: "Use bot token and chat ID." },
   Discord: { subtitle: "Signal notifications", help: "Paste the webhook URL." },
+  Slack: { subtitle: "Signal notifications", help: "Create an incoming webhook in your Slack workspace settings." },
+  "Email (SMTP)": { subtitle: "Email notifications", help: "Use an app password for Gmail. Port 587 with TLS is default." },
+  "SMS (Twilio)": { subtitle: "SMS notifications", help: "Get credentials from twilio.com/console." },
 };
 
 const isMasked = (value?: string) => Boolean(value && value.includes("•"));

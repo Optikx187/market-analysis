@@ -314,4 +314,120 @@ export interface ReplyTradesResponse {
 export const fetchReplyTrades = () =>
   api.get<ReplyTradesResponse>("/notify/reply-trades").then((r) => r.data);
 
+// Phase 1: Scanner
+export interface ScanResult {
+  scanned: number;
+  signals_found: number;
+  notifications_sent: number;
+  errors: number;
+  signals: Array<{ ticker: string; direction: string; status: string; approved: boolean; suppressed: boolean }>;
+  timestamp: string;
+}
+
+export interface ScannerStatus {
+  enabled: boolean;
+  interval_minutes: number;
+  market_hours_only: boolean;
+  last_scan_at: string | null;
+  next_scan_at: string | null;
+  last_scan_result: ScanResult | null;
+  total_scans: number;
+  total_signals_found: number;
+}
+
+export const triggerScan = () =>
+  api.post<ScanResult>("/scan-all").then((r) => r.data);
+
+export const fetchScannerStatus = () =>
+  api.get<ScannerStatus>("/scanner/status").then((r) => r.data);
+
+export const updateScannerConfig = (config: { enabled?: boolean; interval_minutes?: number; market_hours_only?: boolean }) =>
+  api.post<{ message: string; enabled: boolean; interval_minutes: number; market_hours_only: boolean }>("/scanner/config", config).then((r) => r.data);
+
+// Phase 2: Dashboard Summary
+export interface DashboardSummary {
+  balance: number;
+  equity: number;
+  total_pnl: number;
+  total_pnl_pct: number;
+  open_positions: number;
+  todays_signals: number;
+  todays_approved: number;
+  win_rate: number;
+  total_trades: number;
+}
+
+export const fetchDashboardSummary = () =>
+  api.get<DashboardSummary>("/dashboard-summary").then((r) => r.data);
+
+// Phase 3: Price Alerts
+export interface PriceAlertItem {
+  id: number;
+  ticker: string;
+  condition: string;
+  threshold: number;
+  triggered: boolean;
+  created_at: string | null;
+  triggered_at: string | null;
+}
+
+export const fetchPriceAlerts = () =>
+  api.get<PriceAlertItem[]>("/price-alerts").then((r) => r.data);
+
+export const createPriceAlert = (ticker: string, condition: string, threshold: number) =>
+  api.post<PriceAlertItem>("/price-alerts", { ticker, condition, threshold }).then((r) => r.data);
+
+export const deletePriceAlert = (id: number) =>
+  api.delete(`/price-alerts/${id}`).then((r) => r.data);
+
+export const checkPriceAlerts = () =>
+  api.get<{ checked: number; triggered: Array<{ id: number; ticker: string; condition: string; threshold: number; current_price: number }> }>("/price-alerts/check").then((r) => r.data);
+
+// Phase 5: Backtesting
+export interface BacktestResult {
+  ticker: string;
+  period: string;
+  total_signals: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  avg_pnl_pct: number;
+  max_drawdown_pct: number;
+  final_equity: number;
+  total_return_pct: number;
+  trades: Array<{
+    direction: string;
+    entry: number;
+    exit: number;
+    entry_date: string;
+    exit_date: string;
+    pnl_pct: number;
+    outcome: string;
+    reason: string;
+  }>;
+  equity_curve: Array<{ date: string; equity: number }>;
+}
+
+export const runBacktest = (ticker: string, period: string = "6mo", capital: number = 10000) =>
+  api.post<BacktestResult>("/backtest", { ticker, period, available_capital: capital }).then((r) => r.data);
+
+// Phase 6: Earnings
+export interface EarningsData {
+  ticker: string;
+  has_earnings: boolean;
+  next_earnings_date: string | null;
+  earnings: Record<string, unknown> | null;
+}
+
+export interface UpcomingEarnings {
+  upcoming: Array<{ ticker: string; name: string; earnings_date: string; days_until: number }>;
+  checked: number;
+}
+
+export const fetchEarnings = (ticker: string) =>
+  api.get<EarningsData>(`/earnings/${ticker}`).then((r) => r.data);
+
+export const fetchUpcomingEarnings = () =>
+  api.get<UpcomingEarnings>("/earnings/upcoming/all").then((r) => r.data);
+
 export default api;

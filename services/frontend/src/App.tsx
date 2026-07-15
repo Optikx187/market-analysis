@@ -6,16 +6,21 @@ import AlertsPanel from "@/components/AlertsPanel";
 import SettingsPanel from "@/components/SettingsPanel";
 import HelpPanel from "@/components/HelpPanel";
 import GettingStartedPanel from "@/components/GettingStartedPanel";
+import DashboardWidget from "@/components/DashboardWidget";
+import ScannerPanel from "@/components/ScannerPanel";
+import PriceAlertsPanel from "@/components/PriceAlertsPanel";
+import HistoricalChart from "@/components/HistoricalChart";
 import { fetchOnboardingStatus } from "@/lib/api";
 
-const APP_VERSION = "2.2.0";
+const APP_VERSION = "3.0.0";
 
-type Tab = "alerts" | "trades" | "settings" | "help";
+type Tab = "alerts" | "trades" | "scanner" | "price-alerts" | "chart" | "settings" | "help";
 
 function App() {
   const [tab, setTab] = useState<Tab>("alerts");
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [selectedChartTicker, setSelectedChartTicker] = useState<string | null>(null);
 
   useEffect(() => {
     console.log(`%cMarket Analysis v${APP_VERSION}`, "font-weight:bold;font-size:14px;color:#22c55e");
@@ -56,6 +61,16 @@ function App() {
     return <GettingStartedPanel onComplete={completeOnboarding} />;
   }
 
+  const tabLabels: Record<Tab, string> = {
+    alerts: "Alerts",
+    trades: "Trades",
+    scanner: "Scanner",
+    "price-alerts": "Price Alerts",
+    chart: "Chart",
+    settings: "Settings",
+    help: "Help & Docs",
+  };
+
   return (
     <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
       <header className="border-b border-[var(--border)] bg-[var(--card)]">
@@ -85,31 +100,36 @@ function App() {
       </header>
 
       <main className="container mx-auto px-4 py-6 space-y-6">
+        <DashboardWidget />
+
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-1">
-            <WatchlistPanel />
+            <WatchlistPanel onViewChart={(t) => { setSelectedChartTicker(t); setTab("chart"); }} />
           </div>
           <div className="lg:col-span-2">
             <PortfolioPanel />
           </div>
         </div>
 
-        <div className="flex gap-2 border-b border-[var(--border)] pb-2">
-          {(["alerts", "trades", "settings", "help"] as Tab[]).map((t) => (
+        <div className="flex gap-2 border-b border-[var(--border)] pb-2 overflow-x-auto">
+          {(Object.keys(tabLabels) as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
-              className={`px-4 py-1.5 text-sm rounded-t capitalize ${
+              className={`px-4 py-1.5 text-sm rounded-t whitespace-nowrap ${
                 tab === t ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : "text-[var(--muted-foreground)]"
               }`}
             >
-              {t === "help" ? "Help & Docs" : t}
+              {tabLabels[t]}
             </button>
           ))}
         </div>
 
         {tab === "alerts" && <AlertsPanel />}
         {tab === "trades" && <TradesPanel />}
+        {tab === "scanner" && <ScannerPanel />}
+        {tab === "price-alerts" && <PriceAlertsPanel />}
+        {tab === "chart" && <HistoricalChart ticker={selectedChartTicker} />}
         {tab === "settings" && <SettingsPanel />}
         {tab === "help" && <HelpPanel />}
       </main>

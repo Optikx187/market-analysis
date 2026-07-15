@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     ATR_STOP_MULTIPLIER: float = 1.5
     ATR_VOLATILITY_THRESHOLD: float = 2.0
     TRAILING_STOP_PCT: float = 0.02
+    AUTH_ENABLED: bool = False
+    JWT_SECRET: str = "change-me-in-production"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRY_HOURS: int = 24
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
