@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
 import httpx
+import pandas as pd
 import yfinance as yf
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db, init_db, async_session
 from app.models import Asset, AssetType, Candle, PriceAlert
+from app.data_quality import DataQualityReport, assess_data_quality
 from app.ingestion import refresh_asset_data, load_candles
 from app.ingestion import get_binance_symbol, get_crypto_name, CRYPTO_NAMES
 
@@ -93,6 +95,60 @@ class QuoteResponse(BaseModel):
     change_pct: float | None
     volume: float | None
     updated_at: str
+
+
+async def _asset_data_quality(
+    db: AsyncSession, asset: Asset, interval: str = "1d",
+) -> DataQualityReport:
+    candles = await load_candles(db, asset.ticker, interval)
+    return assess_data_quality(asset.ticker, asset.asset_type, candles, interval)
+
+
+async def _all_data_quality(
+    db: AsyncSession, interval: str = "1d",
+) -> list[DataQualityReport]:
+    result = await db.execute(select(Asset).where(Asset.is_active == True))
+    assets = result.scalars().all()
+    if not assets:
+        return []
+
+    rows_by_ticker: dict[str, list[dict[str, object]]] = {
+        asset.ticker: [] for asset in assets
+    }
+    candle_result = await db.execute(
+        select(
+            Candle.ticker,
+            Candle.timestamp,
+            Candle.open,
+            Candle.high,
+            Candle.low,
+            Candle.close,
+            Candle.volume,
+        )
+        .where(
+            Candle.ticker.in_(rows_by_ticker),
+            Candle.interval == interval,
+        )
+        .order_by(Candle.ticker, Candle.timestamp)
+    )
+    for row in candle_result.all():
+        rows_by_ticker[row.ticker].append({
+            "timestamp": row.timestamp,
+            "open": row.open,
+            "high": row.high,
+            "low": row.low,
+            "close": row.close,
+            "volume": row.volume,
+        })
+    return [
+        assess_data_quality(
+            asset.ticker,
+            asset.asset_type,
+            pd.DataFrame(rows_by_ticker[asset.ticker]),
+            interval,
+        )
+        for asset in assets
+    ]
 
 
 async def _cleanup_ticker_whitespace():
@@ -320,6 +376,27 @@ async def get_all_candle_counts(db: AsyncSession = Depends(get_db)):
         )
         counts[asset.ticker] = len(count_result.all())
     return counts
+
+
+@app.get("/api/data-quality")
+async def get_all_data_quality(
+    interval: str = "1d", db: AsyncSession = Depends(get_db),
+):
+    reports = await _all_data_quality(db, interval)
+    return {report.ticker: report.to_dict() for report in reports}
+
+
+@app.get("/api/data-quality/{ticker}")
+async def get_data_quality(
+    ticker: str, interval: str = "1d", db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Asset).where(Asset.ticker == ticker.strip().upper(), Asset.is_active == True)
+    )
+    asset = result.scalar_one_or_none()
+    if not asset:
+        raise HTTPException(404, "Asset not found")
+    return (await _asset_data_quality(db, asset, interval)).to_dict()
 
 
 @app.post("/api/assets/refresh-all")
@@ -562,14 +639,23 @@ async def get_quote(ticker: str, asset_type: str = "stock"):
 
 
 @app.get("/api/status")
-async def system_status():
-    """Return service uptime, API call timestamps, and connectivity state."""
+async def system_status(db: AsyncSession = Depends(get_db)):
+    """Return service uptime, connectivity, and aggregate data quality."""
+    reports = await _all_data_quality(db)
+    blocked = sum(not report.is_eligible for report in reports)
+    warnings = sum(report.status == "warning" for report in reports)
     return {
         "service": "data-ingestion",
         "started_at": _service_start_time,
         "current_time": datetime.now(timezone.utc).isoformat(),
         "last_api_calls": _api_call_log,
         "connectivity": _connectivity,
+        "data_quality": {
+            "total": len(reports),
+            "healthy": len(reports) - blocked - warnings,
+            "warnings": warnings,
+            "blocked": blocked,
+        },
         "downtime_log": _downtime_log[-10:],
     }
 

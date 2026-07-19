@@ -27,6 +27,24 @@ export interface SymbolLookup {
   recognized: boolean;
 }
 
+export interface DataQuality {
+  ticker: string;
+  asset_type: string;
+  interval: string;
+  status: "healthy" | "warning" | "stale" | "insufficient" | "invalid";
+  is_eligible: boolean;
+  candle_count: number;
+  latest_timestamp: string | null;
+  age_hours: number | null;
+  stale: boolean;
+  duplicate_timestamps: number;
+  missing_periods: number;
+  invalid_timestamps: number;
+  invalid_ohlc: number;
+  anomaly_count: number;
+  issues: string[];
+}
+
 export interface Signal {
   ticker: string;
   direction: string | null;
@@ -139,6 +157,10 @@ export const refreshAllData = () =>
   api.post<{ refreshed: number; total: number; details: Record<string, { status: string; candles?: number; error?: string }> }>("/assets/refresh-all").then((r) => r.data);
 export const fetchCandleCounts = () =>
   api.get<Record<string, number>>("/assets/candle-counts").then((r) => r.data);
+export const fetchDataQuality = () =>
+  api.get<Record<string, DataQuality>>("/data-quality").then((r) => r.data);
+export const fetchTickerDataQuality = (ticker: string) =>
+  api.get<DataQuality>(`/data-quality/${ticker}`).then((r) => r.data);
 export const exportAssets = () =>
   api.get<Array<{ ticker: string; name: string; asset_type: string }>>("/assets/export").then((r) => r.data);
 export const importAssets = (items: Array<{ ticker: string; name: string; asset_type: string }>) =>
@@ -288,6 +310,12 @@ export interface SystemStatus {
   current_time: string;
   last_api_calls: Record<string, string>;
   connectivity: Record<string, ProviderConnectivity>;
+  data_quality: {
+    total: number;
+    healthy: number;
+    warnings: number;
+    blocked: number;
+  };
   downtime_log: DowntimeEntry[];
 }
 

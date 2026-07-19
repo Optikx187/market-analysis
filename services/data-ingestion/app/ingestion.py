@@ -164,13 +164,39 @@ async def fetch_historical(ticker: str, asset_type: AssetType) -> pd.DataFrame:
     return await fetch_historical_yfinance(ticker, "1y", "1d")
 
 
+def validate_candles_for_storage(df: pd.DataFrame) -> pd.DataFrame:
+    required = ["timestamp", "open", "high", "low", "close", "volume"]
+    missing = [column for column in required if column not in df.columns]
+    if missing:
+        raise ValueError(f"Candle data is missing required columns: {', '.join(missing)}")
+
+    validated = df.copy()
+    validated["timestamp"] = pd.to_datetime(validated["timestamp"], errors="coerce", utc=True)
+    numeric_columns = ["open", "high", "low", "close", "volume"]
+    validated[numeric_columns] = validated[numeric_columns].apply(pd.to_numeric, errors="coerce")
+    numeric = validated[numeric_columns].replace([float("inf"), float("-inf")], pd.NA)
+    invalid = (
+        validated["timestamp"].isna()
+        | validated["timestamp"].duplicated(keep=False)
+        | numeric.isna().any(axis=1)
+        | (numeric[["open", "high", "low", "close"]] <= 0).any(axis=1)
+        | (numeric["volume"] < 0)
+        | (numeric["high"] < numeric[["open", "close", "low"]].max(axis=1))
+        | (numeric["low"] > numeric[["open", "close", "high"]].min(axis=1))
+    )
+    if invalid.any():
+        raise ValueError(f"Candle data contains {int(invalid.sum())} malformed row(s)")
+    return validated
+
+
 async def store_candles(
     db: AsyncSession, ticker: str, df: pd.DataFrame, interval: str = "1d",
 ):
+    validated = validate_candles_for_storage(df)
     await db.execute(
         delete(Candle).where(Candle.ticker == ticker, Candle.interval == interval),
     )
-    for _, row in df.iterrows():
+    for _, row in validated.iterrows():
         ts = row["timestamp"]
         if isinstance(ts, pd.Timestamp):
             ts = ts.to_pydatetime()
