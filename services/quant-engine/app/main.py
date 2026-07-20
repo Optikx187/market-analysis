@@ -117,6 +117,24 @@ class AnalyzeRequest(BaseModel):
     timeframes: list[str] = ["1d"]
 
 
+class DataQualityResponse(BaseModel):
+    ticker: str
+    asset_type: str
+    interval: str
+    status: str
+    is_eligible: bool
+    candle_count: int
+    latest_timestamp: Optional[str]
+    age_hours: Optional[float]
+    stale: bool
+    duplicate_timestamps: int
+    missing_periods: int
+    invalid_timestamps: int
+    invalid_ohlc: int
+    anomaly_count: int
+    issues: list[str]
+
+
 class ScanConfigUpdate(BaseModel):
     enabled: Optional[bool] = None
     interval_minutes: Optional[int] = None
@@ -146,6 +164,44 @@ async def _fetch_assets() -> list[dict]:
         resp = await client.get(url, timeout=15)
         resp.raise_for_status()
     return resp.json()
+
+
+async def _fetch_data_quality(ticker: str, interval: str = "1d") -> DataQualityResponse:
+    url = f"{settings.DATA_INGESTION_URL}/api/data-quality/{ticker}"
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, params={"interval": interval}, timeout=15)
+        resp.raise_for_status()
+    return DataQualityResponse.model_validate(resp.json())
+
+
+async def _fetch_all_data_quality(interval: str = "1d") -> dict[str, DataQualityResponse]:
+    url = f"{settings.DATA_INGESTION_URL}/api/data-quality"
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, params={"interval": interval}, timeout=30)
+        resp.raise_for_status()
+    return {
+        ticker: DataQualityResponse.model_validate(report)
+        for ticker, report in resp.json().items()
+    }
+
+
+def _quality_rejection_reason(quality: DataQualityResponse) -> str:
+    if quality.issues:
+        return "; ".join(quality.issues)
+    return f"Data quality status is {quality.status}"
+
+
+async def _require_eligible_data(ticker: str, interval: str = "1d") -> DataQualityResponse:
+    try:
+        quality = await _fetch_data_quality(ticker, interval)
+    except Exception as e:
+        logger.error(f"Data quality unavailable for {ticker}: {e}")
+        raise HTTPException(503, f"Data quality unavailable for {ticker}") from e
+    if not quality.is_eligible:
+        raise HTTPException(
+            422, f"Data quality rejected for {ticker}: {_quality_rejection_reason(quality)}"
+        )
+    return quality
 
 
 async def _send_notification(signal_data: dict) -> bool:
@@ -178,10 +234,18 @@ async def _run_scan() -> dict:
     _scan_state["last_scan_at"] = now.isoformat()
 
     assets = await _fetch_assets()
+    try:
+        quality_by_ticker = await _fetch_all_data_quality()
+        quality_service_error = None
+    except Exception as e:
+        logger.error(f"Data quality unavailable for scan: {e}")
+        quality_by_ticker = {}
+        quality_service_error = "Data quality service unavailable"
     scanned = 0
     signals_found = 0
     notifications_sent = 0
     errors = 0
+    quality_rejections = []
     signal_details = []
 
     for asset in assets:
@@ -189,6 +253,14 @@ async def _run_scan() -> dict:
             continue
         ticker = asset["ticker"]
         asset_type = asset.get("asset_type", "stock")
+        quality = quality_by_ticker.get(ticker)
+        if quality is None or not quality.is_eligible:
+            reason = quality_service_error or (
+                _quality_rejection_reason(quality) if quality else "Data quality result missing"
+            )
+            quality_rejections.append({"ticker": ticker, "reason": reason})
+            logger.warning(f"Scan skipped {ticker}: {reason}")
+            continue
         try:
             df = await fetch_candles_from_service_a(ticker)
             if df.empty or len(df) < 201:
@@ -262,6 +334,8 @@ async def _run_scan() -> dict:
         "signals_found": signals_found,
         "notifications_sent": notifications_sent,
         "errors": errors,
+        "quality_rejected": len(quality_rejections),
+        "quality_rejections": quality_rejections,
         "signals": signal_details,
         "timestamp": now.isoformat(),
     }
@@ -319,6 +393,7 @@ async def health():
 
 @app.post("/api/analyze", response_model=Optional[SignalResponse])
 async def analyze(req: AnalyzeRequest):
+    await _require_eligible_data(req.ticker)
     df = await fetch_candles_from_service_a(req.ticker)
     if df.empty or len(df) < 201:
         raise HTTPException(400, f"Insufficient data for {req.ticker} (need 201+ candles)")
@@ -348,6 +423,7 @@ async def analyze(req: AnalyzeRequest):
 
 @app.post("/api/risk-profile", response_model=Optional[RiskProfileResponse])
 async def risk_profile(req: AnalyzeRequest):
+    await _require_eligible_data(req.ticker)
     df = await fetch_candles_from_service_a(req.ticker)
     if df.empty or len(df) < 201:
         raise HTTPException(400, f"Insufficient data for {req.ticker}")
@@ -432,6 +508,7 @@ async def analyze_multi_timeframe(req: AnalyzeRequest):
 
     for tf in req.timeframes:
         try:
+            await _require_eligible_data(req.ticker, tf)
             if tf == "1d":
                 df = await fetch_candles_from_service_a(req.ticker)
             else:

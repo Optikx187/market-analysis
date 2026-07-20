@@ -470,6 +470,21 @@ export default function SettingsPanel() {
                 </div>
               </div>
             </div>
+            {sysStatus.data_quality && (
+              <div className="rounded bg-[var(--background)] p-3 mb-3">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium">Market Data Quality</span>
+                  <span className={`text-xs font-medium ${sysStatus.data_quality.blocked > 0 ? "text-red-400" : "text-green-400"}`}>
+                    {sysStatus.data_quality.blocked > 0 ? `${sysStatus.data_quality.blocked} blocked` : "All eligible"}
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                  <div><div className="text-green-400 font-medium">{sysStatus.data_quality.healthy}</div><div className="text-[var(--muted-foreground)]">Healthy</div></div>
+                  <div><div className="text-yellow-400 font-medium">{sysStatus.data_quality.warnings}</div><div className="text-[var(--muted-foreground)]">Warnings</div></div>
+                  <div><div className="text-red-400 font-medium">{sysStatus.data_quality.blocked}</div><div className="text-[var(--muted-foreground)]">Blocked</div></div>
+                </div>
+              </div>
+            )}
             {sysStatus.connectivity && (
               <div className="space-y-2 mb-3">
                 {Object.entries(sysStatus.connectivity).map(([provider, conn]) => (

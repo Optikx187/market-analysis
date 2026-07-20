@@ -8,6 +8,8 @@ import {
   fetchQuote,
   lookupSymbol,
   fetchCandleCounts,
+  fetchDataQuality,
+  fetchTickerDataQuality,
   refreshData,
   refreshAllData,
   exportAssets,
@@ -16,6 +18,7 @@ import {
   fetchEarnings,
   type Asset,
   type Quote,
+  type DataQuality,
   type SignalDecision,
   type BacktestResult,
 } from "@/lib/api";
@@ -38,6 +41,7 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
   const [pollingEnabled, setPollingEnabled] = useState(true);
   const [pollInterval, setPollInterval] = useState(30);
   const [candleCounts, setCandleCounts] = useState<Record<string, number>>({});
+  const [dataQuality, setDataQuality] = useState<Record<string, DataQuality>>({});
   const [refreshing, setRefreshing] = useState<string | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
@@ -56,9 +60,20 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
     }
   };
 
+  const loadDataQuality = async () => {
+    try {
+      setDataQuality(await fetchDataQuality());
+    } catch {
+      setDataQuality({});
+    }
+  };
+
   useEffect(() => { load(); }, []);
-  useEffect(() => { 
-    if (assets.length > 0) loadCandleCounts();
+  useEffect(() => {
+    if (assets.length > 0) {
+      loadCandleCounts();
+      loadDataQuality();
+    }
   }, [assets.length]);
 
   useEffect(() => {
@@ -161,7 +176,12 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
         setFeedback(`${t}: Insufficient data (${candleCount} candles, need 201+). Click "Refresh Data" to fetch historical data.`);
         return;
       }
-      
+      const quality = dataQuality[t];
+      if (!quality?.is_eligible) {
+        setFeedback(`${t}: Data quality blocked analysis — ${quality?.issues.join("; ") || "quality status unavailable"}.`);
+        return;
+      }
+
       const asset = assets.find((a) => a.ticker === t);
       const type = asset?.asset_type ?? "stock";
       const signal = await analyzeSignal(t, 10000, type);
@@ -191,10 +211,14 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
     try {
       const result = await refreshData(t);
       setCandleCounts((prev) => ({ ...prev, [t]: result.candles }));
-      if (result.candles >= 201) {
+      const quality = await fetchTickerDataQuality(t);
+      setDataQuality((prev) => ({ ...prev, [t]: quality }));
+      if (quality.is_eligible) {
         setFeedback(`${t}: Data refreshed successfully (${result.candles} candles). Ready for analysis.`);
-      } else {
+      } else if (result.candles < 201) {
         setFeedback(`${t}: Data refreshed (${result.candles} candles). Need 201+ candles for analysis.`);
+      } else {
+        setFeedback(`${t}: Data refreshed but blocked by quality checks — ${quality.issues.join("; ")}.`);
       }
     } catch (e: any) {
       setFeedback(e?.response?.data?.detail || `${t}: Failed to refresh data.`);
@@ -214,6 +238,7 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
         if (d.candles !== undefined) newCounts[t] = d.candles;
       }
       setCandleCounts((prev) => ({ ...prev, ...newCounts }));
+      await loadDataQuality();
       setFeedback(`Refreshed ${result.refreshed}/${result.total} tickers successfully.`);
     } catch (e: any) {
       setFeedback(e?.response?.data?.detail || "Failed to refresh all data.");
@@ -380,6 +405,15 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
       <div className="max-h-[420px] overflow-y-auto space-y-1">
         {assets.map((a) => {
           const q = quotes[a.ticker];
+          const quality = dataQuality[a.ticker];
+          const qualityLabel = quality?.is_eligible
+            ? quality.status === "warning" ? "Warning" : "Fresh"
+            : quality?.status === "stale" ? "Stale" : quality ? "Blocked" : "Checking";
+          const qualityClass = !quality
+            ? "bg-[var(--secondary)] text-[var(--muted-foreground)]"
+            : quality.is_eligible
+              ? quality.status === "warning" ? "bg-yellow-500/15 text-yellow-300" : "bg-green-500/15 text-green-300"
+              : quality.status === "stale" ? "bg-orange-500/15 text-orange-300" : "bg-red-500/15 text-red-300";
           const isExpanded = expandedTicker === a.ticker;
           return (
             <div key={a.ticker} className="rounded border">
@@ -397,6 +431,12 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
                   {q?.change_pct !== undefined && q?.change_pct !== null ? `${q.change_pct >= 0 ? "+" : ""}${q.change_pct}%` : "—"}
                 </span>
                 <span className="text-[10px] px-1 py-0.5 rounded bg-[var(--secondary)] text-[var(--muted-foreground)] shrink-0">{a.asset_type}</span>
+                <span
+                  className={`text-[10px] px-1 py-0.5 rounded shrink-0 ${qualityClass}`}
+                  title={quality?.issues.join("; ") || "Data quality check pending"}
+                >
+                  {qualityLabel}
+                </span>
                 <svg className={`w-3 h-3 shrink-0 text-[var(--muted-foreground)] transition-transform ${isExpanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
               </div>
               {/* Expanded details */}
@@ -408,15 +448,22 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
                     <span className={candleCounts[a.ticker] >= 201 ? "text-green-400" : "text-yellow-400"}>
                       {candleCounts[a.ticker] ?? 0} candles
                     </span>
+                    <span>·</span>
+                    <span>Last candle: {quality?.latest_timestamp ? new Date(quality.latest_timestamp).toLocaleString() : "Unavailable"}</span>
                   </div>
+                  {quality && quality.issues.length > 0 && (
+                    <div className={`text-[10px] ${quality.is_eligible ? "text-yellow-300" : "text-red-300"}`}>
+                      {quality.issues.join("; ")}
+                    </div>
+                  )}
                   <div className="flex gap-1">
                     <button onClick={(e) => { e.stopPropagation(); handleRefresh(a.ticker); }} disabled={refreshing === a.ticker}
                       className="rounded bg-[var(--secondary)] px-2 py-0.5 text-xs hover:bg-[var(--accent)]">
                       {refreshing === a.ticker ? "Fetching..." : "Refresh Data"}
                     </button>
-                    <button onClick={(e) => { e.stopPropagation(); handleAnalyze(a.ticker); }} disabled={analyzing === a.ticker || (candleCounts[a.ticker] || 0) < 201}
+                    <button onClick={(e) => { e.stopPropagation(); handleAnalyze(a.ticker); }} disabled={analyzing === a.ticker || (candleCounts[a.ticker] || 0) < 201 || !quality?.is_eligible}
                       className={`rounded px-2 py-0.5 text-xs ${
-                        (candleCounts[a.ticker] || 0) >= 201
+                        (candleCounts[a.ticker] || 0) >= 201 && quality?.is_eligible
                           ? "bg-[var(--accent)] hover:bg-[var(--primary)] hover:text-[var(--primary-foreground)]"
                           : "bg-[var(--secondary)] opacity-50 cursor-not-allowed"
                       }`}>
@@ -437,9 +484,9 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
                         setFeedback(`${a.ticker} backtest: ${bt.total_signals} trades, ${bt.win_rate}% win rate, ${bt.total_return_pct >= 0 ? "+" : ""}${bt.total_return_pct}% return`);
                       } catch { setFeedback(`${a.ticker}: backtest failed (need 201+ candles)`); }
                     }}
-                      disabled={(candleCounts[a.ticker] || 0) < 201}
+                      disabled={(candleCounts[a.ticker] || 0) < 201 || !quality?.is_eligible}
                       className={`rounded px-2 py-0.5 text-xs ${
-                        (candleCounts[a.ticker] || 0) >= 201
+                        (candleCounts[a.ticker] || 0) >= 201 && quality?.is_eligible
                           ? "bg-[var(--secondary)] hover:bg-[var(--accent)]"
                           : "bg-[var(--secondary)] opacity-50 cursor-not-allowed"
                       }`}>
