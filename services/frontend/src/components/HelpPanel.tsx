@@ -292,10 +292,11 @@ function ScannerToolsSection() {
         your target. Alerts are one-shot — once triggered, they&apos;re marked as complete.
       </p>
 
-      <h4 className="text-sm font-semibold text-[var(--foreground)] mt-3">Backtesting</h4>
+      <h4 className="text-sm font-semibold text-[var(--foreground)] mt-3">Walk-Forward Backtesting</h4>
       <p>
-        Click <strong>Backtest</strong> on any ticker in the watchlist to simulate how the signal model
-        would have performed historically. Shows win rate, average P&L, drawdown, and individual trades.
+        Refresh a ticker to load at least 301 candles, then click <strong>Backtest</strong>. The report keeps
+        training, validation, and out-of-sample windows separate; models commission, spread, slippage, and
+        delayed fills; compares buy-and-hold; and marks the strategy alert-eligible only from out-of-sample results.
       </p>
 
       <h4 className="text-sm font-semibold text-[var(--foreground)] mt-3">Historical Charts</h4>
