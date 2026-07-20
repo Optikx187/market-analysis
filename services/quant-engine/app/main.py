@@ -10,8 +10,16 @@ import httpx
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from app.backtest_store import BacktestStore
+from app.backtesting import (
+    ExecutionCosts,
+    StrategyParameters,
+    ValidationThresholds,
+    WindowConfiguration,
+    run_walk_forward_backtest,
+)
 from app.config import settings
 from app.risk_engine import evaluate_risk_profile
 from app.signals import evaluate_signals
@@ -33,6 +41,14 @@ _scan_state = {
 }
 # Dedup: ticker -> last signal direction+timestamp (don't re-alert within 24h)
 _recent_signals: dict[str, str] = {}
+_backtest_store: BacktestStore | None = None
+
+
+def _get_backtest_store() -> BacktestStore:
+    global _backtest_store
+    if _backtest_store is None:
+        _backtest_store = BacktestStore(settings.BACKTEST_DATABASE_PATH)
+    return _backtest_store
 
 
 def _is_market_hours() -> bool:
@@ -141,10 +157,50 @@ class ScanConfigUpdate(BaseModel):
     market_hours_only: Optional[bool] = None
 
 
+class BacktestStrategyParameters(BaseModel):
+    risk_reward_ratio: float = Field(default=3.0, gt=0)
+    atr_stop_multiplier: float = Field(default=1.5, gt=0)
+    volatility_threshold: float = Field(default=2.0, gt=0)
+
+
+class BacktestExecutionCosts(BaseModel):
+    commission_bps: float = Field(default=2.0, ge=0)
+    spread_bps: float = Field(default=4.0, ge=0)
+    slippage_bps: float = Field(default=3.0, ge=0)
+    fill_delay_bars: int = Field(default=1, ge=1, le=10)
+
+
+class BacktestWindowConfiguration(BaseModel):
+    warmup_bars: int = Field(default=201, ge=201)
+    train_bars: int = Field(default=60, ge=10)
+    validation_bars: int = Field(default=20, ge=5)
+    test_bars: int = Field(default=20, ge=5)
+    step_bars: int = Field(default=20, ge=5)
+
+
+class BacktestValidationThresholds(BaseModel):
+    minimum_trades: int = Field(default=3, ge=0)
+    minimum_after_cost_return_pct: float = 0.0
+    minimum_sharpe: float = 0.0
+    minimum_profit_factor: float = Field(default=1.0, ge=0)
+    maximum_drawdown_pct: float = Field(default=25.0, ge=0)
+
+
 class BacktestRequest(BaseModel):
     ticker: str
-    period: str = "6mo"
-    available_capital: float = 10_000.0
+    period: str = "max"
+    available_capital: float = Field(default=10_000.0, gt=0)
+    strategy_version: str = Field(default="ema-rsi-atr-v1", min_length=1, max_length=100)
+    parameter_grid: list[BacktestStrategyParameters] = Field(default_factory=lambda: [
+        BacktestStrategyParameters(risk_reward_ratio=2.0, atr_stop_multiplier=1.0),
+        BacktestStrategyParameters(risk_reward_ratio=2.0, atr_stop_multiplier=1.5),
+        BacktestStrategyParameters(risk_reward_ratio=3.0, atr_stop_multiplier=1.0),
+        BacktestStrategyParameters(risk_reward_ratio=3.0, atr_stop_multiplier=1.5),
+    ], min_length=1, max_length=20)
+    costs: BacktestExecutionCosts = Field(default_factory=BacktestExecutionCosts)
+    windows: BacktestWindowConfiguration = Field(default_factory=BacktestWindowConfiguration)
+    thresholds: BacktestValidationThresholds = Field(default_factory=BacktestValidationThresholds)
+    benchmark_tickers: list[str] = Field(default_factory=list, max_length=5)
 
 
 async def fetch_candles_from_service_a(ticker: str) -> pd.DataFrame:
@@ -572,98 +628,79 @@ async def analyze_multi_timeframe(req: AnalyzeRequest):
 
 # --- Phase 5: Backtesting ---
 
+
 @app.post("/api/backtest")
 async def backtest(req: BacktestRequest):
-    """Run a historical backtest for a ticker using the signal model."""
-    df = await fetch_candles_from_service_a(req.ticker)
-    if df.empty or len(df) < 201:
-        raise HTTPException(400, f"Insufficient data for {req.ticker} (need 201+ candles)")
+    """Run and persist a leakage-safe walk-forward validation."""
+    ticker = req.ticker.strip().upper()
+    await _require_eligible_data(ticker)
+    frame = await fetch_candles_from_service_a(ticker)
+    period_map = {"6mo": 126, "1y": 252, "2y": 504, "3y": 756}
+    if req.period != "max":
+        if req.period not in period_map:
+            raise HTTPException(400, "period must be one of: 6mo, 1y, 2y, 3y, max")
+        frame = frame.tail(period_map[req.period]).reset_index(drop=True)
 
-    period_map = {"1mo": 21, "3mo": 63, "6mo": 126, "1y": 252}
-    lookback = period_map.get(req.period, 126)
-    start_idx = max(201, len(df) - lookback)
+    benchmark_frames: dict[str, pd.DataFrame] = {}
+    for symbol in dict.fromkeys(item.strip().upper() for item in req.benchmark_tickers):
+        if not symbol or symbol == ticker:
+            continue
+        try:
+            benchmark = await fetch_candles_from_service_a(symbol)
+            if not benchmark.empty:
+                benchmark_frames[symbol] = benchmark
+        except Exception as error:
+            logger.warning(f"Benchmark data unavailable for {symbol}: {error}")
 
-    trades = []
-    current_position = None
+    parameters = [
+        StrategyParameters(
+            risk_reward_ratio=item.risk_reward_ratio,
+            atr_stop_multiplier=item.atr_stop_multiplier,
+            volatility_threshold=item.volatility_threshold,
+        )
+        for item in req.parameter_grid
+    ]
+    costs = ExecutionCosts(**req.costs.model_dump())
+    windows = WindowConfiguration(**req.windows.model_dump())
+    thresholds = ValidationThresholds(**req.thresholds.model_dump())
+    try:
+        result = run_walk_forward_backtest(
+            ticker=ticker,
+            candles=frame,
+            strategy_version=req.strategy_version,
+            parameters=parameters,
+            costs=costs,
+            windows=windows,
+            thresholds=thresholds,
+            initial_capital=req.available_capital,
+            benchmark_frames=benchmark_frames,
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    store = _get_backtest_store()
+    run_id = store.save(
+        ticker=ticker,
+        strategy_version=req.strategy_version,
+        request=req.model_dump(mode="json"),
+        result=result,
+    )
+    stored = store.get(run_id)
+    if stored is None:
+        raise HTTPException(500, "Backtest run could not be persisted")
+    return stored
 
-    for i in range(start_idx, len(df)):
-        window = df.iloc[:i + 1].copy()
-        result = evaluate_signals(window, req.available_capital)
-        row = df.iloc[i]
-        price = row["close"]
-        date_str = str(row.get("timestamp", row.get("date", i)))
 
-        if current_position:
-            pos = current_position
-            if pos["direction"] == "BUY":
-                if price <= pos["stop_loss"]:
-                    pnl_pct = ((price - pos["entry"]) / pos["entry"]) * 100
-                    trades.append({**pos, "exit": price, "exit_date": date_str, "pnl_pct": round(pnl_pct, 2), "outcome": "stop_loss"})
-                    current_position = None
-                elif price >= pos["target"]:
-                    pnl_pct = ((price - pos["entry"]) / pos["entry"]) * 100
-                    trades.append({**pos, "exit": price, "exit_date": date_str, "pnl_pct": round(pnl_pct, 2), "outcome": "target_hit"})
-                    current_position = None
-            elif pos["direction"] == "SELL":
-                if price >= pos["stop_loss"]:
-                    pnl_pct = ((pos["entry"] - price) / pos["entry"]) * 100
-                    trades.append({**pos, "exit": price, "exit_date": date_str, "pnl_pct": round(pnl_pct, 2), "outcome": "stop_loss"})
-                    current_position = None
-                elif price <= pos["target"]:
-                    pnl_pct = ((pos["entry"] - price) / pos["entry"]) * 100
-                    trades.append({**pos, "exit": price, "exit_date": date_str, "pnl_pct": round(pnl_pct, 2), "outcome": "target_hit"})
-                    current_position = None
+@app.get("/api/backtest/runs")
+async def list_backtest_runs(ticker: Optional[str] = None, limit: int = 20):
+    if limit < 1 or limit > 100:
+        raise HTTPException(400, "limit must be between 1 and 100")
+    normalized = ticker.strip().upper() if ticker else None
+    return _get_backtest_store().list(normalized, limit)
 
-        if current_position is None and result is not None and not result.suppressed:
-            current_position = {
-                "direction": result.direction,
-                "entry": price,
-                "entry_date": date_str,
-                "stop_loss": result.stop_loss,
-                "target": result.target_price,
-                "reason": result.reason,
-            }
 
-    # Close any remaining open position at last price
-    if current_position:
-        last_price = df.iloc[-1]["close"]
-        last_date = str(df.iloc[-1].get("timestamp", df.iloc[-1].get("date", len(df) - 1)))
-        pos = current_position
-        if pos["direction"] == "BUY":
-            pnl_pct = ((last_price - pos["entry"]) / pos["entry"]) * 100
-        else:
-            pnl_pct = ((pos["entry"] - last_price) / pos["entry"]) * 100
-        trades.append({**pos, "exit": last_price, "exit_date": last_date, "pnl_pct": round(pnl_pct, 2), "outcome": "still_open"})
-
-    wins = [t for t in trades if t["pnl_pct"] > 0]
-    losses = [t for t in trades if t["pnl_pct"] <= 0]
-    total = len(trades)
-    win_rate = (len(wins) / total * 100) if total > 0 else 0
-    avg_pnl = sum(t["pnl_pct"] for t in trades) / total if total > 0 else 0
-
-    # Equity curve
-    equity = req.available_capital
-    equity_curve = [{"date": "start", "equity": equity}]
-    max_equity = equity
-    max_dd = 0
-    for t in trades:
-        equity *= (1 + t["pnl_pct"] / 100)
-        equity_curve.append({"date": t.get("exit_date", ""), "equity": round(equity, 2)})
-        max_equity = max(max_equity, equity)
-        dd = ((max_equity - equity) / max_equity) * 100
-        max_dd = max(max_dd, dd)
-
-    return {
-        "ticker": req.ticker,
-        "period": req.period,
-        "total_signals": total,
-        "wins": len(wins),
-        "losses": len(losses),
-        "win_rate": round(win_rate, 1),
-        "avg_pnl_pct": round(avg_pnl, 2),
-        "max_drawdown_pct": round(max_dd, 2),
-        "final_equity": round(equity, 2),
-        "total_return_pct": round(((equity - req.available_capital) / req.available_capital) * 100, 2),
-        "trades": trades,
-        "equity_curve": equity_curve,
-    }
+@app.get("/api/backtest/runs/{run_id}")
+async def get_backtest_run(run_id: str):
+    result = _get_backtest_store().get(run_id)
+    if result is None:
+        raise HTTPException(404, "Backtest run not found")
+    return result

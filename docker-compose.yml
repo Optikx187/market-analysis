@@ -32,6 +32,9 @@ services:
       - DATA_INGESTION_URL=http://data-ingestion:8000
       - PORTFOLIO_ENGINE_URL=http://portfolio-engine:8002
       - NOTIFICATION_GATEWAY_URL=http://notification-gateway:8003
+      - BACKTEST_DATABASE_PATH=/app/data/backtests.db
+    volumes:
+      - quant-engine-db:/app/data
     networks:
       - trading_network
     depends_on:
@@ -105,4 +108,5 @@ networks:
 
 volumes:
   data-ingestion-db:
+  quant-engine-db:
   portfolio-db:

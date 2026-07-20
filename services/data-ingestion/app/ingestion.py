@@ -77,7 +77,7 @@ async def fetch_historical_yfinance(
 
 
 async def fetch_historical_binance(
-    symbol: str, interval: str = "1d", limit: int = 365,
+    symbol: str, interval: str = "1d", limit: int = 1000,
 ) -> pd.DataFrame:
     url = f"{BINANCE_REST_URL}/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
@@ -96,7 +96,7 @@ async def fetch_historical_binance(
 
 
 async def fetch_historical_alpaca(
-    ticker: str, days: int = 365,
+    ticker: str, days: int = 1095,
 ) -> pd.DataFrame:
     """Fetch daily bars from Alpaca Markets for stock tickers."""
     if not settings.ALPACA_API_KEY or not settings.ALPACA_API_SECRET:
@@ -146,13 +146,13 @@ async def fetch_historical(ticker: str, asset_type: AssetType) -> pd.DataFrame:
     if asset_type == AssetType.CRYPTO:
         symbol = get_binance_symbol(ticker)
         try:
-            df = await fetch_historical_binance(symbol, "1d", 365)
+            df = await fetch_historical_binance(symbol, "1d", 1000)
             if not df.empty:
                 return df
         except Exception as e:
             logger.warning(f"Binance failed for {symbol}, fallback to yfinance: {e}")
         yf_ticker = f"{ticker}-USD" if not ticker.endswith("-USD") else ticker
-        return await fetch_historical_yfinance(yf_ticker, "1y", "1d")
+        return await fetch_historical_yfinance(yf_ticker, "3y", "1d")
     # Stocks: try Alpaca first (if keys configured), then yfinance
     try:
         df = await fetch_historical_alpaca(ticker)
@@ -161,7 +161,7 @@ async def fetch_historical(ticker: str, asset_type: AssetType) -> pd.DataFrame:
             return df
     except Exception as e:
         logger.warning(f"Alpaca failed for {ticker}, fallback to yfinance: {e}")
-    return await fetch_historical_yfinance(ticker, "1y", "1d")
+    return await fetch_historical_yfinance(ticker, "3y", "1d")
 
 
 def validate_candles_for_storage(df: pd.DataFrame) -> pd.DataFrame:
