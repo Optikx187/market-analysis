@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     SCAN_INTERVAL_MINUTES: int = 15
     SCAN_ENABLED: bool = True
     MARKET_HOURS_ONLY: bool = True
+    BACKTEST_DATABASE_PATH: str = "./backtests.db"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

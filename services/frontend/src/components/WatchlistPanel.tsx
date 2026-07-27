@@ -479,14 +479,16 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
                       e.stopPropagation();
                       setFeedback(`Running backtest for ${a.ticker}...`);
                       try {
-                        const bt = await runBacktest(a.ticker, "6mo");
+                        const bt = await runBacktest(a.ticker);
                         setBacktestResult(bt);
-                        setFeedback(`${a.ticker} backtest: ${bt.total_signals} trades, ${bt.win_rate}% win rate, ${bt.total_return_pct >= 0 ? "+" : ""}${bt.total_return_pct}% return`);
-                      } catch { setFeedback(`${a.ticker}: backtest failed (need 201+ candles)`); }
+                        const oos = bt.aggregate.out_of_sample;
+                        setFeedback(`${a.ticker}: ${bt.window_count} walk-forward windows, ${oos.total_trades} out-of-sample trades, ${oos.after_cost_return_pct >= 0 ? "+" : ""}${oos.after_cost_return_pct}% after costs`);
+                      } catch { setFeedback(`${a.ticker}: walk-forward backtest failed. Refresh data to load enough history.`); }
                     }}
-                      disabled={(candleCounts[a.ticker] || 0) < 201 || !quality?.is_eligible}
+                      disabled={(candleCounts[a.ticker] || 0) < 301 || !quality?.is_eligible}
+                      title={(candleCounts[a.ticker] || 0) < 301 ? "Refresh data to load 301+ candles for walk-forward validation" : "Run walk-forward validation"}
                       className={`rounded px-2 py-0.5 text-xs ${
-                        (candleCounts[a.ticker] || 0) >= 201 && quality?.is_eligible
+                        (candleCounts[a.ticker] || 0) >= 301 && quality?.is_eligible
                           ? "bg-[var(--secondary)] hover:bg-[var(--accent)]"
                           : "bg-[var(--secondary)] opacity-50 cursor-not-allowed"
                       }`}>
@@ -521,43 +523,103 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
 
       {backtestResult && (
         <div className="mt-4 rounded border border-blue-600 p-3 text-sm">
-          <div className="flex items-center justify-between mb-2">
-            <div className="font-semibold">{backtestResult.ticker} Backtest ({backtestResult.period})</div>
-            <button onClick={() => setBacktestResult(null)} className="text-xs text-[var(--muted-foreground)]">Close</button>
-          </div>
-          <div className="grid grid-cols-4 gap-2 text-center text-xs mb-2">
-            <div className="rounded bg-[var(--background)] p-1.5">
-              <div className="text-[var(--muted-foreground)]">Trades</div>
-              <div className="font-medium">{backtestResult.total_signals}</div>
-            </div>
-            <div className="rounded bg-[var(--background)] p-1.5">
-              <div className="text-[var(--muted-foreground)]">Win Rate</div>
-              <div className="font-medium">{backtestResult.win_rate}%</div>
-            </div>
-            <div className="rounded bg-[var(--background)] p-1.5">
-              <div className="text-[var(--muted-foreground)]">Avg P&L</div>
-              <div className={`font-medium ${backtestResult.avg_pnl_pct >= 0 ? "text-green-400" : "text-red-400"}`}>
-                {backtestResult.avg_pnl_pct >= 0 ? "+" : ""}{backtestResult.avg_pnl_pct}%
+          <div className="flex items-start justify-between gap-2 mb-3">
+            <div>
+              <div className="font-semibold">{backtestResult.ticker} Walk-Forward Validation</div>
+              <div className="text-[10px] text-[var(--muted-foreground)]">
+                {backtestResult.strategy.version} · {backtestResult.window_count} windows · {backtestResult.configuration.candles} candles
               </div>
             </div>
-            <div className="rounded bg-[var(--background)] p-1.5">
-              <div className="text-[var(--muted-foreground)]">Return</div>
-              <div className={`font-medium ${backtestResult.total_return_pct >= 0 ? "text-green-400" : "text-red-400"}`}>
-                {backtestResult.total_return_pct >= 0 ? "+" : ""}{backtestResult.total_return_pct}%
-              </div>
+            <div className="flex items-center gap-2">
+              <span className={`rounded px-2 py-0.5 text-xs font-medium ${backtestResult.alert_eligibility.eligible ? "bg-green-500/15 text-green-300" : "bg-red-500/15 text-red-300"}`}>
+                {backtestResult.alert_eligibility.eligible ? "Alert Eligible" : "Alert Ineligible"}
+              </span>
+              <button onClick={() => setBacktestResult(null)} className="text-xs text-[var(--muted-foreground)]">Close</button>
             </div>
           </div>
-          <div className="text-xs text-[var(--muted-foreground)]">
-            {backtestResult.wins}W / {backtestResult.losses}L | Max DD: -{backtestResult.max_drawdown_pct}% | Final: ${backtestResult.final_equity.toLocaleString()}
+
+          <div className="grid grid-cols-3 gap-2 text-center text-xs mb-3">
+            {([
+              ["In Sample", backtestResult.aggregate.in_sample],
+              ["Validation", backtestResult.aggregate.validation],
+              ["Out of Sample", backtestResult.aggregate.out_of_sample],
+            ] as const).map(([label, metrics]) => (
+              <div key={label} className={`rounded p-2 ${label === "Out of Sample" ? "border border-blue-500 bg-blue-500/10" : "bg-[var(--background)]"}`}>
+                <div className="text-[var(--muted-foreground)]">{label}</div>
+                <div className={`font-semibold ${metrics.after_cost_return_pct >= 0 ? "text-green-400" : "text-red-400"}`}>
+                  {metrics.after_cost_return_pct >= 0 ? "+" : ""}{metrics.after_cost_return_pct}%
+                </div>
+                <div className="text-[10px] text-[var(--muted-foreground)]">after costs · {metrics.total_trades} trades</div>
+              </div>
+            ))}
           </div>
+
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 text-center text-[10px] mb-3">
+            {[
+              ["Sharpe", backtestResult.aggregate.out_of_sample.sharpe],
+              ["Sortino", backtestResult.aggregate.out_of_sample.sortino],
+              ["Profit Factor", backtestResult.aggregate.out_of_sample.profit_factor],
+              ["Max DD", `${backtestResult.aggregate.out_of_sample.max_drawdown_pct}%`],
+              ["Exposure", `${backtestResult.aggregate.out_of_sample.exposure_pct}%`],
+              ["Expectancy", `${backtestResult.aggregate.out_of_sample.expectancy_pct}%`],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded bg-[var(--background)] p-1.5">
+                <div className="text-[var(--muted-foreground)]">{label}</div>
+                <div className="font-medium">{value}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="rounded bg-[var(--background)] p-2 text-[10px] mb-2">
+            <div className="font-medium mb-1">Execution realism</div>
+            <div className="text-[var(--muted-foreground)]">
+              Gross {backtestResult.aggregate.out_of_sample.gross_return_pct}% → after costs {backtestResult.aggregate.out_of_sample.after_cost_return_pct}% · cost drag {backtestResult.aggregate.out_of_sample.total_cost_pct}% · fill delay {backtestResult.configuration.costs.fill_delay_bars} bar(s)
+            </div>
+          </div>
+
+          {Object.values(backtestResult.benchmarks).length > 0 && (
+            <div className="rounded bg-[var(--background)] p-2 text-[10px] mb-2">
+              <div className="font-medium mb-1">Out-of-sample benchmarks</div>
+              {Object.values(backtestResult.benchmarks).map((benchmark) => (
+                <div key={benchmark.symbol} className="flex justify-between text-[var(--muted-foreground)]">
+                  <span>{benchmark.symbol} buy-and-hold</span>
+                  <span>{benchmark.after_cost_return_pct >= 0 ? "+" : ""}{benchmark.after_cost_return_pct}% after costs</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!backtestResult.alert_eligibility.eligible && (
+            <div className="rounded border border-red-600/50 bg-red-600/10 p-2 text-[10px] text-red-300 mb-2">
+              {backtestResult.alert_eligibility.reasons.join("; ")}
+            </div>
+          )}
+          <div className="text-[10px] text-[var(--muted-foreground)] mb-2">
+            Alert eligibility uses out-of-sample results only. Run ID: {backtestResult.run_id.slice(0, 8)}
+          </div>
+
+          {backtestResult.parameter_sensitivity.length > 0 && (
+            <div className="mb-2">
+              <div className="text-[10px] font-medium mb-1">Parameter stability</div>
+              <div className="grid grid-cols-2 gap-1">
+                {backtestResult.parameter_sensitivity.map((item) => (
+                  <div key={item.parameter_index} className="rounded bg-[var(--background)] p-1.5 text-[10px] text-[var(--muted-foreground)]">
+                    RR {item.parameters.risk_reward_ratio} · ATR {item.parameters.atr_stop_multiplier} · mean {item.mean_validation_return_pct}% · selected {item.selected_windows}/{item.validation_windows}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {backtestResult.trades.length > 0 && (
-            <div className="mt-2 max-h-32 overflow-y-auto">
+            <div className="mt-2 max-h-32 overflow-y-auto border-t pt-1">
+              <div className="text-[10px] font-medium mb-1">Out-of-sample trades</div>
               {backtestResult.trades.map((t, i) => (
-                <div key={i} className="flex items-center justify-between py-0.5 text-[10px]">
+                <div key={i} className="flex items-center justify-between gap-2 py-0.5 text-[10px]">
                   <span className={t.direction === "BUY" ? "text-green-400" : "text-red-400"}>{t.direction}</span>
                   <span>${t.entry.toFixed(2)} -&gt; ${t.exit.toFixed(2)}</span>
-                  <span className={t.pnl_pct >= 0 ? "text-green-400" : "text-red-400"}>{t.pnl_pct >= 0 ? "+" : ""}{t.pnl_pct}%</span>
-                  <span className="text-[var(--muted-foreground)]">{t.outcome}</span>
+                  <span className={t.net_pnl_pct >= 0 ? "text-green-400" : "text-red-400"}>{t.net_pnl_pct >= 0 ? "+" : ""}{t.net_pnl_pct}% net</span>
+                  <span className="text-[var(--muted-foreground)]">{t.market_regime}/{t.volatility_regime}</span>
                 </div>
               ))}
             </div>

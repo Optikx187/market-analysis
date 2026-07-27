@@ -411,33 +411,99 @@ export const deletePriceAlert = (id: number) =>
 export const checkPriceAlerts = () =>
   api.get<{ checked: number; triggered: Array<{ id: number; ticker: string; condition: string; threshold: number; current_price: number }> }>("/price-alerts/check").then((r) => r.data);
 
-// Phase 5: Backtesting
-export interface BacktestResult {
-  ticker: string;
-  period: string;
-  total_signals: number;
+// Phase 5: Walk-forward backtesting
+export interface BacktestMetrics {
+  total_trades: number;
   wins: number;
   losses: number;
-  win_rate: number;
-  avg_pnl_pct: number;
+  win_rate_pct: number;
+  expectancy_pct: number;
+  sharpe: number;
+  sortino: number;
+  profit_factor: number;
   max_drawdown_pct: number;
+  recovery_bars: number;
+  turnover_pct: number;
+  exposure_pct: number;
+  gross_return_pct: number;
+  after_cost_return_pct: number;
+  total_cost_pct: number;
   final_equity: number;
-  total_return_pct: number;
+}
+
+export interface BacktestResult {
+  run_id: string;
+  created_at: string;
+  ticker: string;
+  window_count: number;
+  strategy: {
+    version: string;
+    parameter_grid: Array<Record<string, number>>;
+  };
+  configuration: {
+    initial_capital: number;
+    costs: Record<string, number>;
+    windows: Record<string, number>;
+    thresholds: Record<string, number>;
+    candles: number;
+  };
+  aggregate: {
+    in_sample: BacktestMetrics;
+    validation: BacktestMetrics;
+    out_of_sample: BacktestMetrics;
+  };
+  benchmarks: Record<string, {
+    symbol: string;
+    windows: number;
+    gross_return_pct: number;
+    after_cost_return_pct: number;
+    max_drawdown_pct: number;
+    final_equity: number;
+  }>;
+  regimes: Record<string, {
+    trades: number;
+    win_rate_pct: number;
+    expectancy_pct: number;
+    after_cost_return_pct: number;
+  }>;
+  parameter_sensitivity: Array<{
+    parameter_index: number;
+    parameters: Record<string, number>;
+    validation_windows: number;
+    mean_validation_return_pct: number;
+    return_std_dev_pct: number;
+    positive_window_pct: number;
+    selected_windows: number;
+  }>;
+  alert_eligibility: {
+    eligible: boolean;
+    reasons: string[];
+    evaluated_on: "out_of_sample";
+  };
   trades: Array<{
     direction: string;
     entry: number;
     exit: number;
     entry_date: string;
     exit_date: string;
-    pnl_pct: number;
+    gross_pnl_pct: number;
+    net_pnl_pct: number;
+    cost_pct: number;
     outcome: string;
     reason: string;
+    market_regime: string;
+    volatility_regime: string;
   }>;
   equity_curve: Array<{ date: string; equity: number }>;
 }
 
-export const runBacktest = (ticker: string, period: string = "6mo", capital: number = 10000) =>
-  api.post<BacktestResult>("/backtest", { ticker, period, available_capital: capital }).then((r) => r.data);
+export const runBacktest = (ticker: string, period: string = "max", capital: number = 10000) =>
+  api.post<BacktestResult>("/backtest", {
+    ticker,
+    period,
+    available_capital: capital,
+    benchmark_tickers: ["SPY"],
+  }).then((r) => r.data);
 
 // Phase 6: Earnings
 export interface EarningsData {
