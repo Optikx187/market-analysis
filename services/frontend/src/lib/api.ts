@@ -92,6 +92,8 @@ export interface Trade {
   stop_loss: number;
   target_price: number;
   trailing_stop: number | null;
+  asset_type: string;
+  sector: string;
   status: string;
   pnl: number | null;
   pnl_pct: number | null;
@@ -113,6 +115,95 @@ export interface Portfolio {
   equity_curve: Array<{ timestamp: string; equity: number }>;
 }
 
+export interface RiskReason {
+  code: string;
+  message: string;
+  actual?: number;
+  limit?: number;
+  requested?: number;
+}
+
+export interface RiskHeat {
+  raw_risk_usd: number;
+  correlation_penalty_usd: number;
+  effective_risk_usd: number;
+  raw_pct: number;
+  effective_pct: number;
+  limit_pct: number;
+  utilization_pct: number;
+}
+
+export interface RiskExposure {
+  ticker: Record<string, number>;
+  sector: Record<string, number>;
+  asset_class: Record<string, number>;
+  direction: Record<string, number>;
+  limits: {
+    ticker_pct: number;
+    sector_pct: number;
+    asset_class_pct: number;
+    direction_pct: number;
+  };
+  largest_concentration: { category: string; name: string; pct: number };
+}
+
+export interface RiskBreaker {
+  active: boolean;
+  daily_loss_active: boolean;
+  weekly_loss_active: boolean;
+  drawdown_active: boolean;
+  daily_pnl: number;
+  weekly_pnl: number;
+  daily_loss_pct: number;
+  weekly_loss_pct: number;
+  current_drawdown_pct: number;
+  daily_limit_pct: number;
+  weekly_limit_pct: number;
+  drawdown_limit_pct: number;
+  allows_position_reduction: boolean;
+  reasons: string[];
+}
+
+export interface PortfolioRiskSnapshot {
+  positions: Array<{
+    ticker: string;
+    direction: string;
+    asset_type: string;
+    sector: string;
+    notional_usd: number;
+    risk_to_stop_usd: number;
+    risk_to_stop_pct: number;
+  }>;
+  heat: RiskHeat;
+  exposure: RiskExposure;
+  correlation: {
+    threshold: number;
+    matrix: Record<string, Record<string, number | null>>;
+    data_available: boolean;
+    largest_cluster: string[];
+    largest_cluster_pct: number;
+    limit_pct: number;
+    utilization_pct: number;
+  };
+  stress_tests: Array<{ name: string; description: string; estimated_pnl: number }>;
+}
+
+export interface PortfolioRisk extends PortfolioRiskSnapshot {
+  breaker: RiskBreaker;
+  equity: number;
+}
+
+export interface RiskDecision {
+  approved: boolean;
+  action: "approved" | "reduced" | "rejected" | "approve_reduction";
+  requested_size_usd: number;
+  recommended_size_usd: number;
+  reasons: RiskReason[];
+  breaker: RiskBreaker;
+  before: PortfolioRiskSnapshot;
+  after: PortfolioRiskSnapshot;
+}
+
 export interface AlertLog {
   id: number;
   ticker: string;
@@ -124,7 +215,9 @@ export interface AlertLog {
   optimal_size_usd: number | null;
   kelly_pct: number | null;
   capital_overspend: boolean;
+  approved: boolean;
   message: string | null;
+  risk_decision_json: string | null;
   created_at: string | null;
 }
 
@@ -141,6 +234,7 @@ export interface SignalDecision {
   capital_overspend: boolean;
   reason: string;
   paper_trade_executed: boolean;
+  risk_decision: RiskDecision;
 }
 
 // Service A — Data Ingestion
@@ -178,6 +272,7 @@ export const fetchRiskProfile = (ticker: string, capital: number = 10000) =>
 
 // Service C — Portfolio Engine
 export const fetchPortfolio = () => api.get<Portfolio>("/portfolio").then((r) => r.data);
+export const fetchPortfolioRisk = () => api.get<PortfolioRisk>("/portfolio/risk").then((r) => r.data);
 export const fetchTrades = () => api.get<Trade[]>("/trades").then((r) => r.data);
 export const fetchAlerts = () => api.get<AlertLog[]>("/alerts").then((r) => r.data);
 export const processSignal = (signal: Signal) =>
@@ -243,10 +338,19 @@ export interface TradeRecommendation {
   suggested_position_usd: number;
   position_pct_of_balance: number;
   risk_reward_ratio: number;
+  risk_decision: RiskDecision;
 }
 
-export const fetchTradeRecommendation = (ticker: string, currentPrice: number) =>
-  api.get<TradeRecommendation>("/portfolio/recommendation", { params: { ticker, current_price: currentPrice } }).then((r) => r.data);
+export const fetchTradeRecommendation = (
+  ticker: string,
+  currentPrice: number,
+  direction: string = "BUY",
+  assetType: string = "stock",
+  sector: string = "Unclassified",
+) =>
+  api.get<TradeRecommendation>("/portfolio/recommendation", {
+    params: { ticker, current_price: currentPrice, direction, asset_type: assetType, sector },
+  }).then((r) => r.data);
 
 // Notification testing
 export interface TestNotificationResult {
@@ -269,6 +373,8 @@ export interface ManualTradeInput {
   quantity: number;
   stop_loss?: number;
   target_price?: number;
+  asset_type?: string;
+  sector?: string;
 }
 
 export const logManualTrade = (trade: ManualTradeInput) =>
@@ -348,7 +454,16 @@ export interface ScanResult {
   signals_found: number;
   notifications_sent: number;
   errors: number;
-  signals: Array<{ ticker: string; direction: string; status: string; approved: boolean; suppressed: boolean }>;
+  signals: Array<{
+    ticker: string;
+    direction: string;
+    status: string;
+    approved: boolean;
+    suppressed: boolean;
+    action: string;
+    reason: string;
+    recommended_size_usd: number;
+  }>;
   timestamp: string;
 }
 
@@ -383,6 +498,7 @@ export interface DashboardSummary {
   todays_approved: number;
   win_rate: number;
   total_trades: number;
+  risk: PortfolioRisk;
 }
 
 export const fetchDashboardSummary = () =>

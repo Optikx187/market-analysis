@@ -1,7 +1,9 @@
 """Service C — Portfolio & Integration Engine."""
 
-import datetime
+import asyncio
 import base64
+import datetime
+import json
 import logging
 import os
 import stat
@@ -22,6 +24,17 @@ from app.models import (
     Trade, TradeStatus, SignalDirection, Portfolio, EquitySnapshot, AlertLog, CredentialSecret, User,
 )
 from app.auth import create_token, hash_password, verify_password, get_current_user
+from app.risk_engine import (
+    ClosedTradeResult,
+    PositionInput,
+    RiskLimits,
+    annualized_volatility,
+    calculate_portfolio_risk,
+    calculate_return_series,
+    calculate_trade_pnl,
+    evaluate_breakers,
+    evaluate_proposed_position,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,6 +50,8 @@ class TradeResponse(BaseModel):
     stop_loss: float
     target_price: float
     trailing_stop: Optional[float]
+    asset_type: str
+    sector: str
     status: str
     pnl: Optional[float]
     pnl_pct: Optional[float]
@@ -75,6 +90,7 @@ class SignalInput(BaseModel):
     optimal_size_usd: float
     volatility_scalar: float
     asset_type: str = "stock"
+    sector: str = "Unclassified"
 
 
 class SignalDecision(BaseModel):
@@ -90,6 +106,7 @@ class SignalDecision(BaseModel):
     capital_overspend: bool
     reason: str
     paper_trade_executed: bool
+    risk_decision: dict[str, object]
 
 
 class AlertLogResponse(BaseModel):
@@ -103,7 +120,9 @@ class AlertLogResponse(BaseModel):
     optimal_size_usd: Optional[float]
     kelly_pct: Optional[float]
     capital_overspend: bool
+    approved: bool
     message: Optional[str]
+    risk_decision_json: Optional[str]
     created_at: Optional[datetime.datetime]
     model_config = {"from_attributes": True}
 
@@ -192,6 +211,113 @@ async def get_or_create_portfolio(db: AsyncSession) -> Portfolio:
     return portfolio
 
 
+def _risk_limits() -> RiskLimits:
+    env = _read_env(_find_env_path())
+
+    def percentage_value(key: str, default: float) -> float:
+        try:
+            candidate = float(env.get(key, default))
+        except (TypeError, ValueError):
+            return default
+        return candidate if 0 < candidate <= 1 else default
+
+    return RiskLimits(
+        max_portfolio_heat_pct=percentage_value("MAX_PORTFOLIO_HEAT_PCT", settings.MAX_PORTFOLIO_HEAT_PCT),
+        max_ticker_exposure_pct=percentage_value("MAX_TICKER_EXPOSURE_PCT", settings.MAX_TICKER_EXPOSURE_PCT),
+        max_sector_exposure_pct=percentage_value("MAX_SECTOR_EXPOSURE_PCT", settings.MAX_SECTOR_EXPOSURE_PCT),
+        max_asset_class_exposure_pct=percentage_value("MAX_ASSET_CLASS_EXPOSURE_PCT", settings.MAX_ASSET_CLASS_EXPOSURE_PCT),
+        max_directional_exposure_pct=percentage_value("MAX_DIRECTIONAL_EXPOSURE_PCT", settings.MAX_DIRECTIONAL_EXPOSURE_PCT),
+        max_correlated_exposure_pct=percentage_value("MAX_CORRELATED_EXPOSURE_PCT", settings.MAX_CORRELATED_EXPOSURE_PCT),
+        correlation_threshold=percentage_value("CORRELATION_THRESHOLD", settings.CORRELATION_THRESHOLD),
+        daily_loss_limit_pct=percentage_value("DAILY_LOSS_LIMIT_PCT", settings.DAILY_LOSS_LIMIT_PCT),
+        weekly_loss_limit_pct=percentage_value("WEEKLY_LOSS_LIMIT_PCT", settings.WEEKLY_LOSS_LIMIT_PCT),
+        max_drawdown_pct=percentage_value("MAX_DRAWDOWN_PCT", settings.MAX_DRAWDOWN_PCT),
+        volatility_target_pct=percentage_value("VOLATILITY_TARGET_PCT", settings.VOLATILITY_TARGET_PCT),
+        fractional_kelly_cap=percentage_value("FRACTIONAL_KELLY_CAP", settings.FRACTIONAL_KELLY_CAP),
+        equity_shock_pct=percentage_value("EQUITY_SHOCK_PCT", settings.EQUITY_SHOCK_PCT),
+        crypto_shock_pct=percentage_value("CRYPTO_SHOCK_PCT", settings.CRYPTO_SHOCK_PCT),
+    )
+
+
+async def _fetch_return_series(tickers: set[str]) -> dict[str, dict[str, float]]:
+    if not tickers:
+        return {}
+
+    async def fetch_one(client: httpx.AsyncClient, ticker: str) -> tuple[str, dict[str, float]]:
+        try:
+            response = await client.get(
+                f"{settings.DATA_INGESTION_URL}/api/candles/{ticker}",
+                params={"interval": "1d"},
+                timeout=8,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                return ticker, {}
+            candles = [row for row in payload if isinstance(row, dict)]
+            return ticker, calculate_return_series(candles[-91:])
+        except Exception as exc:
+            logger.warning("Correlation data unavailable for %s: %s", ticker, exc)
+            return ticker, {}
+
+    async with httpx.AsyncClient() as client:
+        results = await asyncio.gather(*(fetch_one(client, ticker) for ticker in sorted(tickers)))
+    return dict(results)
+
+
+def _position_from_trade(trade: Trade, returns: dict[str, float]) -> PositionInput:
+    direction = trade.direction.value if isinstance(trade.direction, SignalDirection) else str(trade.direction)
+    return PositionInput(
+        ticker=trade.ticker,
+        direction=direction,
+        entry_price=trade.entry_price,
+        quantity=trade.quantity,
+        stop_loss=trade.stop_loss,
+        asset_type=trade.asset_type or "stock",
+        sector=trade.sector or "Unclassified",
+        returns=returns,
+    )
+
+
+async def _risk_context(
+    db: AsyncSession,
+    additional_tickers: set[str] | None = None,
+) -> tuple[Portfolio, list[PositionInput], list[ClosedTradeResult], dict[str, dict[str, float]]]:
+    portfolio = await get_or_create_portfolio(db)
+    open_result = await db.execute(select(Trade).where(Trade.status == TradeStatus.OPEN))
+    open_trades = list(open_result.scalars().all())
+    tickers = {trade.ticker for trade in open_trades}
+    tickers.update(additional_tickers or set())
+    returns_by_ticker = await _fetch_return_series(tickers)
+    positions = [
+        _position_from_trade(trade, returns_by_ticker.get(trade.ticker, {}))
+        for trade in open_trades
+    ]
+    closed_result = await db.execute(
+        select(Trade).where(Trade.status == TradeStatus.CLOSED, Trade.closed_at.is_not(None))
+    )
+    closed_trades = [
+        ClosedTradeResult(pnl=trade.pnl or 0.0, closed_at=trade.closed_at)
+        for trade in closed_result.scalars().all()
+        if trade.closed_at is not None
+    ]
+    return portfolio, positions, closed_trades, returns_by_ticker
+
+
+async def _portfolio_risk_status(db: AsyncSession) -> dict[str, object]:
+    portfolio, positions, closed_trades, _ = await _risk_context(db)
+    limits = _risk_limits()
+    snapshot = calculate_portfolio_risk(positions, portfolio.equity, limits)
+    snapshot["breaker"] = evaluate_breakers(
+        closed_trades,
+        portfolio.equity,
+        portfolio.peak_equity,
+        limits,
+    ).as_dict(limits)
+    snapshot["equity"] = round(portfolio.equity, 2)
+    return snapshot
+
+
 async def execute_paper_trade(
     db: AsyncSession, ticker: str, direction: SignalDirection,
     entry_price: float, stop_loss: float, target_price: float,
@@ -242,54 +368,102 @@ async def health():
 
 @app.post("/api/process-signal", response_model=SignalDecision)
 async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)):
-    """Receive a signal from quant-engine, validate against guardrails, and log alert.
-
-    Trades are NOT auto-executed. The user reports actual trades via the UI or
-    Telegram bot commands (/bought, /sold).
-    """
-    portfolio = await db.execute(select(Portfolio).limit(1))
-    portfolio_row = portfolio.scalar_one_or_none()
-    portfolio_value = portfolio_row.equity if portfolio_row else settings.INITIAL_BALANCE
-
-    position_limit = portfolio_value * 0.05
-    overspend = signal.optimal_size_usd and signal.optimal_size_usd > position_limit
-
-    approved = not signal.suppressed and not overspend
-
-    reason_parts = [signal.reason]
+    """Validate a signal against portfolio-wide risk controls and log the decision."""
+    ticker = signal.ticker.strip().upper()
+    portfolio, positions, closed_trades, returns_by_ticker = await _risk_context(db, {ticker})
+    direction = signal.direction.upper() if signal.direction.upper() in ("BUY", "SELL") else "BUY"
+    quantity = (
+        signal.optimal_size_usd / signal.trigger_price
+        if signal.trigger_price > 0 and signal.optimal_size_usd > 0
+        else 0.0
+    )
+    proposal = PositionInput(
+        ticker=ticker,
+        direction=direction,
+        entry_price=signal.trigger_price,
+        quantity=quantity,
+        stop_loss=signal.stop_loss,
+        asset_type=signal.asset_type,
+        sector=signal.sector,
+        returns=returns_by_ticker.get(ticker, {}),
+    )
+    limits = _risk_limits()
+    risk_decision = evaluate_proposed_position(
+        positions,
+        proposal,
+        closed_trades,
+        portfolio.equity,
+        portfolio.peak_equity,
+        limits,
+        kelly_fraction=max(0.0, signal.kelly_pct / 100),
+        annual_volatility=annualized_volatility(proposal.returns, proposal.asset_type),
+    )
+    risk_reasons = risk_decision.get("reasons")
+    if not isinstance(risk_reasons, list):
+        risk_reasons = []
+        risk_decision["reasons"] = risk_reasons
     if signal.suppressed:
-        reason_parts.append(f"Signal suppressed ({signal.status})")
-    if overspend:
-        reason_parts.append(f"Position size ${signal.optimal_size_usd:.2f} exceeds 5% portfolio limit (${position_limit:.2f})")
+        risk_reasons.insert(0, {
+            "code": "SIGNAL_SUPPRESSED",
+            "message": f"Signal suppressed ({signal.status})",
+        })
+        risk_decision["approved"] = False
+        risk_decision["action"] = "rejected"
+        risk_decision["recommended_size_usd"] = 0.0
+
+    approved = bool(risk_decision["approved"])
+    recommended_size = float(risk_decision["recommended_size_usd"])
+    hard_limit_codes = {
+        "MAX_PORTFOLIO_HEAT",
+        "MAX_TICKER_EXPOSURE",
+        "MAX_SECTOR_EXPOSURE",
+        "MAX_ASSET_CLASS_EXPOSURE",
+        "MAX_DIRECTIONAL_EXPOSURE",
+        "MAX_CORRELATED_EXPOSURE",
+    }
+    overspend = any(
+        isinstance(reason, dict) and reason.get("code") in hard_limit_codes
+        for reason in risk_reasons
+    )
+    reason_parts = [signal.reason]
+    reason_parts.extend(
+        str(reason.get("message"))
+        for reason in risk_reasons
+        if isinstance(reason, dict) and reason.get("message")
+    )
+    message = " | ".join(reason_parts)
 
     alert = AlertLog(
-        ticker=signal.ticker,
+        ticker=ticker,
         direction=signal.direction or "NONE",
         status=signal.status,
         trigger_price=signal.trigger_price,
         stop_loss=signal.stop_loss,
         target_price=signal.target_price,
-        optimal_size_usd=signal.optimal_size_usd,
+        optimal_size_usd=recommended_size,
         kelly_pct=signal.kelly_pct,
         capital_overspend=overspend,
-        message=" | ".join(reason_parts),
+        approved=approved,
+        message=message,
+        risk_decision_json=json.dumps(risk_decision),
     )
     db.add(alert)
     await db.commit()
 
     return SignalDecision(
-        ticker=signal.ticker,
+        ticker=ticker,
         direction=signal.direction or "NONE",
         status=signal.status,
         approved=approved,
         trigger_price=signal.trigger_price,
         stop_loss=signal.stop_loss,
         target_price=signal.target_price,
-        optimal_size_usd=signal.optimal_size_usd,
+        optimal_size_usd=recommended_size,
         kelly_pct=signal.kelly_pct,
         capital_overspend=overspend,
-        reason=" | ".join(reason_parts),
+        reason=message,
         paper_trade_executed=False,
+        risk_decision=risk_decision,
     )
 
 
@@ -332,6 +506,59 @@ async def get_portfolio(db: AsyncSession = Depends(get_db)):
     )
 
 
+class RiskEvaluationInput(BaseModel):
+    ticker: str
+    direction: str
+    entry_price: float
+    quantity: float
+    stop_loss: float
+    asset_type: str = "stock"
+    sector: str = "Unclassified"
+    kelly_pct: float = 0.0
+    intent: str = "increase"
+
+
+@app.get("/api/portfolio/risk")
+async def portfolio_risk(db: AsyncSession = Depends(get_db)):
+    return await _portfolio_risk_status(db)
+
+
+@app.post("/api/portfolio/risk/evaluate")
+async def evaluate_portfolio_risk(
+    payload: RiskEvaluationInput,
+    db: AsyncSession = Depends(get_db),
+):
+    if payload.entry_price <= 0 or payload.quantity < 0 or payload.stop_loss <= 0:
+        raise HTTPException(400, "Entry price and stop must be positive; quantity cannot be negative")
+    direction = payload.direction.upper()
+    if direction not in ("BUY", "SELL"):
+        raise HTTPException(400, "Direction must be BUY or SELL")
+    ticker = payload.ticker.strip().upper()
+    portfolio, positions, closed_trades, returns_by_ticker = await _risk_context(db, {ticker})
+    proposal = PositionInput(
+        ticker=ticker,
+        direction=direction,
+        entry_price=payload.entry_price,
+        quantity=payload.quantity,
+        stop_loss=payload.stop_loss,
+        asset_type=payload.asset_type,
+        sector=payload.sector,
+        returns=returns_by_ticker.get(ticker, {}),
+    )
+    limits = _risk_limits()
+    return evaluate_proposed_position(
+        positions,
+        proposal,
+        closed_trades,
+        portfolio.equity,
+        portfolio.peak_equity,
+        limits,
+        kelly_fraction=max(0.0, payload.kelly_pct / 100),
+        annual_volatility=annualized_volatility(proposal.returns, proposal.asset_type),
+        intent=payload.intent,
+    )
+
+
 @app.get("/api/dashboard-summary")
 async def dashboard_summary(db: AsyncSession = Depends(get_db)):
     """Return at-a-glance portfolio metrics for the dashboard widget."""
@@ -349,13 +576,14 @@ async def dashboard_summary(db: AsyncSession = Depends(get_db)):
     today_approved = await db.execute(
         select(func.count(AlertLog.id)).where(
             AlertLog.created_at >= today_start,
-            AlertLog.capital_overspend == False,
+            AlertLog.approved == True,
         )
     )
     todays_approved = today_approved.scalar() or 0
 
     total_trades = portfolio.win_count + portfolio.loss_count
     win_rate = (portfolio.win_count / total_trades * 100) if total_trades > 0 else 0
+    risk = await _portfolio_risk_status(db)
 
     return {
         "balance": round(portfolio.balance, 2),
@@ -367,6 +595,7 @@ async def dashboard_summary(db: AsyncSession = Depends(get_db)):
         "todays_approved": todays_approved,
         "win_rate": round(win_rate, 2),
         "total_trades": total_trades,
+        "risk": risk,
     }
 
 
@@ -389,6 +618,8 @@ class ManualTradeInput(BaseModel):
     quantity: float
     stop_loss: Optional[float] = None
     target_price: Optional[float] = None
+    asset_type: str = "stock"
+    sector: str = "Unclassified"
 
 
 @app.post("/api/trades/manual", response_model=TradeResponse)
@@ -407,13 +638,19 @@ async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends
     else:
         stop = payload.stop_loss if payload.stop_loss is not None else payload.entry_price * 0.95
         target = payload.target_price if payload.target_price is not None else payload.entry_price * 1.15
+    if direction == SignalDirection.BUY and stop >= payload.entry_price:
+        raise HTTPException(400, "A long-position stop must be below the entry price")
+    if direction == SignalDirection.SELL and stop <= payload.entry_price:
+        raise HTTPException(400, "A short-position stop must be above the entry price")
     trade = Trade(
-        ticker=payload.ticker.upper(),
+        ticker=payload.ticker.strip().upper(),
         direction=direction,
         entry_price=payload.entry_price,
         quantity=payload.quantity,
         stop_loss=stop,
         target_price=target,
+        asset_type="crypto" if payload.asset_type.lower() == "crypto" else "stock",
+        sector=payload.sector.strip() or "Unclassified",
         status=TradeStatus.OPEN,
     )
     db.add(trade)
@@ -446,17 +683,26 @@ async def close_trade(trade_id: int, payload: CloseTradeInput, db: AsyncSession 
     trade.status = TradeStatus.CLOSED
     trade.closed_at = datetime.datetime.now(datetime.timezone.utc)
 
-    if trade.direction == SignalDirection.BUY:
-        trade.pnl = (payload.exit_price - trade.entry_price) * trade.quantity
-    else:
-        trade.pnl = (trade.entry_price - payload.exit_price) * trade.quantity
+    direction = trade.direction.value if isinstance(trade.direction, SignalDirection) else str(trade.direction)
+    trade.pnl = calculate_trade_pnl(
+        direction,
+        trade.entry_price,
+        payload.exit_price,
+        trade.quantity,
+    )
     trade.pnl_pct = round((trade.pnl / (trade.entry_price * trade.quantity)) * 100, 2)
 
     portfolio = await get_or_create_portfolio(db)
-    proceeds = payload.exit_price * trade.quantity
-    portfolio.balance += proceeds
+    reserved_capital = trade.entry_price * trade.quantity
+    portfolio.balance += reserved_capital + trade.pnl
     portfolio.total_pnl += trade.pnl
-    portfolio.equity = portfolio.balance
+    remaining_result = await db.execute(select(Trade).where(Trade.status == TradeStatus.OPEN))
+    remaining_locked = sum(
+        position.entry_price * position.quantity
+        for position in remaining_result.scalars().all()
+        if position.id != trade.id
+    )
+    portfolio.equity = portfolio.balance + remaining_locked
     if trade.pnl >= 0:
         portfolio.win_count += 1
     else:
@@ -466,6 +712,7 @@ async def close_trade(trade_id: int, payload: CloseTradeInput, db: AsyncSession 
     drawdown = ((portfolio.peak_equity - portfolio.equity) / portfolio.peak_equity * 100) if portfolio.peak_equity > 0 else 0
     if drawdown > portfolio.max_drawdown:
         portfolio.max_drawdown = round(drawdown, 2)
+    db.add(EquitySnapshot(equity=portfolio.equity, balance=portfolio.balance))
 
     await db.commit()
     await db.refresh(trade)
@@ -666,6 +913,36 @@ ADJUSTABLE_SETTINGS = {
     "TRAILING_STOP_PCT": {"type": "float", "default": 0.02, "description": "Trailing stop percentage (as decimal)"},
     "INITIAL_BALANCE": {"type": "float", "default": 10000.0, "description": "Initial paper trading balance"},
     "LOSS_TOLERANCE_PCT": {"type": "float", "default": 0.02, "description": "Max loss tolerance per trade as % of balance (e.g. 0.02 = 2%)"},
+    "MAX_PORTFOLIO_HEAT_PCT": {"type": "float", "default": 0.08, "description": "Maximum correlation-adjusted risk-to-stop across open positions"},
+    "MAX_TICKER_EXPOSURE_PCT": {"type": "float", "default": 0.20, "description": "Maximum notional exposure to one ticker"},
+    "MAX_SECTOR_EXPOSURE_PCT": {"type": "float", "default": 0.35, "description": "Maximum notional exposure to one classified sector"},
+    "MAX_ASSET_CLASS_EXPOSURE_PCT": {"type": "float", "default": 0.70, "description": "Maximum stock or crypto notional exposure"},
+    "MAX_DIRECTIONAL_EXPOSURE_PCT": {"type": "float", "default": 0.80, "description": "Maximum long or short notional exposure"},
+    "MAX_CORRELATED_EXPOSURE_PCT": {"type": "float", "default": 0.40, "description": "Maximum exposure in a highly correlated position cluster"},
+    "CORRELATION_THRESHOLD": {"type": "float", "default": 0.75, "description": "Rolling return correlation treated as highly correlated"},
+    "DAILY_LOSS_LIMIT_PCT": {"type": "float", "default": 0.03, "description": "Daily realized-loss circuit breaker"},
+    "WEEKLY_LOSS_LIMIT_PCT": {"type": "float", "default": 0.06, "description": "Weekly realized-loss circuit breaker"},
+    "MAX_DRAWDOWN_PCT": {"type": "float", "default": 0.12, "description": "Peak-to-current equity drawdown circuit breaker"},
+    "VOLATILITY_TARGET_PCT": {"type": "float", "default": 0.15, "description": "Annualized volatility target used to reduce proposed size"},
+    "FRACTIONAL_KELLY_CAP": {"type": "float", "default": 0.10, "description": "Maximum fraction of equity allocated by Kelly sizing"},
+    "EQUITY_SHOCK_PCT": {"type": "float", "default": 0.05, "description": "Broad-equity stress scenario decline"},
+    "CRYPTO_SHOCK_PCT": {"type": "float", "default": 0.20, "description": "Crypto stress scenario decline"},
+}
+RISK_PERCENTAGE_SETTINGS = {
+    "MAX_PORTFOLIO_HEAT_PCT",
+    "MAX_TICKER_EXPOSURE_PCT",
+    "MAX_SECTOR_EXPOSURE_PCT",
+    "MAX_ASSET_CLASS_EXPOSURE_PCT",
+    "MAX_DIRECTIONAL_EXPOSURE_PCT",
+    "MAX_CORRELATED_EXPOSURE_PCT",
+    "CORRELATION_THRESHOLD",
+    "DAILY_LOSS_LIMIT_PCT",
+    "WEEKLY_LOSS_LIMIT_PCT",
+    "MAX_DRAWDOWN_PCT",
+    "VOLATILITY_TARGET_PCT",
+    "FRACTIONAL_KELLY_CAP",
+    "EQUITY_SHOCK_PCT",
+    "CRYPTO_SHOCK_PCT",
 }
 
 @app.get("/api/settings/env")
@@ -741,8 +1018,10 @@ async def update_env_setting(payload: dict):
             value = float(value)
         elif meta["type"] == "int":
             value = int(value)
-    except ValueError:
+    except (TypeError, ValueError):
         raise HTTPException(400, f"Invalid value type for {key}, expected {meta['type']}")
+    if key in RISK_PERCENTAGE_SETTINGS and not 0 < value <= 1:
+        raise HTTPException(400, f"{key} must be greater than 0 and no more than 1")
     
     env_path = _find_env_path()
     env = _read_env(env_path)
@@ -774,6 +1053,7 @@ async def update_portfolio_balance(req: BalanceUpdateRequest, db: AsyncSession =
     portfolio.equity = req.balance + locked_capital
     if portfolio.equity > portfolio.peak_equity:
         portfolio.peak_equity = portfolio.equity
+    db.add(EquitySnapshot(equity=portfolio.equity, balance=portfolio.balance))
     await db.commit()
     return {
         "previous_balance": round(old_balance, 2),
@@ -788,32 +1068,70 @@ async def update_portfolio_balance(req: BalanceUpdateRequest, db: AsyncSession =
 async def trade_recommendation(
     ticker: str,
     current_price: float,
+    direction: str = "BUY",
+    asset_type: str = "stock",
+    sector: str = "Unclassified",
     db: AsyncSession = Depends(get_db),
 ):
-    """Get a balance-aware trade recommendation with suggested $ amounts."""
-    portfolio = await get_or_create_portfolio(db)
-    env_path = _find_env_path()
-    env = _read_env(env_path)
+    """Get a balance-aware trade recommendation with portfolio risk approval."""
+    if current_price <= 0:
+        raise HTTPException(400, "Current price must be positive")
+    direction = direction.upper()
+    if direction not in ("BUY", "SELL"):
+        raise HTTPException(400, "Direction must be BUY or SELL")
+    ticker = ticker.strip().upper()
+    portfolio, positions, closed_trades, returns_by_ticker = await _risk_context(db, {ticker})
+    env = _read_env(_find_env_path())
     loss_tolerance = float(env.get("LOSS_TOLERANCE_PCT", "0.02"))
     risk_reward = float(env.get("RISK_REWARD_RATIO", "3.0"))
     atr_multiplier = float(env.get("ATR_STOP_MULTIPLIER", "1.5"))
-
     trailing_stop_pct = float(env.get("TRAILING_STOP_PCT", "0.02"))
 
     max_loss_amount = portfolio.balance * loss_tolerance
     stop_distance_pct = trailing_stop_pct * atr_multiplier
-    suggested_stop = current_price * (1 - stop_distance_pct)
-    suggested_target = current_price * (1 + stop_distance_pct * risk_reward)
-    risk_per_unit = current_price - suggested_stop
+    if direction == "BUY":
+        suggested_stop = current_price * (1 - stop_distance_pct)
+        suggested_target = current_price * (1 + stop_distance_pct * risk_reward)
+    else:
+        suggested_stop = current_price * (1 + stop_distance_pct)
+        suggested_target = current_price * (1 - stop_distance_pct * risk_reward)
+    risk_per_unit = abs(current_price - suggested_stop)
     suggested_quantity = max_loss_amount / risk_per_unit if risk_per_unit > 0 else 0
     suggested_position_usd = suggested_quantity * current_price
     if portfolio.balance > 0 and suggested_position_usd > portfolio.balance:
         suggested_quantity = portfolio.balance / current_price
         suggested_position_usd = portfolio.balance
+
+    proposal = PositionInput(
+        ticker=ticker,
+        direction=direction,
+        entry_price=current_price,
+        quantity=suggested_quantity,
+        stop_loss=suggested_stop,
+        asset_type=asset_type,
+        sector=sector,
+        returns=returns_by_ticker.get(ticker, {}),
+    )
+    limits = _risk_limits()
+    risk_decision = evaluate_proposed_position(
+        positions,
+        proposal,
+        closed_trades,
+        portfolio.equity,
+        portfolio.peak_equity,
+        limits,
+        annual_volatility=annualized_volatility(proposal.returns, asset_type),
+    )
+    recommended_size = float(risk_decision["recommended_size_usd"])
+    suggested_position_usd = recommended_size
+    suggested_quantity = recommended_size / current_price if recommended_size > 0 else 0.0
     position_pct = (suggested_position_usd / portfolio.balance * 100) if portfolio.balance > 0 else 0
 
     return {
         "ticker": ticker,
+        "direction": direction,
+        "asset_type": asset_type,
+        "sector": sector,
         "account_balance": round(portfolio.balance, 2),
         "loss_tolerance_pct": loss_tolerance,
         "max_loss_amount": round(max_loss_amount, 2),
@@ -824,6 +1142,7 @@ async def trade_recommendation(
         "suggested_position_usd": round(suggested_position_usd, 2),
         "position_pct_of_balance": round(position_pct, 2),
         "risk_reward_ratio": risk_reward,
+        "risk_decision": risk_decision,
     }
 
 

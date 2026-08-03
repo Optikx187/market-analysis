@@ -28,6 +28,8 @@ class Trade(Base):
     stop_loss = Column(Float, nullable=False)
     target_price = Column(Float, nullable=False)
     trailing_stop = Column(Float, nullable=True)
+    asset_type = Column(String(20), nullable=False, default="stock")
+    sector = Column(String(100), nullable=False, default="Unclassified")
     status = Column(SAEnum(TradeStatus), default=TradeStatus.OPEN)
     pnl = Column(Float, nullable=True)
     pnl_pct = Column(Float, nullable=True)
@@ -71,7 +73,9 @@ class AlertLog(Base):
     optimal_size_usd = Column(Float, nullable=True)
     kelly_pct = Column(Float, nullable=True)
     capital_overspend = Column(Boolean, default=False)
+    approved = Column(Boolean, default=True)
     message = Column(Text, nullable=True)
+    risk_decision_json = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
 
