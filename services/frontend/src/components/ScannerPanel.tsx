@@ -164,12 +164,21 @@ export default function ScannerPanel() {
           <div className="text-xs font-medium text-[var(--muted-foreground)] mb-2">Latest Scan Signals</div>
           <div className="space-y-1">
             {scanResult.signals.map((s, i) => (
-              <div key={i} className="flex items-center justify-between py-1 px-2 rounded bg-[var(--background)] text-xs">
-                <span className="font-medium">{s.ticker}</span>
-                <span className={s.direction === "BUY" ? "text-green-400" : "text-red-400"}>{s.direction}</span>
-                <span className={s.approved ? "text-green-400" : "text-yellow-400"}>
-                  {s.approved ? "Approved" : s.suppressed ? "Suppressed" : "Rejected"}
-                </span>
+              <div key={`${s.ticker}-${i}`} className={`rounded border p-2 bg-[var(--background)] text-xs ${s.approved ? "border-green-600/30" : "border-red-600/50"}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{s.ticker}</span>
+                    <span className={s.direction === "BUY" ? "text-green-400" : "text-red-400"}>{s.direction}</span>
+                  </div>
+                  <span className={s.approved ? "text-green-400" : "text-red-400"}>
+                    {s.action.replace("_", " ").toUpperCase()}
+                  </span>
+                </div>
+                <div className="mt-1 text-[var(--muted-foreground)]">{s.reason}</div>
+                <div className="mt-1 flex items-center justify-between text-[10px] text-[var(--muted-foreground)]">
+                  <span>{s.suppressed ? "Data-quality suppressed" : "Portfolio risk evaluated"}</span>
+                  <span>Recommended size: ${s.recommended_size_usd.toLocaleString()}</span>
+                </div>
               </div>
             ))}
           </div>

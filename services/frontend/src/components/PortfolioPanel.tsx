@@ -1,18 +1,21 @@
 import { useEffect, useState } from "react";
 import {
   fetchPortfolio,
+  fetchPortfolioRisk,
   fetchTrades,
   updateBalance,
   logManualTrade,
   closeTrade,
   fetchReplyTrades,
   type Portfolio,
+  type PortfolioRisk,
   type Trade,
   type ReplyTradesResponse,
 } from "@/lib/api";
 
 export default function PortfolioPanel() {
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
+  const [risk, setRisk] = useState<PortfolioRisk | null>(null);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [replyTrades, setReplyTrades] = useState<ReplyTradesResponse | null>(null);
 
@@ -23,7 +26,16 @@ export default function PortfolioPanel() {
 
   // Manual trade form
   const [showTradeForm, setShowTradeForm] = useState(false);
-  const [tradeForm, setTradeForm] = useState({ ticker: "", direction: "BUY", entry_price: "", quantity: "" });
+  const [tradeForm, setTradeForm] = useState({
+    ticker: "",
+    direction: "BUY",
+    entry_price: "",
+    quantity: "",
+    stop_loss: "",
+    target_price: "",
+    asset_type: "stock",
+    sector: "Unclassified",
+  });
   const [tradeFormMsg, setTradeFormMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [tradeSubmitting, setTradeSubmitting] = useState(false);
 
@@ -36,6 +48,7 @@ export default function PortfolioPanel() {
 
   const loadAll = () => {
     fetchPortfolio().then(setPortfolio).catch(() => {});
+    fetchPortfolioRisk().then(setRisk).catch(() => {});
     fetchTrades().then(setTrades).catch(() => {});
     fetchReplyTrades().then(setReplyTrades).catch(() => {});
   };
@@ -71,9 +84,22 @@ export default function PortfolioPanel() {
         direction: tradeForm.direction,
         entry_price: parseFloat(tradeForm.entry_price),
         quantity: parseFloat(tradeForm.quantity),
+        stop_loss: tradeForm.stop_loss ? parseFloat(tradeForm.stop_loss) : undefined,
+        target_price: tradeForm.target_price ? parseFloat(tradeForm.target_price) : undefined,
+        asset_type: tradeForm.asset_type,
+        sector: tradeForm.sector.trim() || "Unclassified",
       });
       setTradeFormMsg({ type: "success", text: `${tradeForm.direction} logged for ${tradeForm.ticker.trim().toUpperCase()}` });
-      setTradeForm({ ticker: "", direction: "BUY", entry_price: "", quantity: "" });
+      setTradeForm({
+        ticker: "",
+        direction: "BUY",
+        entry_price: "",
+        quantity: "",
+        stop_loss: "",
+        target_price: "",
+        asset_type: "stock",
+        sector: "Unclassified",
+      });
       loadAll();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to log trade";
@@ -159,6 +185,66 @@ export default function PortfolioPanel() {
         <StatCard label="Open Positions" value={`${openTrades.length}`} />
       </div>
 
+      {risk && (
+        <div className={`p-3 rounded border space-y-3 ${risk.breaker.active ? "border-red-600/70 bg-red-600/5" : "border-[var(--border)] bg-[var(--background)]"}`}>
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-medium">Portfolio Risk Controls</h3>
+              <p className="text-xs text-[var(--muted-foreground)]">Risk-to-stop, concentration, correlation, and loss breakers.</p>
+            </div>
+            <span className={`rounded px-2 py-1 text-xs font-medium ${risk.breaker.active ? "bg-red-600/20 text-red-400" : "bg-green-600/20 text-green-400"}`}>
+              {risk.breaker.active ? "New Risk Blocked" : "Risk Available"}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            <RiskMetric
+              label="Effective Heat"
+              value={`${risk.heat.effective_pct}% / ${risk.heat.limit_pct}%`}
+              detail={`${risk.heat.utilization_pct}% utilized`}
+              warning={risk.heat.utilization_pct >= 80}
+            />
+            <RiskMetric
+              label="Correlation Penalty"
+              value={`$${risk.heat.correlation_penalty_usd.toLocaleString()}`}
+              detail={risk.correlation.data_available ? `${risk.correlation.largest_cluster_pct}% largest cluster` : "Awaiting aligned history"}
+            />
+            <RiskMetric
+              label="Largest Concentration"
+              value={`${risk.exposure.largest_concentration.name} ${risk.exposure.largest_concentration.pct}%`}
+              detail={risk.exposure.largest_concentration.category.replace("_", " ")}
+            />
+            <RiskMetric
+              label="Current Drawdown"
+              value={`${risk.breaker.current_drawdown_pct}% / ${risk.breaker.drawdown_limit_pct}%`}
+              detail={`Daily ${risk.breaker.daily_loss_pct}% · Weekly ${risk.breaker.weekly_loss_pct}%`}
+              warning={risk.breaker.active}
+            />
+          </div>
+          {risk.breaker.reasons.length > 0 && (
+            <div className="rounded border border-red-600/40 bg-red-600/10 p-2 text-xs text-red-300">
+              {risk.breaker.reasons.join(" · ")} Position reductions and closures remain allowed.
+            </div>
+          )}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+            <ExposureList title="Ticker Exposure" values={risk.exposure.ticker} limit={risk.exposure.limits.ticker_pct} />
+            <ExposureList title="Sector Exposure" values={risk.exposure.sector} limit={risk.exposure.limits.sector_pct} empty="Classify trades to track sectors" />
+            <ExposureList title="Asset-Class Exposure" values={risk.exposure.asset_class} limit={risk.exposure.limits.asset_class_pct} />
+            <ExposureList title="Directional Exposure" values={risk.exposure.direction} limit={risk.exposure.limits.direction_pct} />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+            {risk.stress_tests.map((scenario) => (
+              <div key={scenario.name} className="rounded border border-[var(--border)] p-2 text-xs">
+                <div className="text-[var(--muted-foreground)]">{scenario.name}</div>
+                <div className={`font-medium ${scenario.estimated_pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+                  {scenario.estimated_pnl >= 0 ? "+" : ""}${scenario.estimated_pnl.toLocaleString()}
+                </div>
+                <div className="text-[10px] text-[var(--muted-foreground)]">{scenario.description}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Manual Trade Form */}
       {showTradeForm && (
         <div className="p-3 rounded border border-blue-500/30 bg-blue-500/5 space-y-2">
@@ -179,6 +265,20 @@ export default function PortfolioPanel() {
               <option value="BUY">BUY</option>
               <option value="SELL">SELL (Short)</option>
             </select>
+            <select
+              value={tradeForm.asset_type}
+              onChange={(e) => setTradeForm({ ...tradeForm, asset_type: e.target.value })}
+              className="rounded border bg-[var(--input)] px-2 py-1.5 text-sm"
+            >
+              <option value="stock">Stock / ETF</option>
+              <option value="crypto">Crypto</option>
+            </select>
+            <input
+              placeholder="Sector (e.g. Technology)"
+              value={tradeForm.sector}
+              onChange={(e) => setTradeForm({ ...tradeForm, sector: e.target.value })}
+              className="rounded border bg-[var(--input)] px-2 py-1.5 text-sm"
+            />
             <input
               placeholder="Entry Price"
               type="number"
@@ -193,6 +293,24 @@ export default function PortfolioPanel() {
               type="number"
               value={tradeForm.quantity}
               onChange={(e) => setTradeForm({ ...tradeForm, quantity: e.target.value })}
+              className="rounded border bg-[var(--input)] px-2 py-1.5 text-sm"
+              min="0"
+              step="0.01"
+            />
+            <input
+              placeholder={tradeForm.direction === "BUY" ? "Stop Loss (below entry)" : "Stop Loss (above entry)"}
+              type="number"
+              value={tradeForm.stop_loss}
+              onChange={(e) => setTradeForm({ ...tradeForm, stop_loss: e.target.value })}
+              className="rounded border bg-[var(--input)] px-2 py-1.5 text-sm"
+              min="0"
+              step="0.01"
+            />
+            <input
+              placeholder="Target Price"
+              type="number"
+              value={tradeForm.target_price}
+              onChange={(e) => setTradeForm({ ...tradeForm, target_price: e.target.value })}
               className="rounded border bg-[var(--input)] px-2 py-1.5 text-sm"
               min="0"
               step="0.01"
@@ -243,6 +361,10 @@ export default function PortfolioPanel() {
                   <span className="text-xs text-[var(--muted-foreground)]">
                     = ${(t.quantity * t.entry_price).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                   </span>
+                  <span className="rounded bg-[var(--muted)] px-1.5 py-0.5 text-[10px] text-[var(--muted-foreground)]">
+                    {t.asset_type} · {t.sector}
+                  </span>
+                  <PositionRisk trade={t} />
                 </div>
                 {closingTradeId === t.id ? (
                   <div className="flex items-center gap-1">
@@ -352,6 +474,65 @@ function StatCard({ label, value, className = "" }: { label: string; value: stri
       <div className="text-xs text-[var(--muted-foreground)]">{label}</div>
       <div className={`text-lg font-semibold ${className}`}>{value}</div>
     </div>
+  );
+}
+
+function RiskMetric({
+  label,
+  value,
+  detail,
+  warning = false,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  warning?: boolean;
+}) {
+  return (
+    <div className="rounded border border-[var(--border)] p-2">
+      <div className="text-[10px] uppercase tracking-wide text-[var(--muted-foreground)]">{label}</div>
+      <div className={`text-sm font-semibold ${warning ? "text-red-400" : ""}`}>{value}</div>
+      <div className="text-[10px] text-[var(--muted-foreground)]">{detail}</div>
+    </div>
+  );
+}
+
+function ExposureList({
+  title,
+  values,
+  limit,
+  empty = "No open exposure",
+}: {
+  title: string;
+  values: Record<string, number>;
+  limit: number;
+  empty?: string;
+}) {
+  const rows = Object.entries(values).sort((first, second) => second[1] - first[1]).slice(0, 3);
+  return (
+    <div>
+      <div className="mb-1 font-medium">{title} <span className="text-[var(--muted-foreground)]">({limit}% max)</span></div>
+      {rows.length === 0 ? (
+        <div className="text-[var(--muted-foreground)]">{empty}</div>
+      ) : rows.map(([name, pct]) => (
+        <div key={name} className="flex justify-between gap-2">
+          <span className="truncate text-[var(--muted-foreground)]">{name}</span>
+          <span className={pct > limit ? "text-red-400" : ""}>{pct}%</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PositionRisk({ trade }: { trade: Trade }) {
+  const stopDistance = trade.direction === "BUY"
+    ? trade.entry_price - trade.stop_loss
+    : trade.stop_loss - trade.entry_price;
+  const risk = Math.max(0, stopDistance * trade.quantity);
+  return (
+    <span className="text-xs text-orange-400" title={`Stop ${trade.stop_loss.toLocaleString()}`}>
+      ${risk.toLocaleString(undefined, { maximumFractionDigits: 2 })} risk-to-stop
+    </span>
   );
 }
 

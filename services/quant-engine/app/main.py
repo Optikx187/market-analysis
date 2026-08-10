@@ -355,7 +355,10 @@ async def _run_scan() -> dict:
             }
 
             decision = await _process_signal_via_portfolio(signal_data)
-            approved = decision and decision.get("approved", False)
+            approved = bool(decision and decision.get("approved", False))
+            decision_action = str(decision.get("risk_decision", {}).get("action", "rejected")) if decision else "unavailable"
+            decision_reason = str(decision.get("reason", "Portfolio risk decision unavailable")) if decision else "Portfolio risk decision unavailable"
+            recommended_size = float(decision.get("optimal_size_usd", 0.0)) if decision else 0.0
 
             if approved and not result.suppressed:
                 notify_data = {
@@ -365,7 +368,7 @@ async def _run_scan() -> dict:
                     "trigger_price": float(result.trigger_price),
                     "target_price": float(result.target_price),
                     "stop_loss": float(result.stop_loss),
-                    "optimal_size_usd": float(result.optimal_size_usd),
+                    "optimal_size_usd": recommended_size,
                     "kelly_pct": float(result.kelly_pct),
                     "paper_trade_executed": False,
                 }
@@ -377,8 +380,11 @@ async def _run_scan() -> dict:
                 "ticker": ticker,
                 "direction": str(result.direction) if result.direction else "NONE",
                 "status": str(result.status),
-                "approved": bool(approved),
+                "approved": approved,
                 "suppressed": bool(result.suppressed),
+                "action": decision_action,
+                "reason": decision_reason,
+                "recommended_size_usd": recommended_size,
             })
 
         except Exception as e:
