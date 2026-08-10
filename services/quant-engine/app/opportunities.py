@@ -39,6 +39,9 @@ class OpportunityInput:
     risk_decision: dict[str, object] | None
     backtest: dict[str, object] | None
     earnings: dict[str, object] | None = None
+    regime: dict[str, object] | None = None
+    timeframe_agreement: dict[str, object] | None = None
+    regime_controls: dict[str, object] | None = None
     evaluated_at: datetime | None = None
 
 
@@ -233,9 +236,30 @@ def build_opportunity(inputs: OpportunityInput) -> dict[str, object]:
     liquidity_score, liquidity_explanation, liquidity_available, estimated_cost_bps = _liquidity_component(inputs.candles)
     quality_score, quality_explanation, quality_available = _quality_component(inputs.quality)
     portfolio_score, portfolio_explanation, portfolio_available = _portfolio_component(inputs.risk_decision)
-    regime_score = 75.0 if inputs.status == "Healthy Trend" else 40.0
-    if inputs.status == "Tanking" and inputs.direction.upper() == "SELL":
-        regime_score = 70.0
+    regime = inputs.regime or {}
+    controls = inputs.regime_controls or {}
+    timeframe = inputs.timeframe_agreement or {}
+    legacy_regime_input = inputs.regime is None and inputs.regime_controls is None
+    regime_available = (
+        bool(regime) and str(regime.get("trend", "unknown")) != "unknown"
+    ) or legacy_regime_input
+    regime_score = (
+        _number(controls.get("fit_score"))
+        if bool(regime) else 75.0 if inputs.status == "Healthy Trend" else 40.0
+    ) if regime_available else 0.0
+    regime_explanation = (
+        f"{regime.get('label', 'Unknown')} · size multiplier {_number(controls.get('size_multiplier')):.2f}x"
+        if bool(regime) and regime_available
+        else "Legacy status fallback; regime inputs were not supplied"
+        if legacy_regime_input
+        else "Regime inputs are unavailable"
+    )
+    timeframe_available = bool(timeframe.get("available", False))
+    timeframe_score = _number(timeframe.get("score")) if timeframe_available else 0.0
+    timeframe_explanation = (
+        f"{timeframe_score:.1f}% agreement across {int(_number(timeframe.get('available_timeframes')))} timeframes"
+        if timeframe_available else "Daily/4h/1h confirmation is incomplete"
+    )
 
     components = [
         _component(
@@ -253,13 +277,8 @@ def build_opportunity(inputs: OpportunityInput) -> dict[str, object]:
         _component("reward_risk", _clamp(inputs.risk_reward / 3.0 * 100.0), f"Gross reward/risk {inputs.risk_reward:.2f}"),
         _component("liquidity", liquidity_score, liquidity_explanation, liquidity_available),
         _component("data_quality", quality_score, quality_explanation, quality_available),
-        _component("regime_fit", regime_score, f"Signal-state proxy: {inputs.status}"),
-        _component(
-            "timeframe_agreement",
-            0.0,
-            "Only the daily signal is available; multi-timeframe confirmation is missing",
-            False,
-        ),
+        _component("regime_fit", regime_score, regime_explanation, regime_available),
+        _component("timeframe_agreement", timeframe_score, timeframe_explanation, timeframe_available),
         _component("portfolio_fit", portfolio_score, portfolio_explanation, portfolio_available),
     ]
     total_score = round(sum(_number(component["contribution"]) for component in components), 2)
@@ -275,6 +294,12 @@ def build_opportunity(inputs: OpportunityInput) -> dict[str, object]:
         )
     if inputs.suppressed:
         eligibility_reasons.append(f"Signal is suppressed ({inputs.status})")
+    if controls and not bool(controls.get("allowed", False)):
+        control_reasons = controls.get("reasons")
+        if isinstance(control_reasons, list):
+            eligibility_reasons.extend(str(reason) for reason in control_reasons)
+        else:
+            eligibility_reasons.append("Regime controls rejected the setup")
     if total_score < MINIMUM_OPPORTUNITY_SCORE:
         eligibility_reasons.append(
             f"Opportunity score {total_score:.2f} is below {MINIMUM_OPPORTUNITY_SCORE:.2f}"
@@ -284,6 +309,7 @@ def build_opportunity(inputs: OpportunityInput) -> dict[str, object]:
         and quality_eligible
         and risk_approved
         and not inputs.suppressed
+        and (not controls or bool(controls.get("allowed", False)))
         and total_score >= MINIMUM_OPPORTUNITY_SCORE
     )
     missing_inputs = [
@@ -307,6 +333,9 @@ def build_opportunity(inputs: OpportunityInput) -> dict[str, object]:
         "eligibility_reasons": [] if eligible else list(dict.fromkeys(eligibility_reasons)),
         "missing_inputs": missing_inputs,
         "components": components,
+        "regime": regime or None,
+        "timeframe_agreement": timeframe or None,
+        "regime_controls": controls or None,
         "trade_plan": plan,
         "event_warnings": _event_warnings(inputs),
         "signal_reason": inputs.signal_reason,
@@ -338,6 +367,9 @@ def build_blocked_opportunity(
         "eligibility_reasons": [reason],
         "missing_inputs": [name for name in COMPONENT_WEIGHTS if name != "data_quality"],
         "components": components,
+        "regime": None,
+        "timeframe_agreement": None,
+        "regime_controls": None,
         "trade_plan": None,
         "event_warnings": [],
         "signal_reason": reason,

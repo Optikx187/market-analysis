@@ -45,6 +45,40 @@ export interface DataQuality {
   issues: string[];
 }
 
+export interface MarketRegime {
+  trend: string;
+  volatility: string;
+  breadth: string;
+  risk: string;
+  label: string;
+  confidence: number;
+  breadth_pct_above_50: number | null;
+  asset_type: string;
+  session_profile: string;
+}
+
+export interface TimeframeAgreement {
+  score: number;
+  available: boolean;
+  available_timeframes: number;
+  expected_trend: string;
+  details: Record<string, {
+    trend: string;
+    available: boolean;
+    agrees: boolean;
+    weight_pct: number;
+  }>;
+  asset_type: string;
+  session_profile: string;
+}
+
+export interface RegimeControls {
+  allowed: boolean;
+  fit_score: number;
+  size_multiplier: number;
+  reasons: string[];
+}
+
 export interface Signal {
   ticker: string;
   direction: string | null;
@@ -60,6 +94,9 @@ export interface Signal {
   kelly_pct: number;
   optimal_size_usd: number;
   volatility_scalar: number;
+  market_regime: MarketRegime;
+  timeframe_agreement: TimeframeAgreement;
+  regime_controls: RegimeControls;
 }
 
 export interface RiskProfile {
@@ -94,6 +131,12 @@ export interface Trade {
   trailing_stop: number | null;
   asset_type: string;
   sector: string;
+  market_regime: string;
+  volatility_regime: string;
+  breadth_regime: string;
+  risk_regime: string;
+  regime_label: string;
+  timeframe_agreement: number | null;
   status: string;
   pnl: number | null;
   pnl_pct: number | null;
@@ -218,6 +261,12 @@ export interface AlertLog {
   approved: boolean;
   message: string | null;
   risk_decision_json: string | null;
+  market_regime: string;
+  volatility_regime: string;
+  breadth_regime: string;
+  risk_regime: string;
+  regime_label: string;
+  timeframe_agreement: number | null;
   created_at: string | null;
 }
 
@@ -375,7 +424,20 @@ export interface ManualTradeInput {
   target_price?: number;
   asset_type?: string;
   sector?: string;
+  market_regime?: MarketRegime;
+  timeframe_agreement?: TimeframeAgreement;
 }
+
+export const fetchRegime = (ticker: string, assetType: string, direction: string) =>
+  api.get<{
+    ticker: string;
+    direction: string;
+    market_regime: MarketRegime;
+    timeframe_agreement: TimeframeAgreement;
+    regime_controls: RegimeControls;
+  }>(`/regime/${encodeURIComponent(ticker)}`, {
+    params: { asset_type: assetType, direction },
+  }).then((r) => r.data);
 
 export const logManualTrade = (trade: ManualTradeInput) =>
   api.post<Trade>("/trades/manual", trade).then((r) => r.data);
@@ -487,6 +549,9 @@ export interface Opportunity {
   eligibility_reasons: string[];
   missing_inputs: string[];
   components: OpportunityComponent[];
+  regime: MarketRegime | null;
+  timeframe_agreement: TimeframeAgreement | null;
+  regime_controls: RegimeControls | null;
   trade_plan: OpportunityTradePlan | null;
   event_warnings: string[];
   signal_reason: string;
@@ -678,16 +743,27 @@ export interface BacktestResult {
     reason: string;
     market_regime: string;
     volatility_regime: string;
+    breadth_regime: string;
+    risk_regime: string;
+    regime_label: string;
   }>;
   equity_curve: Array<{ date: string; equity: number }>;
 }
 
-export const runBacktest = (ticker: string, period: string = "max", capital: number = 10000) =>
+export const runBacktest = (
+  ticker: string,
+  period: string = "max",
+  capital: number = 10000,
+  assetType: string = "stock",
+) =>
   api.post<BacktestResult>("/backtest", {
     ticker,
+    asset_type: assetType,
     period,
     available_capital: capital,
-    benchmark_tickers: ["SPY"],
+    benchmark_tickers: assetType === "crypto"
+      ? [ticker.trim().toUpperCase() === "BTC" ? "ETH" : "BTC"]
+      : ["SPY"],
   }).then((r) => r.data);
 
 // Phase 6: Earnings

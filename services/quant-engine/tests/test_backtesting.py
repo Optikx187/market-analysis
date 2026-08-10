@@ -170,6 +170,13 @@ def test_result_contains_sample_splits_sensitivity_regimes_and_eligibility() -> 
     assert len(result["parameter_sensitivity"]) == 2
     assert "TEST" in result["benchmarks"]
     assert result["benchmarks"]["SPY"]["windows"] == result["window_count"]
+    assert {
+        "trend:bull",
+        "volatility:normal",
+        "breadth:strong",
+        "risk:risk_on",
+    } <= set(result["regimes"])
+    assert result["trades"][0]["regime_label"]
     assert result["alert_eligibility"]["eligible"] is False
     assert "999" in result["alert_eligibility"]["reasons"][0]
 

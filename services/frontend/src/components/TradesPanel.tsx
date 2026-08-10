@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchTrades, logManualTrade, type Trade } from "@/lib/api";
+import { fetchRegime, fetchTrades, logManualTrade, type Trade } from "@/lib/api";
 
 function formatDateTime(dateStr: string | null): string {
   if (!dateStr) return "—";
@@ -12,7 +12,7 @@ function formatDateTime(dateStr: string | null): string {
 export default function TradesPanel() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ ticker: "", direction: "BUY", entry_price: "", quantity: "", stop_loss: "", target_price: "" });
+  const [form, setForm] = useState({ ticker: "", direction: "BUY", asset_type: "stock", entry_price: "", quantity: "", stop_loss: "", target_price: "" });
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -29,16 +29,25 @@ export default function TradesPanel() {
     setSaving(true);
     setMessage(null);
     try {
+      let regime;
+      try {
+        regime = await fetchRegime(form.ticker, form.asset_type, form.direction);
+      } catch {
+        regime = undefined;
+      }
       await logManualTrade({
         ticker: form.ticker,
         direction: form.direction,
         entry_price: price,
         quantity: qty,
+        asset_type: form.asset_type,
+        market_regime: regime?.market_regime,
+        timeframe_agreement: regime?.timeframe_agreement,
         stop_loss: form.stop_loss ? parseFloat(form.stop_loss) : undefined,
         target_price: form.target_price ? parseFloat(form.target_price) : undefined,
       });
       setMessage({ type: "success", text: `Trade logged: ${form.direction} ${qty} ${form.ticker} @ $${price}` });
-      setForm({ ticker: "", direction: "BUY", entry_price: "", quantity: "", stop_loss: "", target_price: "" });
+      setForm({ ticker: "", direction: "BUY", asset_type: "stock", entry_price: "", quantity: "", stop_loss: "", target_price: "" });
       setShowForm(false);
       loadTrades();
     } catch {
@@ -78,6 +87,11 @@ export default function TradesPanel() {
               <option value="BUY">BUY</option>
               <option value="SELL">SELL</option>
             </select>
+            <select value={form.asset_type} onChange={(e) => setForm({ ...form, asset_type: e.target.value })}
+              className="rounded border bg-[var(--input)] px-2 py-1.5 text-xs">
+              <option value="stock">Stock</option>
+              <option value="crypto">Crypto</option>
+            </select>
             <input type="number" value={form.entry_price} onChange={(e) => setForm({ ...form, entry_price: e.target.value })}
               placeholder="Entry price" step="0.01" className="rounded border bg-[var(--input)] px-2 py-1.5 text-xs" />
             <input type="number" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })}
@@ -109,6 +123,7 @@ export default function TradesPanel() {
                 <th className="pb-2">Exit</th>
                 <th className="pb-2">Qty</th>
                 <th className="pb-2">PnL</th>
+                <th className="pb-2">Regime</th>
                 <th className="pb-2">Status</th>
                 <th className="pb-2">Opened</th>
               </tr>
@@ -127,6 +142,10 @@ export default function TradesPanel() {
                     t.pnl != null ? (t.pnl >= 0 ? "text-green-400" : "text-red-400") : ""
                   }>
                     {t.pnl != null ? `$${t.pnl.toFixed(2)}` : "—"}
+                  </td>
+                  <td className="text-xs text-[var(--muted-foreground)]">
+                    {t.market_regime}/{t.volatility_regime}
+                    {t.timeframe_agreement != null ? ` · ${t.timeframe_agreement.toFixed(0)}% TF` : ""}
                   </td>
                   <td>
                     <span className={`px-1.5 py-0.5 rounded text-xs ${

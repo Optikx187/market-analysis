@@ -22,6 +22,12 @@ from app.backtesting import (
 )
 from app.config import settings
 from app.opportunities import OpportunityInput, build_blocked_opportunity, build_opportunity
+from app.regimes import (
+    classify_breadth,
+    classify_regime,
+    regime_controls,
+    timeframe_confluence,
+)
 from app.risk_engine import evaluate_risk_profile
 from app.signals import evaluate_signals
 
@@ -106,6 +112,9 @@ class SignalResponse(BaseModel):
     kelly_pct: float
     optimal_size_usd: float
     volatility_scalar: float
+    market_regime: dict[str, object]
+    timeframe_agreement: dict[str, object]
+    regime_controls: dict[str, object]
 
 
 class RiskProfileResponse(BaseModel):
@@ -132,7 +141,7 @@ class AnalyzeRequest(BaseModel):
     ticker: str
     available_capital: float = 10_000.0
     asset_type: str = "stock"
-    timeframes: list[str] = ["1d"]
+    timeframes: list[str] = Field(default_factory=lambda: ["1d", "4h", "1h"])
 
 
 class DataQualityResponse(BaseModel):
@@ -205,6 +214,7 @@ class BacktestValidationThresholds(BaseModel):
 
 class BacktestRequest(BaseModel):
     ticker: str
+    asset_type: str = "stock"
     period: str = "max"
     available_capital: float = Field(default=10_000.0, gt=0)
     strategy_version: str = Field(default="ema-rsi-atr-v1", min_length=1, max_length=100)
@@ -220,15 +230,47 @@ class BacktestRequest(BaseModel):
     benchmark_tickers: list[str] = Field(default_factory=list, max_length=5)
 
 
-async def fetch_candles_from_service_a(ticker: str) -> pd.DataFrame:
+async def fetch_candles_from_service_a(ticker: str, interval: str = "1d") -> pd.DataFrame:
     url = f"{settings.DATA_INGESTION_URL}/api/candles/{ticker}"
     async with httpx.AsyncClient() as client:
-        resp = await client.get(url, timeout=30)
+        resp = await client.get(url, params={"interval": interval}, timeout=30)
         resp.raise_for_status()
         data = resp.json()
     if not data:
         return pd.DataFrame()
     return pd.DataFrame(data)
+
+
+async def _fetch_timeframe_frames(
+    ticker: str,
+    timeframes: list[str] | None = None,
+) -> dict[str, pd.DataFrame]:
+    requested = list(dict.fromkeys(timeframes or ["1d", "4h", "1h"]))
+
+    async def fetch_one(timeframe: str) -> tuple[str, pd.DataFrame]:
+        try:
+            return timeframe, await fetch_candles_from_service_a(ticker, timeframe)
+        except Exception as error:
+            logger.warning(f"{timeframe} candles unavailable for {ticker}: {error}")
+            return timeframe, pd.DataFrame()
+
+    return dict(await asyncio.gather(*(fetch_one(timeframe) for timeframe in requested)))
+
+
+def _regime_analysis(
+    asset_type: str,
+    direction: str,
+    frames: dict[str, pd.DataFrame],
+    breadth_pct_above_50: float | None = None,
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    snapshot = classify_regime(
+        frames.get("1d", pd.DataFrame()),
+        asset_type,
+        breadth_pct_above_50,
+    )
+    confluence = timeframe_confluence(frames, direction, asset_type)
+    controls = regime_controls(snapshot, direction, confluence)
+    return snapshot.to_dict(), confluence, controls
 
 
 async def _fetch_assets() -> list[dict]:
@@ -413,6 +455,31 @@ async def _run_scan() -> dict:
     quality_rejections = []
     signal_details = []
 
+    eligible_assets = [
+        asset for asset in assets
+        if asset.get("is_active", True)
+        and (quality_by_ticker.get(str(asset.get("ticker"))) is not None)
+        and bool(quality_by_ticker[str(asset.get("ticker"))].is_eligible)
+    ]
+
+    async def fetch_daily(asset: dict[str, object]) -> tuple[str, pd.DataFrame]:
+        ticker = str(asset.get("ticker", ""))
+        try:
+            return ticker, await fetch_candles_from_service_a(ticker)
+        except Exception as error:
+            logger.warning(f"Daily candles unavailable for {ticker}: {error}")
+            return ticker, pd.DataFrame()
+
+    daily_frames = dict(await asyncio.gather(*(fetch_daily(asset) for asset in eligible_assets)))
+    breadth_by_asset_type: dict[str, dict[str, object]] = {}
+    for asset_type in ("stock", "crypto"):
+        matching_frames = [
+            daily_frames.get(str(asset.get("ticker")), pd.DataFrame())
+            for asset in eligible_assets
+            if str(asset.get("asset_type", "stock")) == asset_type
+        ]
+        breadth_by_asset_type[asset_type] = classify_breadth(matching_frames)
+
     for asset in assets:
         if not asset.get("is_active", True):
             continue
@@ -442,7 +509,7 @@ async def _run_scan() -> dict:
             logger.warning(f"Scan skipped {ticker}: {reason}")
             continue
         try:
-            df = await fetch_candles_from_service_a(ticker)
+            df = daily_frames.get(ticker, pd.DataFrame())
             if df.empty or len(df) < 201:
                 continue
             scanned += 1
@@ -451,6 +518,23 @@ async def _run_scan() -> dict:
                 continue
 
             signals_found += 1
+            intraday_frames = await _fetch_timeframe_frames(ticker, ["4h", "1h"])
+            frames = {"1d": df, **intraday_frames}
+            breadth = breadth_by_asset_type.get(asset_type, {})
+            breadth_pct_value = breadth.get("pct_above_50")
+            breadth_pct = float(breadth_pct_value) if isinstance(breadth_pct_value, (int, float)) else None
+            market_regime, timeframe_agreement, controls = _regime_analysis(
+                asset_type,
+                str(result.direction) if result.direction else "NONE",
+                frames,
+                breadth_pct,
+            )
+            adjusted_size = float(result.optimal_size_usd) * float(controls["size_multiplier"])
+            signal_suppressed = bool(result.suppressed) or not bool(controls["allowed"])
+            regime_reason = (
+                f"{result.reason}. Regime: {market_regime['label']}. "
+                f"Timeframe agreement: {float(timeframe_agreement['score']):.1f}%"
+            )
             dedup_key = f"{ticker}:{result.direction}"
             last_signal = _recent_signals.get(dedup_key)
             deduplicated = False
@@ -467,15 +551,18 @@ async def _run_scan() -> dict:
                 "trigger_price": float(result.trigger_price),
                 "stop_loss": float(result.stop_loss),
                 "target_price": float(result.target_price),
-                "reason": str(result.reason),
+                "reason": regime_reason,
                 "risk_reward": float(result.risk_reward),
                 "atr_value": float(result.atr_value),
                 "rsi_value": float(result.rsi_value),
-                "suppressed": bool(result.suppressed),
+                "suppressed": signal_suppressed,
                 "kelly_pct": float(result.kelly_pct),
-                "optimal_size_usd": float(result.optimal_size_usd),
+                "optimal_size_usd": adjusted_size,
                 "volatility_scalar": float(result.volatility_scalar),
                 "asset_type": asset_type,
+                "market_regime": market_regime,
+                "timeframe_agreement": timeframe_agreement,
+                "regime_controls": controls,
             }
 
             decision = await _process_signal_via_portfolio(signal_data)
@@ -498,15 +585,18 @@ async def _run_scan() -> dict:
                 trigger_price=float(result.trigger_price),
                 stop_loss=float(result.stop_loss),
                 target_price=float(result.target_price),
-                signal_reason=str(result.reason),
+                signal_reason=regime_reason,
                 risk_reward=float(result.risk_reward),
                 atr_value=float(result.atr_value),
-                suppressed=bool(result.suppressed),
+                suppressed=signal_suppressed,
                 quality=quality_payload,
                 candles=df,
                 risk_decision=risk_decision,
                 backtest=_latest_backtest_result(ticker),
                 earnings=earnings_by_ticker.get(ticker),
+                regime=market_regime,
+                timeframe_agreement=timeframe_agreement,
+                regime_controls=controls,
                 evaluated_at=now,
             ))
             _apply_opportunity_state(opportunity, now)
@@ -518,7 +608,13 @@ async def _run_scan() -> dict:
                 [str(reason) for reason in eligibility_reasons_value]
                 if isinstance(eligibility_reasons_value, list) else []
             )
-            opportunity_reason = decision_reason if bool(opportunity.get("eligible")) else "; ".join(eligibility_reasons)
+            opportunity_reason = (
+                decision_reason
+                if decision is not None and not approved
+                else decision_reason
+                if bool(opportunity.get("eligible"))
+                else "; ".join(eligibility_reasons)
+            )
             action = decision_action if bool(opportunity.get("eligible")) else "ineligible"
 
             if not deduplicated and _notification_allowed(opportunity):
@@ -533,6 +629,8 @@ async def _run_scan() -> dict:
                     "kelly_pct": float(result.kelly_pct),
                     "opportunity_score": float(opportunity.get("score", 0.0)),
                     "trade_plan": trade_plan,
+                    "market_regime": market_regime,
+                    "timeframe_agreement": timeframe_agreement,
                     "paper_trade_executed": False,
                 }
                 sent = await _send_notification(notify_data)
@@ -544,12 +642,15 @@ async def _run_scan() -> dict:
                 "direction": str(result.direction) if result.direction else "NONE",
                 "status": str(result.status),
                 "approved": approved,
-                "suppressed": bool(result.suppressed),
+                "suppressed": signal_suppressed,
                 "action": action,
                 "reason": opportunity_reason,
                 "recommended_size_usd": recommended_size,
                 "score": float(opportunity.get("score", 0.0)),
                 "eligible": bool(opportunity.get("eligible", False)),
+                "market_regime": market_regime,
+                "timeframe_agreement": timeframe_agreement,
+                "regime_controls": controls,
                 "opportunity": opportunity,
             })
 
@@ -623,14 +724,24 @@ async def health():
 @app.post("/api/analyze", response_model=Optional[SignalResponse])
 async def analyze(req: AnalyzeRequest):
     await _require_eligible_data(req.ticker)
-    df = await fetch_candles_from_service_a(req.ticker)
+    frames = await _fetch_timeframe_frames(req.ticker, req.timeframes)
+    df = frames.get("1d", pd.DataFrame())
     if df.empty or len(df) < 201:
-        raise HTTPException(400, f"Insufficient data for {req.ticker} (need 201+ candles)")
+        raise HTTPException(400, f"Insufficient data for {req.ticker} (need 201+ daily candles)")
 
     result = evaluate_signals(df, req.available_capital)
     if result is None:
         return None
 
+    market_regime, timeframe_agreement, controls = _regime_analysis(
+        req.asset_type,
+        str(result.direction) if result.direction else "NONE",
+        frames,
+    )
+    reason = (
+        f"{result.reason}. Regime: {market_regime['label']}. "
+        f"Timeframe agreement: {float(timeframe_agreement['score']):.1f}%"
+    )
     return SignalResponse(
         ticker=req.ticker,
         direction=result.direction,
@@ -638,16 +749,42 @@ async def analyze(req: AnalyzeRequest):
         trigger_price=result.trigger_price,
         stop_loss=result.stop_loss,
         target_price=result.target_price,
-        reason=result.reason,
+        reason=reason,
         risk_reward=result.risk_reward,
         atr_value=result.atr_value,
         rsi_value=result.rsi_value,
-        suppressed=result.suppressed,
+        suppressed=result.suppressed or not bool(controls["allowed"]),
         kelly_pct=result.kelly_pct,
-        optimal_size_usd=result.optimal_size_usd,
+        optimal_size_usd=result.optimal_size_usd * float(controls["size_multiplier"]),
         volatility_scalar=result.volatility_scalar,
         asset_type=req.asset_type,
+        market_regime=market_regime,
+        timeframe_agreement=timeframe_agreement,
+        regime_controls=controls,
     )
+
+
+@app.get("/api/regime/{ticker}")
+async def get_regime(
+    ticker: str,
+    asset_type: str = "stock",
+    direction: Literal["BUY", "SELL"] = "BUY",
+):
+    normalized = ticker.strip().upper()
+    await _require_eligible_data(normalized)
+    frames = await _fetch_timeframe_frames(normalized)
+    market_regime, timeframe_agreement, controls = _regime_analysis(
+        asset_type,
+        direction,
+        frames,
+    )
+    return {
+        "ticker": normalized,
+        "direction": direction,
+        "market_regime": market_regime,
+        "timeframe_agreement": timeframe_agreement,
+        "regime_controls": controls,
+    }
 
 
 @app.post("/api/risk-profile", response_model=Optional[RiskProfileResponse])
@@ -783,73 +920,64 @@ async def update_scanner_config(config: ScanConfigUpdate):
 
 @app.post("/api/analyze/multi-timeframe")
 async def analyze_multi_timeframe(req: AnalyzeRequest):
-    """Analyze a ticker across multiple timeframes and score confluence."""
-    results_by_tf = {}
+    """Analyze a ticker across daily, 4h, and 1h frames."""
+    await _require_eligible_data(req.ticker)
+    frames = await _fetch_timeframe_frames(req.ticker, req.timeframes)
+    results_by_tf: dict[str, dict[str, object]] = {}
     buy_signals = 0
     sell_signals = 0
-    total_tf = 0
-
-    for tf in req.timeframes:
-        try:
-            await _require_eligible_data(req.ticker, tf)
-            if tf == "1d":
-                df = await fetch_candles_from_service_a(req.ticker)
-            else:
-                url = f"{settings.DATA_INGESTION_URL}/api/candles/{req.ticker}?interval={tf}"
-                async with httpx.AsyncClient() as client:
-                    resp = await client.get(url, timeout=30)
-                    resp.raise_for_status()
-                    data = resp.json()
-                df = pd.DataFrame(data) if data else pd.DataFrame()
-
-            if df.empty or len(df) < 201:
-                results_by_tf[tf] = {"status": "insufficient_data", "candles": len(df) if not df.empty else 0}
-                continue
-
-            result = evaluate_signals(df, req.available_capital)
-            if result is None:
-                results_by_tf[tf] = {"status": "no_signal"}
-                continue
-
-            total_tf += 1
-            if result.direction == "BUY":
-                buy_signals += 1
-            elif result.direction == "SELL":
-                sell_signals += 1
-
-            results_by_tf[tf] = {
-                "direction": result.direction,
-                "status": result.status,
-                "trigger_price": result.trigger_price,
-                "stop_loss": result.stop_loss,
-                "target_price": result.target_price,
-                "risk_reward": result.risk_reward,
-                "rsi_value": result.rsi_value,
-                "kelly_pct": result.kelly_pct,
-                "reason": result.reason,
+    for timeframe in req.timeframes:
+        frame = frames.get(timeframe, pd.DataFrame())
+        if frame.empty or len(frame) < 201:
+            results_by_tf[timeframe] = {
+                "status": "insufficient_data",
+                "candles": len(frame),
             }
-        except Exception as e:
-            results_by_tf[tf] = {"status": "error", "error": str(e)}
+            continue
+        result = evaluate_signals(frame, req.available_capital)
+        if result is None:
+            results_by_tf[timeframe] = {"status": "no_signal", "candles": len(frame)}
+            continue
+        if result.direction == "BUY":
+            buy_signals += 1
+        elif result.direction == "SELL":
+            sell_signals += 1
+        results_by_tf[timeframe] = {
+            "direction": result.direction,
+            "status": result.status,
+            "trigger_price": result.trigger_price,
+            "stop_loss": result.stop_loss,
+            "target_price": result.target_price,
+            "risk_reward": result.risk_reward,
+            "rsi_value": result.rsi_value,
+            "kelly_pct": result.kelly_pct,
+            "reason": result.reason,
+            "candles": len(frame),
+        }
 
-    confluence_score = 0
-    if total_tf > 0:
-        max_agreement = max(buy_signals, sell_signals)
-        confluence_score = round((max_agreement / total_tf) * 100, 1)
-
-    consensus_direction = None
+    consensus_direction: str | None = None
     if buy_signals > sell_signals:
         consensus_direction = "BUY"
     elif sell_signals > buy_signals:
         consensus_direction = "SELL"
-
+    analysis_direction = consensus_direction or "BUY"
+    market_regime, timeframe_agreement, controls = _regime_analysis(
+        req.asset_type,
+        analysis_direction,
+        frames,
+    )
     return {
         "ticker": req.ticker,
+        "asset_type": req.asset_type,
         "timeframes": results_by_tf,
-        "confluence_score": confluence_score,
+        "confluence_score": timeframe_agreement["score"],
         "consensus_direction": consensus_direction,
         "buy_signals": buy_signals,
         "sell_signals": sell_signals,
-        "total_timeframes_analyzed": total_tf,
+        "total_timeframes_analyzed": timeframe_agreement["available_timeframes"],
+        "market_regime": market_regime,
+        "timeframe_agreement": timeframe_agreement,
+        "regime_controls": controls,
     }
 
 
@@ -901,6 +1029,7 @@ async def backtest(req: BacktestRequest):
             thresholds=thresholds,
             initial_capital=req.available_capital,
             benchmark_frames=benchmark_frames,
+            asset_type=req.asset_type,
         )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
