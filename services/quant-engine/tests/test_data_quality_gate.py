@@ -42,6 +42,7 @@ def test_analyze_rejects_stale_data_before_signal_evaluation(monkeypatch: pytest
 
 
 def test_scan_reports_quality_rejections_without_fetching_candles(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main, "_fetch_upcoming_earnings", AsyncMock(return_value={}))
     monkeypatch.setattr(
         main,
         "_fetch_assets",
@@ -67,6 +68,7 @@ def test_scan_reports_quality_rejections_without_fetching_candles(monkeypatch: p
 
 
 def test_scan_fails_closed_when_quality_service_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main, "_fetch_upcoming_earnings", AsyncMock(return_value={}))
     monkeypatch.setattr(
         main,
         "_fetch_assets",

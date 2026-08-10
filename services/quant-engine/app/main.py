@@ -4,7 +4,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Literal, Optional
 
 import httpx
 import pandas as pd
@@ -21,6 +21,7 @@ from app.backtesting import (
     run_walk_forward_backtest,
 )
 from app.config import settings
+from app.opportunities import OpportunityInput, build_blocked_opportunity, build_opportunity
 from app.risk_engine import evaluate_risk_profile
 from app.signals import evaluate_signals
 
@@ -41,6 +42,7 @@ _scan_state = {
 }
 # Dedup: ticker -> last signal direction+timestamp (don't re-alert within 24h)
 _recent_signals: dict[str, str] = {}
+_opportunity_actions: dict[str, dict[str, object]] = {}
 _backtest_store: BacktestStore | None = None
 
 
@@ -155,6 +157,21 @@ class ScanConfigUpdate(BaseModel):
     enabled: Optional[bool] = None
     interval_minutes: Optional[int] = None
     market_hours_only: Optional[bool] = None
+
+
+class TradePlanEdit(BaseModel):
+    entry_zone_low: Optional[float] = Field(default=None, gt=0)
+    entry_zone_high: Optional[float] = Field(default=None, gt=0)
+    stop_loss: Optional[float] = Field(default=None, gt=0)
+    targets: Optional[list[float]] = Field(default=None, min_length=1, max_length=4)
+    quantity: Optional[float] = Field(default=None, gt=0)
+    time_stop: Optional[str] = Field(default=None, min_length=1, max_length=100)
+
+
+class OpportunityActionRequest(BaseModel):
+    action: Literal["approve", "reject", "snooze", "edit"]
+    snooze_minutes: int = Field(default=60, ge=5, le=10_080)
+    edit: Optional[TradePlanEdit] = None
 
 
 class BacktestStrategyParameters(BaseModel):
@@ -284,6 +301,97 @@ async def _process_signal_via_portfolio(signal_data: dict) -> Optional[dict]:
         return None
 
 
+async def _fetch_upcoming_earnings() -> dict[str, dict[str, object]]:
+    url = f"{settings.DATA_INGESTION_URL}/api/earnings/upcoming/all"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=30)
+            response.raise_for_status()
+        payload = response.json()
+    except Exception as error:
+        logger.warning(f"Earnings calendar unavailable for scan: {error}")
+        return {}
+    if not isinstance(payload, list):
+        return {}
+    results: dict[str, dict[str, object]] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        ticker = str(item.get("ticker", "")).strip().upper()
+        if ticker:
+            results[ticker] = item
+    return results
+
+
+def _latest_backtest_result(ticker: str) -> dict[str, object] | None:
+    try:
+        return _get_backtest_store().latest(ticker)
+    except Exception as error:
+        logger.warning(f"Backtest history unavailable for {ticker}: {error}")
+        return None
+
+
+def _apply_opportunity_state(opportunity: dict[str, object], now: datetime) -> None:
+    opportunity_id = str(opportunity.get("id", ""))
+    state = _opportunity_actions.get(opportunity_id)
+    if state is None:
+        return
+    decision = str(state.get("user_decision", "pending"))
+    snoozed_until = state.get("snoozed_until")
+    if decision == "snoozed" and isinstance(snoozed_until, str):
+        try:
+            if datetime.fromisoformat(snoozed_until) <= now:
+                _opportunity_actions.pop(opportunity_id, None)
+                return
+        except ValueError:
+            _opportunity_actions.pop(opportunity_id, None)
+            return
+    opportunity.update(state)
+
+
+def _notification_allowed(opportunity: dict[str, object]) -> bool:
+    if not bool(opportunity.get("eligible", False)):
+        return False
+    return str(opportunity.get("user_decision", "pending")) not in {"rejected", "snoozed"}
+
+
+def _edit_trade_plan(plan: dict[str, object], edit: TradePlanEdit) -> None:
+    entry_zone = plan.get("entry_zone")
+    if not isinstance(entry_zone, dict):
+        entry_zone = {}
+        plan["entry_zone"] = entry_zone
+    if edit.entry_zone_low is not None:
+        entry_zone["low"] = edit.entry_zone_low
+    if edit.entry_zone_high is not None:
+        entry_zone["high"] = edit.entry_zone_high
+    low = float(entry_zone.get("low", 0.0))
+    high = float(entry_zone.get("high", 0.0))
+    if low <= 0 or high <= 0 or low > high:
+        raise HTTPException(400, "Entry zone must contain positive prices with low <= high")
+    if edit.stop_loss is not None:
+        plan["stop_loss"] = edit.stop_loss
+    if edit.quantity is not None:
+        plan["quantity"] = edit.quantity
+    if edit.time_stop is not None:
+        plan["time_stop"] = edit.time_stop
+    if edit.targets is not None:
+        if any(target <= 0 for target in edit.targets):
+            raise HTTPException(400, "Targets must contain positive prices")
+        plan["targets"] = [
+            {
+                "price": target,
+                "exit_pct": round(100 / len(edit.targets), 2),
+                "label": f"Target {index + 1}",
+            }
+            for index, target in enumerate(edit.targets)
+        ]
+    average_entry = (low + high) / 2
+    stop_loss = float(plan.get("stop_loss", 0.0))
+    quantity = float(plan.get("quantity", 0.0))
+    plan["position_size_usd"] = round(average_entry * quantity, 2)
+    plan["maximum_planned_loss_usd"] = round(abs(average_entry - stop_loss) * quantity, 2)
+
+
 async def _run_scan() -> dict:
     """Scan all active assets for signals and send notifications."""
     now = datetime.now(timezone.utc)
@@ -297,6 +405,7 @@ async def _run_scan() -> dict:
         logger.error(f"Data quality unavailable for scan: {e}")
         quality_by_ticker = {}
         quality_service_error = "Data quality service unavailable"
+    earnings_by_ticker = await _fetch_upcoming_earnings()
     scanned = 0
     signals_found = 0
     notifications_sent = 0
@@ -315,6 +424,21 @@ async def _run_scan() -> dict:
                 _quality_rejection_reason(quality) if quality else "Data quality result missing"
             )
             quality_rejections.append({"ticker": ticker, "reason": reason})
+            blocked = build_blocked_opportunity(ticker, asset_type, reason, now)
+            _apply_opportunity_state(blocked, now)
+            signal_details.append({
+                "ticker": ticker,
+                "direction": "NONE",
+                "status": "Data Blocked",
+                "approved": False,
+                "suppressed": True,
+                "action": "blocked",
+                "reason": reason,
+                "recommended_size_usd": 0.0,
+                "score": 0.0,
+                "eligible": False,
+                "opportunity": blocked,
+            })
             logger.warning(f"Scan skipped {ticker}: {reason}")
             continue
         try:
@@ -329,12 +453,12 @@ async def _run_scan() -> dict:
             signals_found += 1
             dedup_key = f"{ticker}:{result.direction}"
             last_signal = _recent_signals.get(dedup_key)
+            deduplicated = False
             if last_signal:
                 last_time = datetime.fromisoformat(last_signal)
-                if (now - last_time) < timedelta(hours=24):
-                    continue
-
-            _recent_signals[dedup_key] = now.isoformat()
+                deduplicated = (now - last_time) < timedelta(hours=24)
+            if not deduplicated:
+                _recent_signals[dedup_key] = now.isoformat()
 
             signal_data = {
                 "ticker": ticker,
@@ -356,11 +480,48 @@ async def _run_scan() -> dict:
 
             decision = await _process_signal_via_portfolio(signal_data)
             approved = bool(decision and decision.get("approved", False))
-            decision_action = str(decision.get("risk_decision", {}).get("action", "rejected")) if decision else "unavailable"
-            decision_reason = str(decision.get("reason", "Portfolio risk decision unavailable")) if decision else "Portfolio risk decision unavailable"
-            recommended_size = float(decision.get("optimal_size_usd", 0.0)) if decision else 0.0
+            risk_decision_value = decision.get("risk_decision") if decision else None
+            risk_decision = risk_decision_value if isinstance(risk_decision_value, dict) else None
+            decision_action = str(risk_decision.get("action", "rejected")) if risk_decision else "unavailable"
+            decision_reason = (
+                str(decision.get("reason", "Portfolio risk decision unavailable"))
+                if decision else "Portfolio risk decision unavailable"
+            )
+            if risk_decision is not None:
+                risk_decision["summary"] = decision_reason
+            quality_payload = quality.model_dump()
+            opportunity = build_opportunity(OpportunityInput(
+                ticker=ticker,
+                asset_type=asset_type,
+                direction=str(result.direction) if result.direction else "NONE",
+                status=str(result.status),
+                trigger_price=float(result.trigger_price),
+                stop_loss=float(result.stop_loss),
+                target_price=float(result.target_price),
+                signal_reason=str(result.reason),
+                risk_reward=float(result.risk_reward),
+                atr_value=float(result.atr_value),
+                suppressed=bool(result.suppressed),
+                quality=quality_payload,
+                candles=df,
+                risk_decision=risk_decision,
+                backtest=_latest_backtest_result(ticker),
+                earnings=earnings_by_ticker.get(ticker),
+                evaluated_at=now,
+            ))
+            _apply_opportunity_state(opportunity, now)
+            trade_plan_value = opportunity.get("trade_plan")
+            trade_plan = trade_plan_value if isinstance(trade_plan_value, dict) else {}
+            recommended_size = float(trade_plan.get("position_size_usd", 0.0))
+            eligibility_reasons_value = opportunity.get("eligibility_reasons")
+            eligibility_reasons = (
+                [str(reason) for reason in eligibility_reasons_value]
+                if isinstance(eligibility_reasons_value, list) else []
+            )
+            opportunity_reason = decision_reason if bool(opportunity.get("eligible")) else "; ".join(eligibility_reasons)
+            action = decision_action if bool(opportunity.get("eligible")) else "ineligible"
 
-            if approved and not result.suppressed:
+            if not deduplicated and _notification_allowed(opportunity):
                 notify_data = {
                     "ticker": ticker,
                     "direction": str(result.direction) if result.direction else "NONE",
@@ -370,6 +531,8 @@ async def _run_scan() -> dict:
                     "stop_loss": float(result.stop_loss),
                     "optimal_size_usd": recommended_size,
                     "kelly_pct": float(result.kelly_pct),
+                    "opportunity_score": float(opportunity.get("score", 0.0)),
+                    "trade_plan": trade_plan,
                     "paper_trade_executed": False,
                 }
                 sent = await _send_notification(notify_data)
@@ -382,15 +545,19 @@ async def _run_scan() -> dict:
                 "status": str(result.status),
                 "approved": approved,
                 "suppressed": bool(result.suppressed),
-                "action": decision_action,
-                "reason": decision_reason,
+                "action": action,
+                "reason": opportunity_reason,
                 "recommended_size_usd": recommended_size,
+                "score": float(opportunity.get("score", 0.0)),
+                "eligible": bool(opportunity.get("eligible", False)),
+                "opportunity": opportunity,
             })
 
         except Exception as e:
             errors += 1
             logger.error(f"Scan error for {ticker}: {e}")
 
+    signal_details.sort(key=lambda item: (-float(item["score"]), str(item["ticker"])))
     result_summary = {
         "scanned": scanned,
         "signals_found": signals_found,
@@ -537,6 +704,60 @@ async def scanner_status():
         "total_scans": _scan_state["total_scans"],
         "total_signals_found": _scan_state["total_signals_found"],
     }
+
+
+@app.post("/api/opportunities/{opportunity_id}/action")
+async def update_opportunity_action(
+    opportunity_id: str,
+    request: OpportunityActionRequest,
+):
+    latest_result = _scan_state.get("last_scan_result")
+    if not isinstance(latest_result, dict):
+        raise HTTPException(404, "Run a scan before managing opportunities")
+    signals = latest_result.get("signals")
+    if not isinstance(signals, list):
+        raise HTTPException(404, "No opportunities are available")
+    opportunity: dict[str, object] | None = None
+    for signal in signals:
+        if not isinstance(signal, dict):
+            continue
+        candidate = signal.get("opportunity")
+        if isinstance(candidate, dict) and str(candidate.get("id")) == opportunity_id:
+            opportunity = candidate
+            break
+    if opportunity is None:
+        raise HTTPException(404, "Opportunity not found in the latest scan")
+    if request.action == "approve" and not bool(opportunity.get("eligible", False)):
+        raise HTTPException(409, "Ineligible opportunities cannot be approved")
+
+    existing = _opportunity_actions.get(opportunity_id, {})
+    state = dict(existing)
+    if request.action == "approve":
+        state.update({"user_decision": "approved", "snoozed_until": None})
+    elif request.action == "reject":
+        state.update({"user_decision": "rejected", "snoozed_until": None})
+    elif request.action == "snooze":
+        snoozed_until = datetime.now(timezone.utc) + timedelta(minutes=request.snooze_minutes)
+        state.update({
+            "user_decision": "snoozed",
+            "snoozed_until": snoozed_until.isoformat(),
+        })
+    else:
+        if request.edit is None:
+            raise HTTPException(400, "Edit details are required")
+        plan = opportunity.get("trade_plan")
+        if not isinstance(plan, dict):
+            raise HTTPException(409, "This opportunity has no editable trade plan")
+        _edit_trade_plan(plan, request.edit)
+        state.update({
+            "user_decision": "edited",
+            "snoozed_until": None,
+            "trade_plan": plan,
+        })
+
+    _opportunity_actions[opportunity_id] = state
+    opportunity.update(state)
+    return opportunity
 
 
 @app.post("/api/scanner/config")

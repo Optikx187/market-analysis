@@ -82,6 +82,18 @@ class BacktestStore:
         result = json.loads(row["result_json"])
         return result if isinstance(result, dict) else None
 
+    def latest(self, ticker: str) -> dict[str, object] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT result_json FROM backtest_runs WHERE ticker = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (ticker,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = json.loads(row["result_json"])
+        return result if isinstance(result, dict) else None
+
     def list(self, ticker: str | None = None, limit: int = 20) -> list[dict[str, object]]:
         query = (
             "SELECT run_id, ticker, strategy_version, created_at, alert_eligible "
