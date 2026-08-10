@@ -48,6 +48,7 @@ def _signal() -> SignalResult:
 
 def _prepare_scan(monkeypatch: pytest.MonkeyPatch, ticker: str) -> None:
     main._recent_signals.clear()
+    main._opportunity_actions.clear()
     monkeypatch.setattr(
         main,
         "_fetch_assets",
@@ -64,6 +65,15 @@ def _prepare_scan(monkeypatch: pytest.MonkeyPatch, ticker: str) -> None:
         AsyncMock(return_value=pd.DataFrame({"close": range(201)})),
     )
     monkeypatch.setattr(main, "evaluate_signals", lambda frame, capital: _signal())
+    monkeypatch.setattr(main, "_fetch_upcoming_earnings", AsyncMock(return_value={}))
+    monkeypatch.setattr(main, "_latest_backtest_result", lambda symbol: {
+        "aggregate": {"out_of_sample": {
+            "total_trades": 30,
+            "expectancy_pct": 1.0,
+            "win_rate_pct": 60.0,
+        }},
+        "alert_eligibility": {"eligible": True, "reasons": []},
+    })
 
 
 def test_scanner_notifies_with_risk_recommended_size(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -75,7 +85,12 @@ def test_scanner_notifies_with_risk_recommended_size(monkeypatch: pytest.MonkeyP
             "approved": True,
             "reason": "Size reduced by fractional-Kelly cap",
             "optimal_size_usd": 1_000,
-            "risk_decision": {"action": "reduced"},
+            "risk_decision": {
+                "action": "reduced",
+                "approved": True,
+                "recommended_size_usd": 1_000,
+                "after": {"heat": {"utilization_pct": 20}},
+            },
         }),
     )
     send_notification = AsyncMock(return_value=True)
@@ -84,16 +99,11 @@ def test_scanner_notifies_with_risk_recommended_size(monkeypatch: pytest.MonkeyP
     result = asyncio.run(main._run_scan())
 
     assert result["notifications_sent"] == 1
-    assert result["signals"] == [{
-        "ticker": "AAPL",
-        "direction": "BUY",
-        "status": "Healthy Trend",
-        "approved": True,
-        "suppressed": False,
-        "action": "reduced",
-        "reason": "Size reduced by fractional-Kelly cap",
-        "recommended_size_usd": 1_000,
-    }]
+    assert result["signals"][0]["ticker"] == "AAPL"
+    assert result["signals"][0]["eligible"] is True
+    assert result["signals"][0]["action"] == "reduced"
+    assert result["signals"][0]["recommended_size_usd"] == 1_000
+    assert result["signals"][0]["score"] >= 50
     assert send_notification.await_args.args[0]["optimal_size_usd"] == 1_000
 
 
@@ -106,7 +116,12 @@ def test_scanner_exposes_rejection_reason_without_notification(monkeypatch: pyte
             "approved": False,
             "reason": "Ticker exposure for MSFT 30.00% exceeds 20.00% limit",
             "optimal_size_usd": 0,
-            "risk_decision": {"action": "rejected"},
+            "risk_decision": {
+                "action": "rejected",
+                "approved": False,
+                "recommended_size_usd": 0,
+                "after": {"heat": {"utilization_pct": 20}},
+            },
         }),
     )
     send_notification = AsyncMock(return_value=True)
@@ -116,7 +131,7 @@ def test_scanner_exposes_rejection_reason_without_notification(monkeypatch: pyte
 
     assert result["notifications_sent"] == 0
     assert result["signals"][0]["approved"] is False
-    assert result["signals"][0]["action"] == "rejected"
+    assert result["signals"][0]["action"] == "ineligible"
     assert result["signals"][0]["recommended_size_usd"] == 0
     assert result["signals"][0]["reason"] == "Ticker exposure for MSFT 30.00% exceeds 20.00% limit"
     send_notification.assert_not_awaited()

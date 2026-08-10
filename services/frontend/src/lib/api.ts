@@ -449,21 +449,74 @@ export const fetchReplyTrades = () =>
   api.get<ReplyTradesResponse>("/notify/reply-trades").then((r) => r.data);
 
 // Phase 1: Scanner
+export interface OpportunityComponent {
+  name: string;
+  label: string;
+  score: number;
+  weight_pct: number;
+  contribution: number;
+  available: boolean;
+  explanation: string;
+}
+
+export interface OpportunityTradePlan {
+  entry_zone: { low: number; high: number };
+  stop_loss: number;
+  targets: Array<{ price: number; exit_pct: number; label: string }>;
+  position_size_usd: number;
+  quantity: number;
+  maximum_planned_loss_usd: number;
+  estimated_cost_bps: number;
+  estimated_costs_usd: number;
+  net_reward_risk: number;
+  scale_in: Array<{ entry_pct: number; instruction: string }>;
+  scale_out: Array<{ exit_pct: number; instruction: string }>;
+  time_stop: string;
+  invalidation_reason: string;
+}
+
+export interface Opportunity {
+  id: string;
+  ticker: string;
+  asset_type: string;
+  direction: string;
+  status: string;
+  score: number;
+  minimum_score: number;
+  eligible: boolean;
+  eligibility_reasons: string[];
+  missing_inputs: string[];
+  components: OpportunityComponent[];
+  trade_plan: OpportunityTradePlan | null;
+  event_warnings: string[];
+  signal_reason: string;
+  evaluated_at: string;
+  user_decision: "pending" | "approved" | "rejected" | "snoozed" | "edited" | "blocked";
+  snoozed_until: string | null;
+}
+
+export interface ScanSignal {
+  ticker: string;
+  direction: string;
+  status: string;
+  approved: boolean;
+  suppressed: boolean;
+  action: string;
+  reason: string;
+  recommended_size_usd: number;
+  score: number;
+  eligible: boolean;
+  opportunity: Opportunity;
+}
+
 export interface ScanResult {
   scanned: number;
   signals_found: number;
   notifications_sent: number;
   errors: number;
-  signals: Array<{
-    ticker: string;
-    direction: string;
-    status: string;
-    approved: boolean;
-    suppressed: boolean;
-    action: string;
-    reason: string;
-    recommended_size_usd: number;
-  }>;
+  quality_rejected: number;
+  quality_rejections: Array<{ ticker: string; reason: string }>;
+  signals: ScanSignal[];
   timestamp: string;
 }
 
@@ -486,6 +539,22 @@ export const fetchScannerStatus = () =>
 
 export const updateScannerConfig = (config: { enabled?: boolean; interval_minutes?: number; market_hours_only?: boolean }) =>
   api.post<{ message: string; enabled: boolean; interval_minutes: number; market_hours_only: boolean }>("/scanner/config", config).then((r) => r.data);
+
+export interface OpportunityActionPayload {
+  action: "approve" | "reject" | "snooze" | "edit";
+  snooze_minutes?: number;
+  edit?: {
+    entry_zone_low?: number;
+    entry_zone_high?: number;
+    stop_loss?: number;
+    targets?: number[];
+    quantity?: number;
+    time_stop?: string;
+  };
+}
+
+export const updateOpportunityAction = (opportunityId: string, payload: OpportunityActionPayload) =>
+  api.post<Opportunity>(`/opportunities/${encodeURIComponent(opportunityId)}/action`, payload).then((r) => r.data);
 
 // Phase 2: Dashboard Summary
 export interface DashboardSummary {

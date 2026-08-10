@@ -40,3 +40,4 @@ def test_backtest_api_returns_and_persists_walk_forward_result(
     assert result["configuration"]["costs"]["fill_delay_bars"] == 1
     assert history[0]["run_id"] == result["run_id"]
     assert loaded == result
+    assert store.latest("BTC") == result
