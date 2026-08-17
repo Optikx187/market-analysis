@@ -137,6 +137,26 @@ export interface Trade {
   risk_regime: string;
   regime_label: string;
   timeframe_agreement: number | null;
+  strategy_name: string | null;
+  strategy_version: string | null;
+  timeframe: string | null;
+  signal_confidence: number | null;
+  planned_entry_price: number | null;
+  planned_exit_price: number | null;
+  planned_quantity: number | null;
+  entry_fees: number;
+  entry_slippage: number;
+  exit_fees_total: number;
+  exit_slippage_total: number;
+  costs_total: number;
+  realized_quantity: number;
+  remaining_quantity: number;
+  gross_pnl: number | null;
+  mfe_usd: number | null;
+  mae_usd: number | null;
+  mfe_pct: number | null;
+  mae_pct: number | null;
+  excursion_status: string;
   status: string;
   pnl: number | null;
   pnl_pct: number | null;
@@ -426,6 +446,17 @@ export interface ManualTradeInput {
   sector?: string;
   market_regime?: MarketRegime;
   timeframe_agreement?: TimeframeAgreement;
+  strategy_name?: string;
+  strategy_version?: string;
+  timeframe?: string;
+  signal_confidence?: number;
+  signal_context?: Record<string, unknown>;
+  execution_context?: Record<string, unknown>;
+  planned_entry_price?: number;
+  planned_exit_price?: number;
+  planned_quantity?: number;
+  entry_fees?: number;
+  entry_slippage?: number;
 }
 
 export const fetchRegime = (ticker: string, assetType: string, direction: string) =>
@@ -442,9 +473,164 @@ export const fetchRegime = (ticker: string, assetType: string, direction: string
 export const logManualTrade = (trade: ManualTradeInput) =>
   api.post<Trade>("/trades/manual", trade).then((r) => r.data);
 
-// Close an open trade
-export const closeTrade = (tradeId: number, exitPrice: number) =>
-  api.post<Trade>(`/trades/${tradeId}/close`, { exit_price: exitPrice }).then((r) => r.data);
+// Close an open trade, or part of it when a quantity is supplied
+export interface CloseTradeInput {
+  quantity?: number;
+  fees?: number;
+  slippage?: number;
+  note?: string;
+}
+
+export const closeTrade = (tradeId: number, exitPrice: number, options: CloseTradeInput = {}) =>
+  api
+    .post<Trade>(`/trades/${tradeId}/close`, { exit_price: exitPrice, ...options })
+    .then((r) => r.data);
+
+// Performance attribution and automated trade journals
+export const ATTRIBUTION_DIMENSIONS = [
+  "strategy",
+  "ticker",
+  "asset_type",
+  "sector",
+  "timeframe",
+  "regime",
+] as const;
+
+export type AttributionDimension = (typeof ATTRIBUTION_DIMENSIONS)[number];
+
+export type AttributionFilters = Partial<Record<AttributionDimension, string>>;
+
+export interface AttributionGroup {
+  key: string;
+  sample_size: number;
+  gross_pnl: number;
+  costs: number;
+  net_pnl: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  avg_net_pnl: number;
+  avg_signal_confidence: number | null;
+  sufficient_sample: boolean;
+  sample_note: string;
+  recommendation: string;
+}
+
+export interface AttributionSummary {
+  sample_size: number;
+  gross_pnl: number;
+  costs: number;
+  net_pnl: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  avg_net_pnl: number;
+  sufficient_sample: boolean;
+  sample_note: string;
+}
+
+export interface AttributionReconciliation {
+  attributed_net_pnl: number;
+  portfolio_total_pnl: number;
+  delta: number;
+  filtered_net_pnl: number;
+  reconciles: boolean;
+}
+
+export interface ConfidenceBand {
+  band: string;
+  sample_size: number;
+  observed_win_rate: number;
+  avg_signal_confidence: number | null;
+  net_pnl: number;
+  sufficient_sample: boolean;
+  sample_note: string;
+  calibration_gap: number | null;
+}
+
+export interface TradeExecution {
+  id: number;
+  trade_id: number;
+  kind: string;
+  price: number;
+  quantity: number;
+  fees: number;
+  slippage: number;
+  entry_costs_allocated: number;
+  gross_pnl: number | null;
+  net_pnl: number | null;
+  note: string | null;
+  executed_at: string | null;
+}
+
+export interface AttributedTrade {
+  id: number;
+  ticker: string;
+  direction: string;
+  strategy: string | null;
+  strategy_version: string | null;
+  asset_type: string | null;
+  sector: string | null;
+  timeframe: string | null;
+  regime: string | null;
+  signal_confidence: number | null;
+  entry_price: number;
+  planned_entry_price: number | null;
+  average_exit_price: number | null;
+  planned_exit_price: number | null;
+  quantity: number;
+  planned_quantity: number | null;
+  gross_pnl: number | null;
+  costs: number;
+  net_pnl: number;
+  net_pnl_pct: number | null;
+  mfe_usd: number | null;
+  mae_usd: number | null;
+  mfe_pct: number | null;
+  mae_pct: number | null;
+  excursion_status: string;
+  exit_count: number;
+  executions: TradeExecution[];
+  opened_at: string | null;
+  closed_at: string | null;
+}
+
+export interface TradeJournalEntry {
+  trade_id: number;
+  ticker: string;
+  strategy_name: string | null;
+  outcome: string;
+  net_pnl: number;
+  summary: string;
+  created_at: string | null;
+  journal: Record<string, unknown> | null;
+}
+
+export interface AttributionResponse {
+  min_sample_size: number;
+  summary: AttributionSummary;
+  reconciliation: AttributionReconciliation;
+  dimensions: Record<AttributionDimension, AttributionGroup[]>;
+  confidence_calibration: ConfidenceBand[];
+  filters: AttributionFilters;
+  filters_available: Record<AttributionDimension, string[]>;
+  trades: AttributedTrade[];
+  journals: TradeJournalEntry[];
+}
+
+export const fetchAttribution = (filters: AttributionFilters = {}) =>
+  api.get<AttributionResponse>("/attribution", { params: filters }).then((r) => r.data);
+
+export const fetchTradeJournal = (tradeId: number) =>
+  api.get<TradeJournalEntry>(`/trades/${tradeId}/journal`).then((r) => r.data);
+
+export const attributionExportUrl = (format: "json" | "csv", filters: AttributionFilters = {}) => {
+  const params = new URLSearchParams({ format });
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value) params.set(key, value);
+  });
+  return `/api/attribution/export?${params.toString()}`;
+};
 
 // Notification channel toggles
 export interface ChannelStatus {

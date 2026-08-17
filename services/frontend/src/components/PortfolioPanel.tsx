@@ -42,6 +42,8 @@ export default function PortfolioPanel() {
   // Close trade
   const [closingTradeId, setClosingTradeId] = useState<number | null>(null);
   const [exitPrice, setExitPrice] = useState("");
+  const [exitQuantity, setExitQuantity] = useState("");
+  const [exitFees, setExitFees] = useState("");
 
   // Tab
   const [activeTab, setActiveTab] = useState<"open" | "closed" | "telegram">("open");
@@ -109,13 +111,24 @@ export default function PortfolioPanel() {
     }
   };
 
+  const resetCloseForm = () => {
+    setClosingTradeId(null);
+    setExitPrice("");
+    setExitQuantity("");
+    setExitFees("");
+  };
+
   const handleCloseTrade = async (tradeId: number) => {
     const price = parseFloat(exitPrice);
     if (isNaN(price) || price <= 0) return;
+    const quantity = parseFloat(exitQuantity);
+    const fees = parseFloat(exitFees);
     try {
-      await closeTrade(tradeId, price);
-      setClosingTradeId(null);
-      setExitPrice("");
+      await closeTrade(tradeId, price, {
+        quantity: isNaN(quantity) || quantity <= 0 ? undefined : quantity,
+        fees: isNaN(fees) || fees < 0 ? undefined : fees,
+      });
+      resetCloseForm();
       loadAll();
     } catch {
       // error handled visually
@@ -356,7 +369,10 @@ export default function PortfolioPanel() {
                   <span className="font-medium text-sm">{t.ticker}</span>
                   <span className={`text-xs ${t.direction === "BUY" ? "text-green-400" : "text-red-400"}`}>{t.direction}</span>
                   <span className="text-xs text-[var(--muted-foreground)]">
-                    {t.quantity} @ ${t.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                    {t.remaining_quantity < t.quantity
+                      ? `${t.remaining_quantity} of ${t.quantity} left`
+                      : t.quantity}{" "}
+                    @ ${t.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                   </span>
                   <span className="text-xs text-[var(--muted-foreground)]">
                     = ${(t.quantity * t.entry_price).toLocaleString(undefined, { minimumFractionDigits: 2 })}
@@ -377,8 +393,28 @@ export default function PortfolioPanel() {
                       min="0"
                       step="0.01"
                     />
+                    <input
+                      type="number"
+                      placeholder={`Qty (max ${t.remaining_quantity})`}
+                      value={exitQuantity}
+                      onChange={(e) => setExitQuantity(e.target.value)}
+                      className="w-28 rounded border bg-[var(--input)] px-2 py-1 text-xs"
+                      min="0"
+                      max={t.remaining_quantity}
+                      step="0.01"
+                      title="Leave empty to close the whole remaining position"
+                    />
+                    <input
+                      type="number"
+                      placeholder="Fees"
+                      value={exitFees}
+                      onChange={(e) => setExitFees(e.target.value)}
+                      className="w-20 rounded border bg-[var(--input)] px-2 py-1 text-xs"
+                      min="0"
+                      step="0.01"
+                    />
                     <button onClick={() => handleCloseTrade(t.id)} className="rounded bg-red-600 text-white px-2 py-1 text-xs">Close</button>
-                    <button onClick={() => { setClosingTradeId(null); setExitPrice(""); }} className="text-xs text-[var(--muted-foreground)]">X</button>
+                    <button onClick={resetCloseForm} className="text-xs text-[var(--muted-foreground)]">X</button>
                   </div>
                 ) : (
                   <button

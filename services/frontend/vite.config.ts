@@ -29,6 +29,7 @@ export default defineConfig({
       "/api/scanner": "http://localhost:8001",
       "/api/opportunities": "http://localhost:8001",
       "/api/backtest": "http://localhost:8001",
+      "/api/attribution": "http://localhost:8002",
       "/api/portfolio": "http://localhost:8002",
       "/api/dashboard-summary": "http://localhost:8002",
       "/api/auth": "http://localhost:8002",

@@ -14,6 +14,7 @@ from typing import Optional
 import httpx
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,7 +23,9 @@ from app.config import settings
 from app.database import get_db, init_db, async_session
 from app.models import (
     Trade, TradeStatus, SignalDirection, Portfolio, EquitySnapshot, AlertLog, CredentialSecret, User,
+    TradeExecution, TradeJournal, ExecutionKind,
 )
+from app import attribution as attribution_math
 from app.auth import create_token, hash_password, verify_password, get_current_user
 from app.risk_engine import (
     ClosedTradeResult,
@@ -58,6 +61,26 @@ class TradeResponse(BaseModel):
     risk_regime: str
     regime_label: str
     timeframe_agreement: Optional[float]
+    strategy_name: Optional[str]
+    strategy_version: Optional[str]
+    timeframe: Optional[str]
+    signal_confidence: Optional[float]
+    planned_entry_price: Optional[float]
+    planned_exit_price: Optional[float]
+    planned_quantity: Optional[float]
+    entry_fees: float
+    entry_slippage: float
+    exit_fees_total: float
+    exit_slippage_total: float
+    costs_total: float
+    realized_quantity: float
+    remaining_quantity: float
+    gross_pnl: Optional[float]
+    mfe_usd: Optional[float]
+    mae_usd: Optional[float]
+    mfe_pct: Optional[float]
+    mae_pct: Optional[float]
+    excursion_status: str
     status: str
     pnl: Optional[float]
     pnl_pct: Optional[float]
@@ -655,6 +678,17 @@ class ManualTradeInput(BaseModel):
     sector: str = "Unclassified"
     market_regime: dict[str, object] = Field(default_factory=dict)
     timeframe_agreement: dict[str, object] = Field(default_factory=dict)
+    strategy_name: Optional[str] = None
+    strategy_version: Optional[str] = None
+    timeframe: Optional[str] = None
+    signal_confidence: Optional[float] = None
+    signal_context: dict[str, object] = Field(default_factory=dict)
+    execution_context: dict[str, object] = Field(default_factory=dict)
+    planned_entry_price: Optional[float] = None
+    planned_exit_price: Optional[float] = None
+    planned_quantity: Optional[float] = None
+    entry_fees: float = 0.0
+    entry_slippage: float = 0.0
 
 
 @app.post("/api/trades/manual", response_model=TradeResponse)
@@ -694,6 +728,18 @@ async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends
         risk_regime=str(regime.get("risk", "unknown")),
         regime_label=str(regime.get("label", "Unknown")),
         timeframe_agreement=float(timeframe.get("score", 0.0)) if timeframe else None,
+        strategy_name=(payload.strategy_name or "").strip() or None,
+        strategy_version=(payload.strategy_version or "").strip() or None,
+        timeframe=(payload.timeframe or "").strip() or None,
+        signal_confidence=payload.signal_confidence,
+        signal_context_json=json.dumps(payload.signal_context) if payload.signal_context else None,
+        execution_context_json=json.dumps(payload.execution_context) if payload.execution_context else None,
+        planned_entry_price=payload.planned_entry_price,
+        planned_exit_price=payload.planned_exit_price,
+        planned_quantity=payload.planned_quantity,
+        entry_fees=max(0.0, payload.entry_fees),
+        entry_slippage=max(0.0, payload.entry_slippage),
+        realized_quantity=0.0,
         status=TradeStatus.OPEN,
     )
     db.add(trade)
@@ -703,16 +749,32 @@ async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends
     portfolio.balance -= position_cost
     await db.commit()
     await db.refresh(trade)
+    db.add(TradeExecution(
+        trade_id=trade.id,
+        kind=ExecutionKind.ENTRY,
+        price=trade.entry_price,
+        quantity=trade.quantity,
+        fees=trade.entry_fees,
+        slippage=trade.entry_slippage,
+    ))
+    await db.commit()
     return trade
 
 
 class CloseTradeInput(BaseModel):
     exit_price: float
+    quantity: Optional[float] = None
+    fees: float = 0.0
+    slippage: float = 0.0
+    note: Optional[str] = None
 
 
 @app.post("/api/trades/{trade_id}/close", response_model=TradeResponse)
 async def close_trade(trade_id: int, payload: CloseTradeInput, db: AsyncSession = Depends(get_db)):
-    """Close an open trade at the given exit price, calculating realized P&L."""
+    """Close all or part of an open trade, calculating net realized P&L after costs.
+
+    Omitting ``quantity`` closes the entire remaining position.
+    """
     result = await db.execute(select(Trade).where(Trade.id == trade_id))
     trade = result.scalar_one_or_none()
     if trade is None:
@@ -721,35 +783,84 @@ async def close_trade(trade_id: int, payload: CloseTradeInput, db: AsyncSession 
         raise HTTPException(400, "Trade is already closed")
     if payload.exit_price <= 0:
         raise HTTPException(400, "Exit price must be positive")
+    if payload.fees < 0 or payload.slippage < 0:
+        raise HTTPException(400, "Fees and slippage cannot be negative")
 
-    trade.exit_price = payload.exit_price
-    trade.status = TradeStatus.CLOSED
-    trade.closed_at = datetime.datetime.now(datetime.timezone.utc)
+    remaining = trade.quantity - (trade.realized_quantity or 0.0)
+    if payload.quantity is not None:
+        if payload.quantity <= 0:
+            raise HTTPException(400, "Exit quantity must be positive")
+        if payload.quantity > remaining + 1e-9:
+            raise HTTPException(400, f"Exit quantity exceeds the remaining {remaining:g} units")
+        close_quantity = min(payload.quantity, remaining)
+    else:
+        close_quantity = remaining
+    is_final_exit = abs(remaining - close_quantity) <= 1e-9
 
     direction = trade.direction.value if isinstance(trade.direction, SignalDirection) else str(trade.direction)
-    trade.pnl = calculate_trade_pnl(
+    entry_costs = (trade.entry_fees or 0.0) + (trade.entry_slippage or 0.0)
+    costs = attribution_math.ExitCosts(
+        entry_costs_allocated=attribution_math.allocate_entry_costs(
+            entry_costs,
+            trade.entry_costs_allocated or 0.0,
+            close_quantity,
+            trade.quantity,
+            is_final_exit,
+        ),
+        exit_fees=payload.fees,
+        exit_slippage=payload.slippage,
+    )
+    gross_pnl, net_pnl = attribution_math.net_exit_pnl(
         direction,
         trade.entry_price,
         payload.exit_price,
-        trade.quantity,
+        close_quantity,
+        costs,
     )
+
+    trade.exit_price = payload.exit_price
+    trade.realized_quantity = (trade.realized_quantity or 0.0) + close_quantity
+    trade.entry_costs_allocated = (trade.entry_costs_allocated or 0.0) + costs.entry_costs_allocated
+    trade.exit_fees_total = (trade.exit_fees_total or 0.0) + payload.fees
+    trade.exit_slippage_total = (trade.exit_slippage_total or 0.0) + payload.slippage
+    trade.costs_total = (trade.costs_total or 0.0) + costs.total
+    trade.gross_pnl = (trade.gross_pnl or 0.0) + gross_pnl
+    trade.pnl = (trade.pnl or 0.0) + net_pnl
     trade.pnl_pct = round((trade.pnl / (trade.entry_price * trade.quantity)) * 100, 2)
+    db.add(TradeExecution(
+        trade_id=trade.id,
+        kind=ExecutionKind.EXIT,
+        price=payload.exit_price,
+        quantity=close_quantity,
+        fees=payload.fees,
+        slippage=payload.slippage,
+        entry_costs_allocated=costs.entry_costs_allocated,
+        gross_pnl=gross_pnl,
+        net_pnl=net_pnl,
+        note=payload.note,
+    ))
+    if is_final_exit:
+        trade.status = TradeStatus.CLOSED
+        trade.closed_at = datetime.datetime.now(datetime.timezone.utc)
 
     portfolio = await get_or_create_portfolio(db)
-    reserved_capital = trade.entry_price * trade.quantity
-    portfolio.balance += reserved_capital + trade.pnl
-    portfolio.total_pnl += trade.pnl
+    released_capital = trade.entry_price * close_quantity
+    portfolio.balance += released_capital + net_pnl
+    portfolio.total_pnl += net_pnl
     remaining_result = await db.execute(select(Trade).where(Trade.status == TradeStatus.OPEN))
     remaining_locked = sum(
-        position.entry_price * position.quantity
+        position.entry_price * (position.quantity - (position.realized_quantity or 0.0))
         for position in remaining_result.scalars().all()
         if position.id != trade.id
     )
+    if not is_final_exit:
+        remaining_locked += trade.entry_price * (trade.quantity - trade.realized_quantity)
     portfolio.equity = portfolio.balance + remaining_locked
-    if trade.pnl >= 0:
-        portfolio.win_count += 1
-    else:
-        portfolio.loss_count += 1
+    if is_final_exit:
+        if trade.pnl >= 0:
+            portfolio.win_count += 1
+        else:
+            portfolio.loss_count += 1
     if portfolio.equity > portfolio.peak_equity:
         portfolio.peak_equity = portfolio.equity
     drawdown = ((portfolio.peak_equity - portfolio.equity) / portfolio.peak_equity * 100) if portfolio.peak_equity > 0 else 0
@@ -759,7 +870,330 @@ async def close_trade(trade_id: int, payload: CloseTradeInput, db: AsyncSession 
 
     await db.commit()
     await db.refresh(trade)
+    if is_final_exit:
+        await _finalize_closed_trade(db, trade)
+        await db.refresh(trade)
     return trade
+
+
+async def _fetch_candles(ticker: str, interval: str) -> list[dict[str, object]]:
+    """Fetch candles for excursion math, returning an empty list when unavailable."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{settings.DATA_INGESTION_URL}/api/candles/{ticker}",
+                params={"interval": interval},
+                timeout=8,
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        logger.warning("Candle data unavailable for %s: %s", ticker, exc)
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [row for row in payload if isinstance(row, dict)]
+
+
+def _json_field(raw: Optional[str]) -> Optional[dict[str, object]]:
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _trade_regime(trade: Trade) -> Optional[str]:
+    trend = attribution_math.normalize_label(trade.market_regime)
+    volatility = attribution_math.normalize_label(trade.volatility_regime)
+    if trend == attribution_math.UNKNOWN and volatility == attribution_math.UNKNOWN:
+        return None
+    return f"{trend} / {volatility}"
+
+
+def _execution_dict(execution: TradeExecution) -> dict[str, object]:
+    kind = execution.kind.value if isinstance(execution.kind, ExecutionKind) else str(execution.kind)
+    return {
+        "id": execution.id,
+        "trade_id": execution.trade_id,
+        "kind": kind,
+        "price": execution.price,
+        "quantity": execution.quantity,
+        "fees": execution.fees,
+        "slippage": execution.slippage,
+        "entry_costs_allocated": round(execution.entry_costs_allocated or 0.0, 4),
+        "gross_pnl": execution.gross_pnl,
+        "net_pnl": execution.net_pnl,
+        "note": execution.note,
+        "executed_at": execution.executed_at.isoformat() if execution.executed_at else None,
+    }
+
+
+def _trade_attribution_dict(trade: Trade, executions: list[dict[str, object]]) -> dict[str, object]:
+    direction = trade.direction.value if isinstance(trade.direction, SignalDirection) else str(trade.direction)
+    exits = [row for row in executions if row["kind"] == "EXIT"]
+    exit_quantity = sum(float(row["quantity"]) for row in exits)
+    average_exit = (
+        sum(float(row["price"]) * float(row["quantity"]) for row in exits) / exit_quantity
+        if exit_quantity > 0
+        else trade.exit_price
+    )
+    net_pnl = trade.pnl or 0.0
+    return {
+        "id": trade.id,
+        "ticker": trade.ticker,
+        "direction": direction,
+        "strategy": trade.strategy_name,
+        "strategy_version": trade.strategy_version,
+        "asset_type": trade.asset_type,
+        "sector": trade.sector,
+        "timeframe": trade.timeframe,
+        "regime": _trade_regime(trade),
+        "regime_label": trade.regime_label,
+        "signal_confidence": trade.signal_confidence,
+        "signal_context": _json_field(trade.signal_context_json),
+        "execution_context": _json_field(trade.execution_context_json),
+        "entry_price": trade.entry_price,
+        "planned_entry_price": trade.planned_entry_price,
+        "average_exit_price": round(average_exit, 6) if average_exit is not None else None,
+        "planned_exit_price": trade.planned_exit_price,
+        "quantity": trade.quantity,
+        "planned_quantity": trade.planned_quantity,
+        "stop_loss": trade.stop_loss,
+        "target_price": trade.target_price,
+        "gross_pnl": trade.gross_pnl if trade.gross_pnl is not None else net_pnl,
+        "costs": trade.costs_total or 0.0,
+        "entry_fees": trade.entry_fees or 0.0,
+        "exit_fees": trade.exit_fees_total or 0.0,
+        "slippage": (trade.entry_slippage or 0.0) + (trade.exit_slippage_total or 0.0),
+        "net_pnl": net_pnl,
+        "net_pnl_pct": trade.pnl_pct,
+        "mfe_usd": trade.mfe_usd,
+        "mae_usd": trade.mae_usd,
+        "mfe_pct": trade.mfe_pct,
+        "mae_pct": trade.mae_pct,
+        "excursion_status": trade.excursion_status,
+        "exit_count": len(exits),
+        "executions": executions,
+        "opened_at": trade.opened_at.isoformat() if trade.opened_at else None,
+        "closed_at": trade.closed_at.isoformat() if trade.closed_at else None,
+    }
+
+
+async def _trade_executions(db: AsyncSession, trade_ids: list[int]) -> dict[int, list[dict[str, object]]]:
+    if not trade_ids:
+        return {}
+    result = await db.execute(
+        select(TradeExecution)
+        .where(TradeExecution.trade_id.in_(trade_ids))
+        .order_by(TradeExecution.id)
+    )
+    grouped: dict[int, list[dict[str, object]]] = {}
+    for execution in result.scalars().all():
+        grouped.setdefault(execution.trade_id, []).append(_execution_dict(execution))
+    return grouped
+
+
+def _journal_summary(journal: dict[str, object]) -> str:
+    setup = journal["setup"]
+    result = journal["result"]
+    return (
+        f"{setup['direction']} {journal['ticker']} · {setup['strategy']} {setup['strategy_version']} · "
+        f"{setup['regime']} regime · {result['outcome']} "
+        f"net ${result['net_pnl']:,.2f} after ${result['costs']:,.2f} costs "
+        f"across {result['exit_count']} exit(s)"
+    )
+
+
+async def _finalize_closed_trade(db: AsyncSession, trade: Trade) -> dict[str, object]:
+    """Record excursions and one automated journal entry for a fully closed trade."""
+    executions = (await _trade_executions(db, [trade.id])).get(trade.id, [])
+    candles = attribution_math.select_window_candles(
+        await _fetch_candles(trade.ticker, settings.ATTRIBUTION_CANDLE_INTERVAL),
+        trade.opened_at.isoformat() if trade.opened_at else None,
+        trade.closed_at.isoformat() if trade.closed_at else None,
+    )
+    direction = trade.direction.value if isinstance(trade.direction, SignalDirection) else str(trade.direction)
+    excursions = attribution_math.calculate_excursions(
+        direction, trade.entry_price, trade.quantity, candles,
+    )
+    if excursions:
+        trade.mfe_usd = excursions["mfe_usd"]
+        trade.mae_usd = excursions["mae_usd"]
+        trade.mfe_pct = excursions["mfe_pct"]
+        trade.mae_pct = excursions["mae_pct"]
+        trade.excursion_status = "calculated"
+    else:
+        trade.excursion_status = "unavailable"
+
+    journal = attribution_math.build_journal(
+        _trade_attribution_dict(trade, executions), executions, excursions,
+    )
+    existing = await db.execute(select(TradeJournal).where(TradeJournal.trade_id == trade.id))
+    if existing.scalar_one_or_none() is None:
+        db.add(TradeJournal(
+            trade_id=trade.id,
+            ticker=trade.ticker,
+            strategy_name=trade.strategy_name,
+            outcome=str(journal["result"]["outcome"]),
+            net_pnl=float(journal["result"]["net_pnl"]),
+            summary=_journal_summary(journal),
+            journal_json=json.dumps(journal),
+        ))
+    await db.commit()
+    return journal
+
+
+class AttributionFilters(BaseModel):
+    strategy: Optional[str] = None
+    ticker: Optional[str] = None
+    asset_type: Optional[str] = None
+    sector: Optional[str] = None
+    timeframe: Optional[str] = None
+    regime: Optional[str] = None
+
+    def matches(self, trade: dict[str, object]) -> bool:
+        for dimension in attribution_math.DIMENSIONS:
+            wanted = getattr(self, dimension)
+            if not wanted:
+                continue
+            actual = attribution_math.normalize_label(trade.get(dimension))
+            if actual.lower() != wanted.strip().lower():
+                return False
+        return True
+
+
+async def _attribution_payload(
+    db: AsyncSession,
+    filters: AttributionFilters,
+) -> dict[str, object]:
+    portfolio = await get_or_create_portfolio(db)
+    result = await db.execute(
+        select(Trade)
+        .where(Trade.status == TradeStatus.CLOSED)
+        .order_by(desc(Trade.closed_at))
+    )
+    closed = list(result.scalars().all())
+    executions = await _trade_executions(db, [trade.id for trade in closed])
+    all_trades = [
+        _trade_attribution_dict(trade, executions.get(trade.id, []))
+        for trade in closed
+    ]
+    journal_result = await db.execute(
+        select(TradeJournal).order_by(desc(TradeJournal.created_at))
+    )
+    journals_by_trade = {
+        row.trade_id: {
+            "trade_id": row.trade_id,
+            "ticker": row.ticker,
+            "strategy_name": row.strategy_name,
+            "outcome": row.outcome,
+            "net_pnl": row.net_pnl,
+            "summary": row.summary,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "journal": _json_field(row.journal_json),
+        }
+        for row in journal_result.scalars().all()
+    }
+    for trade in all_trades:
+        journal = journals_by_trade.get(int(trade["id"]))
+        detail = journal.get("journal") if journal else None
+        trade["rule_adherence"] = detail.get("rule_adherence") if isinstance(detail, dict) else None
+    filtered = [trade for trade in all_trades if filters.matches(trade)]
+    payload = attribution_math.build_attribution(
+        filtered,
+        portfolio.total_pnl or 0.0,
+        sum(float(trade["net_pnl"] or 0.0) for trade in all_trades),
+        settings.ATTRIBUTION_MIN_SAMPLE_SIZE,
+    )
+    payload["filters"] = filters.model_dump()
+    payload["filters_available"] = {
+        dimension: sorted({
+            attribution_math.normalize_label(trade.get(dimension)) for trade in all_trades
+        })
+        for dimension in attribution_math.DIMENSIONS
+    }
+    payload["trades"] = filtered
+    payload["journals"] = [
+        journals_by_trade[int(trade["id"])]
+        for trade in filtered
+        if int(trade["id"]) in journals_by_trade
+    ]
+    return payload
+
+
+@app.get("/api/attribution")
+async def performance_attribution(
+    strategy: Optional[str] = None,
+    ticker: Optional[str] = None,
+    asset_type: Optional[str] = None,
+    sector: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    regime: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Performance attribution for closed trades, grouped by every dimension."""
+    filters = AttributionFilters(
+        strategy=strategy, ticker=ticker, asset_type=asset_type,
+        sector=sector, timeframe=timeframe, regime=regime,
+    )
+    return await _attribution_payload(db, filters)
+
+
+@app.get("/api/attribution/export")
+async def export_attribution(
+    format: str = "json",
+    strategy: Optional[str] = None,
+    ticker: Optional[str] = None,
+    asset_type: Optional[str] = None,
+    sector: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    regime: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Export the filtered attribution set as JSON or CSV."""
+    export_format = format.lower()
+    if export_format not in ("json", "csv"):
+        raise HTTPException(400, "Format must be json or csv")
+    filters = AttributionFilters(
+        strategy=strategy, ticker=ticker, asset_type=asset_type,
+        sector=sector, timeframe=timeframe, regime=regime,
+    )
+    payload = await _attribution_payload(db, filters)
+    if export_format == "json":
+        return payload
+    csv_body = attribution_math.attribution_csv(payload["trades"])
+    return PlainTextResponse(
+        csv_body,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="attribution.csv"'},
+    )
+
+
+@app.get("/api/trades/{trade_id}/journal")
+async def trade_journal(trade_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(TradeJournal).where(TradeJournal.trade_id == trade_id))
+    row = result.scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, "No journal entry for this trade yet")
+    return {
+        "trade_id": row.trade_id,
+        "ticker": row.ticker,
+        "strategy_name": row.strategy_name,
+        "outcome": row.outcome,
+        "net_pnl": row.net_pnl,
+        "summary": row.summary,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "journal": _json_field(row.journal_json),
+    }
+
+
+@app.get("/api/trades/{trade_id}/executions")
+async def trade_executions(trade_id: int, db: AsyncSession = Depends(get_db)):
+    executions = (await _trade_executions(db, [trade_id])).get(trade_id, [])
+    return {"trade_id": trade_id, "executions": executions}
 
 
 @app.get("/api/alerts", response_model=list[AlertLogResponse])

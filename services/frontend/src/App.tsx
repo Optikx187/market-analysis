@@ -10,11 +10,20 @@ import DashboardWidget from "@/components/DashboardWidget";
 import ScannerPanel from "@/components/ScannerPanel";
 import PriceAlertsPanel from "@/components/PriceAlertsPanel";
 import HistoricalChart from "@/components/HistoricalChart";
+import AttributionPanel from "@/components/AttributionPanel";
 import { fetchOnboardingStatus } from "@/lib/api";
 
 const APP_VERSION = "3.0.0";
 
-type Tab = "alerts" | "trades" | "scanner" | "price-alerts" | "chart" | "settings" | "help";
+type Tab =
+  | "alerts"
+  | "trades"
+  | "performance"
+  | "scanner"
+  | "price-alerts"
+  | "chart"
+  | "settings"
+  | "help";
 
 function App() {
   const [tab, setTab] = useState<Tab>("alerts");
@@ -64,6 +73,7 @@ function App() {
   const tabLabels: Record<Tab, string> = {
     alerts: "Alerts",
     trades: "Trades",
+    performance: "Performance",
     scanner: "Scanner",
     "price-alerts": "Price Alerts",
     chart: "Chart",
@@ -127,6 +137,7 @@ function App() {
 
         {tab === "alerts" && <AlertsPanel />}
         {tab === "trades" && <TradesPanel />}
+        {tab === "performance" && <AttributionPanel />}
         {tab === "scanner" && <ScannerPanel />}
         {tab === "price-alerts" && <PriceAlertsPanel />}
         {tab === "chart" && <HistoricalChart ticker={selectedChartTicker} />}

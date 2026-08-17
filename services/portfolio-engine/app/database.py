@@ -38,6 +38,41 @@ def _migrate_existing_tables(conn: Connection) -> None:
         for name, definition in regime_columns.items():
             if name not in columns:
                 conn.execute(text(f"ALTER TABLE trades ADD COLUMN {name} {definition}"))
+        attribution_columns = {
+            "strategy_name": "VARCHAR(100)",
+            "strategy_version": "VARCHAR(50)",
+            "timeframe": "VARCHAR(20)",
+            "signal_confidence": "FLOAT",
+            "signal_context_json": "TEXT",
+            "execution_context_json": "TEXT",
+            "planned_entry_price": "FLOAT",
+            "planned_exit_price": "FLOAT",
+            "planned_quantity": "FLOAT",
+            "entry_fees": "FLOAT NOT NULL DEFAULT 0",
+            "entry_slippage": "FLOAT NOT NULL DEFAULT 0",
+            "entry_costs_allocated": "FLOAT NOT NULL DEFAULT 0",
+            "exit_fees_total": "FLOAT NOT NULL DEFAULT 0",
+            "exit_slippage_total": "FLOAT NOT NULL DEFAULT 0",
+            "costs_total": "FLOAT NOT NULL DEFAULT 0",
+            "realized_quantity": "FLOAT NOT NULL DEFAULT 0",
+            "gross_pnl": "FLOAT",
+            "mfe_usd": "FLOAT",
+            "mae_usd": "FLOAT",
+            "mfe_pct": "FLOAT",
+            "mae_pct": "FLOAT",
+            "excursion_status": "VARCHAR(20) NOT NULL DEFAULT 'not_calculated'",
+        }
+        for name, definition in attribution_columns.items():
+            if name not in columns:
+                conn.execute(text(f"ALTER TABLE trades ADD COLUMN {name} {definition}"))
+        if {"quantity", "status", "pnl"}.issubset(columns):
+            conn.execute(text(
+                "UPDATE trades SET realized_quantity = quantity "
+                "WHERE status = 'CLOSED' AND realized_quantity = 0"
+            ))
+            conn.execute(text(
+                "UPDATE trades SET gross_pnl = pnl WHERE gross_pnl IS NULL AND pnl IS NOT NULL"
+            ))
     if "alert_logs" in tables:
         columns = {column["name"] for column in inspector.get_columns("alert_logs")}
         if "approved" not in columns:
