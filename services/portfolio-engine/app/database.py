@@ -27,12 +27,34 @@ def _migrate_existing_tables(conn: Connection) -> None:
             conn.execute(text("ALTER TABLE trades ADD COLUMN asset_type VARCHAR(20) NOT NULL DEFAULT 'stock'"))
         if "sector" not in columns:
             conn.execute(text("ALTER TABLE trades ADD COLUMN sector VARCHAR(100) NOT NULL DEFAULT 'Unclassified'"))
+        regime_columns = {
+            "market_regime": "VARCHAR(20) NOT NULL DEFAULT 'unknown'",
+            "volatility_regime": "VARCHAR(20) NOT NULL DEFAULT 'unknown'",
+            "breadth_regime": "VARCHAR(20) NOT NULL DEFAULT 'unknown'",
+            "risk_regime": "VARCHAR(20) NOT NULL DEFAULT 'unknown'",
+            "regime_label": "VARCHAR(200) NOT NULL DEFAULT 'Unknown'",
+            "timeframe_agreement": "FLOAT",
+        }
+        for name, definition in regime_columns.items():
+            if name not in columns:
+                conn.execute(text(f"ALTER TABLE trades ADD COLUMN {name} {definition}"))
     if "alert_logs" in tables:
         columns = {column["name"] for column in inspector.get_columns("alert_logs")}
         if "approved" not in columns:
             conn.execute(text("ALTER TABLE alert_logs ADD COLUMN approved BOOLEAN NOT NULL DEFAULT 1"))
         if "risk_decision_json" not in columns:
             conn.execute(text("ALTER TABLE alert_logs ADD COLUMN risk_decision_json TEXT"))
+        regime_columns = {
+            "market_regime": "VARCHAR(20) NOT NULL DEFAULT 'unknown'",
+            "volatility_regime": "VARCHAR(20) NOT NULL DEFAULT 'unknown'",
+            "breadth_regime": "VARCHAR(20) NOT NULL DEFAULT 'unknown'",
+            "risk_regime": "VARCHAR(20) NOT NULL DEFAULT 'unknown'",
+            "regime_label": "VARCHAR(200) NOT NULL DEFAULT 'Unknown'",
+            "timeframe_agreement": "FLOAT",
+        }
+        for name, definition in regime_columns.items():
+            if name not in columns:
+                conn.execute(text(f"ALTER TABLE alert_logs ADD COLUMN {name} {definition}"))
 
 
 async def init_db():

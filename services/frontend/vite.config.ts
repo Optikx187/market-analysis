@@ -24,6 +24,7 @@ export default defineConfig({
       "/api/earnings": "http://localhost:8000",
       "/api/analyze": "http://localhost:8001",
       "/api/risk-profile": "http://localhost:8001",
+      "/api/regime": "http://localhost:8001",
       "/api/scan-all": "http://localhost:8001",
       "/api/scanner": "http://localhost:8001",
       "/api/opportunities": "http://localhost:8001",

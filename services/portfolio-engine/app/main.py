@@ -14,7 +14,7 @@ from typing import Optional
 import httpx
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,6 +52,12 @@ class TradeResponse(BaseModel):
     trailing_stop: Optional[float]
     asset_type: str
     sector: str
+    market_regime: str
+    volatility_regime: str
+    breadth_regime: str
+    risk_regime: str
+    regime_label: str
+    timeframe_agreement: Optional[float]
     status: str
     pnl: Optional[float]
     pnl_pct: Optional[float]
@@ -91,6 +97,9 @@ class SignalInput(BaseModel):
     volatility_scalar: float
     asset_type: str = "stock"
     sector: str = "Unclassified"
+    market_regime: dict[str, object] = Field(default_factory=dict)
+    timeframe_agreement: dict[str, object] = Field(default_factory=dict)
+    regime_controls: dict[str, object] = Field(default_factory=dict)
 
 
 class SignalDecision(BaseModel):
@@ -123,6 +132,12 @@ class AlertLogResponse(BaseModel):
     approved: bool
     message: Optional[str]
     risk_decision_json: Optional[str]
+    market_regime: str
+    volatility_regime: str
+    breadth_regime: str
+    risk_regime: str
+    regime_label: str
+    timeframe_agreement: Optional[float]
     created_at: Optional[datetime.datetime]
     model_config = {"from_attributes": True}
 
@@ -322,6 +337,8 @@ async def execute_paper_trade(
     db: AsyncSession, ticker: str, direction: SignalDirection,
     entry_price: float, stop_loss: float, target_price: float,
     quantity_override: Optional[float] = None,
+    market_regime: Optional[dict[str, object]] = None,
+    timeframe_agreement: Optional[dict[str, object]] = None,
 ) -> Optional[Trade]:
     portfolio = await get_or_create_portfolio(db)
     risk_per_share = abs(entry_price - stop_loss)
@@ -335,9 +352,17 @@ async def execute_paper_trade(
         cost = quantity * entry_price
     if quantity <= 0 or cost <= 0:
         return None
+    regime = market_regime or {}
+    timeframe = timeframe_agreement or {}
     trade = Trade(
         ticker=ticker, direction=direction, entry_price=entry_price,
         quantity=quantity, stop_loss=stop_loss, target_price=target_price,
+        market_regime=str(regime.get("trend", "unknown")),
+        volatility_regime=str(regime.get("volatility", "unknown")),
+        breadth_regime=str(regime.get("breadth", "unknown")),
+        risk_regime=str(regime.get("risk", "unknown")),
+        regime_label=str(regime.get("label", "Unknown")),
+        timeframe_agreement=float(timeframe.get("score", 0.0)) if timeframe else None,
         status=TradeStatus.OPEN,
     )
     db.add(trade)
@@ -433,6 +458,8 @@ async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)
     )
     message = " | ".join(reason_parts)
 
+    regime = signal.market_regime
+    timeframe = signal.timeframe_agreement
     alert = AlertLog(
         ticker=ticker,
         direction=signal.direction or "NONE",
@@ -446,6 +473,12 @@ async def process_signal(signal: SignalInput, db: AsyncSession = Depends(get_db)
         approved=approved,
         message=message,
         risk_decision_json=json.dumps(risk_decision),
+        market_regime=str(regime.get("trend", "unknown")),
+        volatility_regime=str(regime.get("volatility", "unknown")),
+        breadth_regime=str(regime.get("breadth", "unknown")),
+        risk_regime=str(regime.get("risk", "unknown")),
+        regime_label=str(regime.get("label", "Unknown")),
+        timeframe_agreement=float(timeframe.get("score", 0.0)) if timeframe else None,
     )
     db.add(alert)
     await db.commit()
@@ -620,6 +653,8 @@ class ManualTradeInput(BaseModel):
     target_price: Optional[float] = None
     asset_type: str = "stock"
     sector: str = "Unclassified"
+    market_regime: dict[str, object] = Field(default_factory=dict)
+    timeframe_agreement: dict[str, object] = Field(default_factory=dict)
 
 
 @app.post("/api/trades/manual", response_model=TradeResponse)
@@ -642,6 +677,8 @@ async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends
         raise HTTPException(400, "A long-position stop must be below the entry price")
     if direction == SignalDirection.SELL and stop <= payload.entry_price:
         raise HTTPException(400, "A short-position stop must be above the entry price")
+    regime = payload.market_regime
+    timeframe = payload.timeframe_agreement
     trade = Trade(
         ticker=payload.ticker.strip().upper(),
         direction=direction,
@@ -651,6 +688,12 @@ async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends
         target_price=target,
         asset_type="crypto" if payload.asset_type.lower() == "crypto" else "stock",
         sector=payload.sector.strip() or "Unclassified",
+        market_regime=str(regime.get("trend", "unknown")),
+        volatility_regime=str(regime.get("volatility", "unknown")),
+        breadth_regime=str(regime.get("breadth", "unknown")),
+        risk_regime=str(regime.get("risk", "unknown")),
+        regime_label=str(regime.get("label", "Unknown")),
+        timeframe_agreement=float(timeframe.get("score", 0.0)) if timeframe else None,
         status=TradeStatus.OPEN,
     )
     db.add(trade)

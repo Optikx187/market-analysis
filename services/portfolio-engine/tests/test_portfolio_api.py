@@ -201,3 +201,46 @@ def test_process_signal_persists_reduced_and_rejected_risk_decisions(client: Tes
     assert persisted["AAPL"]["action"] == "reduced"
     assert persisted["MSFT"]["action"] == "rejected"
     assert persisted["OLD"]["recommended_size_usd"] == 0
+
+
+def test_trade_and_signal_persist_regime_traceability(client: TestClient) -> None:
+    payload = _trade("AAPL", "BUY", 95, "stock", "Technology")
+    payload["market_regime"] = {
+        "trend": "bull",
+        "volatility": "low",
+        "breadth": "strong",
+        "risk": "risk_on",
+        "label": "Bull · Low Vol · Strong Breadth · Risk On",
+    }
+    payload["timeframe_agreement"] = {"score": 80}
+
+    trade = client.post("/api/trades/manual", json=payload)
+
+    assert trade.status_code == 200
+    assert trade.json()["market_regime"] == "bull"
+    assert trade.json()["risk_regime"] == "risk_on"
+    assert trade.json()["timeframe_agreement"] == 80
+    persisted_trade = client.get("/api/trades").json()[0]
+    assert persisted_trade["regime_label"] == "Bull · Low Vol · Strong Breadth · Risk On"
+
+    signal_payload = _signal("MSFT", 1_000, 5)
+    signal_payload["market_regime"] = payload["market_regime"]
+    signal_payload["timeframe_agreement"] = {"score": 75}
+    decision = client.post("/api/process-signal", json=signal_payload)
+    assert decision.status_code == 200
+    alerts = client.get("/api/alerts").json()
+    assert alerts[0]["market_regime"] == "bull"
+    assert alerts[0]["breadth_regime"] == "strong"
+    assert alerts[0]["timeframe_agreement"] == 75
+
+
+def test_missing_regime_metadata_uses_compatible_unknown_defaults(client: TestClient) -> None:
+    trade = client.post(
+        "/api/trades/manual",
+        json=_trade("BTC", "BUY", 95, "crypto", "Crypto"),
+    )
+
+    assert trade.status_code == 200
+    assert trade.json()["market_regime"] == "unknown"
+    assert trade.json()["regime_label"] == "Unknown"
+    assert trade.json()["timeframe_agreement"] is None

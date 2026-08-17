@@ -21,7 +21,18 @@ from pandas.tseries.offsets import CustomBusinessDay
 from app.models import AssetType
 
 MIN_ANALYSIS_CANDLES = 201
-CRYPTO_STALE_AFTER = timedelta(hours=48)
+CRYPTO_STALE_AFTER = {
+    "1d": timedelta(hours=48),
+    "4h": timedelta(hours=12),
+    "1h": timedelta(hours=3),
+}
+INTERVAL_DURATION = {
+    "1d": timedelta(days=1),
+    "4h": timedelta(hours=4),
+    "1h": timedelta(hours=1),
+}
+STOCK_MARKET_OPEN = time(hour=9, minute=30)
+STOCK_MARKET_CLOSE = time(hour=16)
 STOCK_MARKET_CLOSE_BUFFER = time(hour=16, minute=30)
 
 
@@ -90,17 +101,59 @@ def _expected_stock_session(now: datetime) -> date:
     return _previous_stock_session(current_date)
 
 
-def _missing_period_count(timestamps: pd.Series, asset_type: AssetType) -> int:
-    dates = pd.DatetimeIndex(timestamps).normalize().unique().sort_values()
-    if len(dates) < 2:
+def _missing_period_count(
+    timestamps: pd.Series,
+    asset_type: AssetType,
+    interval: str,
+) -> int:
+    ordered = pd.DatetimeIndex(timestamps).unique().sort_values()
+    if len(ordered) < 2:
         return 0
+    if interval == "1d":
+        dates = ordered.normalize()
+        if asset_type == AssetType.CRYPTO:
+            gaps = pd.Series(dates).diff().dt.days.dropna() - 1
+            return int(gaps.clip(lower=0).sum())
+        expected = pd.date_range(
+            start=dates[0], end=dates[-1], freq=US_EQUITY_BUSINESS_DAY, tz="UTC"
+        )
+        return max(0, len(expected.difference(dates)))
+
+    duration = INTERVAL_DURATION[interval]
     if asset_type == AssetType.CRYPTO:
-        gaps = pd.Series(dates).diff().dt.days.dropna() - 1
-        return int(gaps.clip(lower=0).sum())
-    expected = pd.date_range(
-        start=dates[0], end=dates[-1], freq=US_EQUITY_BUSINESS_DAY, tz="UTC"
+        gaps = pd.Series(ordered).diff().dropna() / duration - 1
+        return int(gaps.clip(lower=0).apply(int).sum())
+
+    local = ordered.tz_convert("America/New_York")
+    dates = pd.DatetimeIndex(local.normalize()).unique().sort_values()
+    expected_dates = pd.date_range(
+        start=dates[0], end=dates[-1], freq=US_EQUITY_BUSINESS_DAY,
+        tz="America/New_York",
     )
-    return max(0, len(expected.difference(dates)))
+    bars_per_session = 7 if interval == "1h" else 2
+    missing_sessions = len(expected_dates.difference(dates)) * bars_per_session
+    frame = pd.DataFrame({"timestamp": local, "session": local.date})
+    intraday_missing = 0
+    for _, group in frame.groupby("session"):
+        gaps = group["timestamp"].sort_values().diff().dropna() / duration - 1
+        intraday_missing += int(gaps.clip(lower=0).apply(int).sum())
+    return missing_sessions + intraday_missing
+
+
+def _stock_intraday_is_stale(latest: datetime, checked_at: datetime, interval: str) -> bool:
+    eastern_now = checked_at.astimezone(ZoneInfo("America/New_York"))
+    eastern_latest = latest.astimezone(ZoneInfo("America/New_York"))
+    active_session = (
+        _is_stock_session(eastern_now.date())
+        and STOCK_MARKET_OPEN <= eastern_now.time() <= STOCK_MARKET_CLOSE
+    )
+    if active_session:
+        if eastern_latest.date() < eastern_now.date():
+            market_open = eastern_now.replace(hour=9, minute=30, second=0, microsecond=0)
+            return eastern_now - market_open > INTERVAL_DURATION[interval] * 2
+        return checked_at - latest > INTERVAL_DURATION[interval] * 2
+    expected_session = _expected_stock_session(checked_at)
+    return eastern_latest.date() < expected_session
 
 
 def assess_data_quality(
@@ -110,6 +163,8 @@ def assess_data_quality(
     interval: str = "1d",
     now: datetime | None = None,
 ) -> DataQualityReport:
+    if interval not in INTERVAL_DURATION:
+        raise ValueError("interval must be one of: 1d, 4h, 1h")
     checked_at = now or datetime.now(timezone.utc)
     if checked_at.tzinfo is None:
         checked_at = checked_at.replace(tzinfo=timezone.utc)
@@ -151,10 +206,12 @@ def assess_data_quality(
         latest_timestamp = latest.isoformat()
         age_hours = round(max(0.0, (checked_at - latest).total_seconds() / 3600), 2)
         if asset_type == AssetType.CRYPTO:
-            stale = checked_at - latest > CRYPTO_STALE_AFTER
-        else:
+            stale = checked_at - latest > CRYPTO_STALE_AFTER[interval]
+        elif interval == "1d":
             stale = latest.date() < _expected_stock_session(checked_at)
-        missing_periods = _missing_period_count(valid_timestamps, asset_type)
+        else:
+            stale = _stock_intraday_is_stale(latest, checked_at, interval)
+        missing_periods = _missing_period_count(valid_timestamps, asset_type, interval)
 
     numeric = candles.loc[valid_mask, ["open", "high", "low", "close", "volume"]].apply(
         pd.to_numeric, errors="coerce"

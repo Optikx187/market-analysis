@@ -7,6 +7,7 @@ from statistics import mean, pstdev
 import pandas as pd
 
 from app.indicators import add_indicators
+from app.regimes import classify_prepared_row
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,9 @@ class TradeSignal:
     reason: str
     market_regime: str
     volatility_regime: str
+    breadth_regime: str = "unknown"
+    risk_regime: str = "unknown"
+    regime_label: str = "Unknown"
 
 
 @dataclass
@@ -92,6 +96,9 @@ class OpenPosition:
     reason: str
     market_regime: str
     volatility_regime: str
+    breadth_regime: str
+    risk_regime: str
+    regime_label: str
     entry_date: str
 
 
@@ -113,6 +120,9 @@ class TradeResult:
     reason: str
     market_regime: str
     volatility_regime: str
+    breadth_regime: str
+    risk_regime: str
+    regime_label: str
     entry_index: int
     exit_index: int
 
@@ -179,6 +189,27 @@ def prepare_candles(frame: pd.DataFrame) -> pd.DataFrame:
     return add_indicators(prepared)
 
 
+def add_as_of_breadth(
+    frame: pd.DataFrame,
+    peers: list[pd.DataFrame],
+) -> pd.DataFrame:
+    result = frame.copy()
+    aligned_votes: list[pd.Series] = []
+    for candidate in [frame, *peers]:
+        source = candidate[["timestamp", "close", "ema_50"]].dropna().sort_values("timestamp")
+        source = source.assign(vote=(source["close"] > source["ema_50"]).astype(float))
+        aligned = pd.merge_asof(
+            result[["timestamp"]].sort_values("timestamp"),
+            source[["timestamp", "vote"]],
+            on="timestamp",
+            direction="backward",
+        )
+        aligned_votes.append(aligned["vote"])
+    votes = pd.concat(aligned_votes, axis=1)
+    result["breadth_pct_above_50"] = votes.mean(axis=1).where(votes.count(axis=1) >= 2) * 100
+    return result
+
+
 def build_walk_forward_windows(length: int, config: WindowConfiguration) -> list[WalkForwardWindow]:
     if config.step_bars < config.test_bars:
         raise ValueError("step_bars must be at least test_bars to prevent overlapping test windows")
@@ -212,26 +243,12 @@ def _timestamp(frame: pd.DataFrame, index: int) -> str:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-def _classify_regime(row: pd.Series) -> tuple[str, str]:
-    close = float(row["close"])
-    ema_20 = float(row["ema_20"])
-    ema_50 = float(row["ema_50"])
-    ema_200 = float(row["ema_200"])
-    atr = float(row["atr"])
-    atr_average = float(row["atr_avg_30"])
-    if close > ema_200 and ema_20 > ema_50:
-        market = "bull"
-    elif close < ema_200 and ema_20 < ema_50:
-        market = "bear"
-    else:
-        market = "sideways"
-    volatility = "high" if atr_average > 0 and atr > 1.5 * atr_average else "normal"
-    return market, volatility
-
-
 def _signal_for_row(
-    frame: pd.DataFrame, index: int, parameters: StrategyParameters,
+    frame: pd.DataFrame,
+    index: int,
+    parameters: StrategyParameters,
 ) -> TradeSignal | None:
+    asset_type = str(frame.attrs.get("asset_type", "stock"))
     row = frame.iloc[index]
     required = ["ema_20", "ema_50", "ema_200", "ema_20_prev", "ema_50_prev", "rsi", "atr", "atr_avg_30"]
     if any(pd.isna(row[column]) for column in required):
@@ -245,7 +262,9 @@ def _signal_for_row(
     rsi = float(row["rsi"])
     atr = float(row["atr"])
     atr_average = float(row["atr_avg_30"])
-    market_regime, volatility_regime = _classify_regime(row)
+    breadth = row.get("breadth_pct_above_50")
+    breadth_pct = float(breadth) if breadth is not None and pd.notna(breadth) else None
+    regime = classify_prepared_row(row, asset_type, breadth_pct)
     tanking = price < ema_200 or (ema_20_previous >= ema_50_previous and ema_20 < ema_50)
     volatile = atr_average <= 0 or atr > parameters.volatility_threshold * atr_average
     golden_cross = ema_20_previous <= ema_50_previous and ema_20 > ema_50
@@ -258,8 +277,11 @@ def _signal_for_row(
             stop_loss=stop,
             target_price=target,
             reason="EMA Golden Cross + Price above 200 EMA + RSI stable zone",
-            market_regime=market_regime,
-            volatility_regime=volatility_regime,
+            market_regime=regime.trend,
+            volatility_regime=regime.volatility,
+            breadth_regime=regime.breadth,
+            risk_regime=regime.risk,
+            regime_label=regime.label,
         )
     reasons: list[str] = []
     if price < ema_50:
@@ -275,8 +297,11 @@ def _signal_for_row(
             stop_loss=stop,
             target_price=target,
             reason=" + ".join(reasons),
-            market_regime=market_regime,
-            volatility_regime=volatility_regime,
+            market_regime=regime.trend,
+            volatility_regime=regime.volatility,
+            breadth_regime=regime.breadth,
+            risk_regime=regime.risk,
+            regime_label=regime.label,
         )
     return None
 
@@ -349,6 +374,9 @@ def _close_trade(
         reason=position.reason,
         market_regime=position.market_regime,
         volatility_regime=position.volatility_regime,
+        breadth_regime=position.breadth_regime,
+        risk_regime=position.risk_regime,
+        regime_label=position.regime_label,
         entry_index=position.entry_index,
         exit_index=exit_index,
     )
@@ -428,9 +456,11 @@ def simulate_segment(
     parameters: StrategyParameters,
     costs: ExecutionCosts,
     initial_capital: float,
+    asset_type: str = "stock",
 ) -> SegmentResult:
     if start < 1 or end > len(frame) or start >= end:
         raise ValueError("Invalid backtest segment boundaries")
+    frame.attrs["asset_type"] = asset_type
     bar_returns = [0.0] * (end - start)
     trades: list[TradeResult] = []
     equity = initial_capital
@@ -479,6 +509,9 @@ def simulate_segment(
                 reason=signal.reason,
                 market_regime=signal.market_regime,
                 volatility_regime=signal.volatility_regime,
+                breadth_regime=signal.breadth_regime,
+                risk_regime=signal.risk_regime,
+                regime_label=signal.regime_label,
                 entry_date=_timestamp(frame, entry_index),
             )
     if position is not None:
@@ -577,26 +610,25 @@ def _benchmark_for_dates(
 
 def _regime_metrics(trades: list[TradeResult]) -> dict[str, dict[str, float | int]]:
     result: dict[str, dict[str, float | int]] = {}
-    labels = sorted({trade.market_regime for trade in trades})
-    for label in labels:
-        selected = [trade for trade in trades if trade.market_regime == label]
-        returns = [trade.net_pnl_pct for trade in selected]
-        result[label] = {
-            "trades": len(selected),
-            "win_rate_pct": round(sum(value > 0 for value in returns) / len(returns) * 100, 4),
-            "expectancy_pct": round(mean(returns), 6),
-            "after_cost_return_pct": round((pd.Series([1 + value / 100 for value in returns]).prod() - 1) * 100, 6),
-        }
-    volatility_labels = sorted({trade.volatility_regime for trade in trades})
-    for label in volatility_labels:
-        selected = [trade for trade in trades if trade.volatility_regime == label]
-        returns = [trade.net_pnl_pct for trade in selected]
-        result[f"volatility:{label}"] = {
-            "trades": len(selected),
-            "win_rate_pct": round(sum(value > 0 for value in returns) / len(returns) * 100, 4),
-            "expectancy_pct": round(mean(returns), 6),
-            "after_cost_return_pct": round((pd.Series([1 + value / 100 for value in returns]).prod() - 1) * 100, 6),
-        }
+    dimensions = {
+        "trend": lambda trade: trade.market_regime,
+        "volatility": lambda trade: trade.volatility_regime,
+        "breadth": lambda trade: trade.breadth_regime,
+        "risk": lambda trade: trade.risk_regime,
+    }
+    for dimension, getter in dimensions.items():
+        for label in sorted({getter(trade) for trade in trades}):
+            selected = [trade for trade in trades if getter(trade) == label]
+            returns = [trade.net_pnl_pct for trade in selected]
+            result[f"{dimension}:{label}"] = {
+                "trades": len(selected),
+                "win_rate_pct": round(sum(value > 0 for value in returns) / len(returns) * 100, 4),
+                "expectancy_pct": round(mean(returns), 6),
+                "after_cost_return_pct": round(
+                    (pd.Series([1 + value / 100 for value in returns]).prod() - 1) * 100,
+                    6,
+                ),
+            }
     return result
 
 
@@ -625,6 +657,7 @@ def run_walk_forward_backtest(
     thresholds: ValidationThresholds,
     initial_capital: float,
     benchmark_frames: dict[str, pd.DataFrame] | None = None,
+    asset_type: str = "stock",
 ) -> dict[str, object]:
     if costs.fill_delay_bars < 1:
         raise ValueError("fill_delay_bars must be at least 1 to prevent same-bar look-ahead")
@@ -636,6 +669,7 @@ def run_walk_forward_backtest(
         for symbol, benchmark in (benchmark_frames or {}).items()
         if not benchmark.empty
     }
+    frame = add_as_of_breadth(frame, list(prepared_benchmarks.values()))
     walk_forward_windows = build_walk_forward_windows(len(frame), windows)
     if not walk_forward_windows:
         raise ValueError(
@@ -658,10 +692,10 @@ def run_walk_forward_backtest(
         candidates: list[tuple[float, int, SegmentResult, SegmentResult]] = []
         for parameter_index, candidate in enumerate(parameters):
             train = simulate_segment(
-                frame, window.train_start, window.train_end, candidate, costs, initial_capital
+                frame, window.train_start, window.train_end, candidate, costs, initial_capital, asset_type
             )
             validation = simulate_segment(
-                frame, window.validation_start, window.validation_end, candidate, costs, initial_capital
+                frame, window.validation_start, window.validation_end, candidate, costs, initial_capital, asset_type
             )
             sensitivity[str(parameter_index)].append(validation.metrics.after_cost_return_pct)
             candidates.append((_score(train, validation), parameter_index, train, validation))
@@ -669,7 +703,7 @@ def run_walk_forward_backtest(
         selected = parameters[selected_index]
         selected_counts[str(selected_index)] += 1
         test_result = simulate_segment(
-            frame, window.test_start, window.test_end, selected, costs, initial_capital
+            frame, window.test_start, window.test_end, selected, costs, initial_capital, asset_type
         )
         selected_train_segments.append(train_result)
         selected_validation_segments.append(validation_result)

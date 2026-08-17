@@ -142,26 +142,63 @@ async def fetch_historical_alpaca(
     return pd.DataFrame(rows)
 
 
-async def fetch_historical(ticker: str, asset_type: AssetType) -> pd.DataFrame:
+def _resample_four_hour(frame: pd.DataFrame, asset_type: AssetType) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    prepared = frame.copy()
+    prepared["timestamp"] = pd.to_datetime(prepared["timestamp"], errors="coerce", utc=True)
+    prepared = prepared.dropna(subset=["timestamp"]).sort_values("timestamp")
+    prepared["bar_timestamp"] = prepared["timestamp"]
+    if asset_type == AssetType.CRYPTO:
+        grouped = prepared.set_index("timestamp").resample("4h", origin="epoch")
+    else:
+        local = prepared["timestamp"].dt.tz_convert("America/New_York")
+        prepared["session"] = local.dt.date
+        prepared["bar_group"] = prepared.groupby("session").cumcount() // 4
+        grouped = prepared.groupby(["session", "bar_group"], sort=True)
+    result = grouped.agg({
+        "bar_timestamp": "first",
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }).dropna(subset=["open", "high", "low", "close"])
+    result = result.reset_index(drop=True).rename(columns={"bar_timestamp": "timestamp"})
+    return result[["timestamp", "open", "high", "low", "close", "volume"]]
+
+
+async def fetch_historical(
+    ticker: str,
+    asset_type: AssetType,
+    interval: str = "1d",
+) -> pd.DataFrame:
+    if interval not in {"1d", "4h", "1h"}:
+        raise ValueError("interval must be one of: 1d, 4h, 1h")
     if asset_type == AssetType.CRYPTO:
         symbol = get_binance_symbol(ticker)
         try:
-            df = await fetch_historical_binance(symbol, "1d", 1000)
+            df = await fetch_historical_binance(symbol, interval, 1000)
             if not df.empty:
                 return df
         except Exception as e:
-            logger.warning(f"Binance failed for {symbol}, fallback to yfinance: {e}")
+            logger.warning(f"Binance failed for {symbol} {interval}, fallback to yfinance: {e}")
         yf_ticker = f"{ticker}-USD" if not ticker.endswith("-USD") else ticker
-        return await fetch_historical_yfinance(yf_ticker, "3y", "1d")
-    # Stocks: try Alpaca first (if keys configured), then yfinance
-    try:
-        df = await fetch_historical_alpaca(ticker)
-        if not df.empty:
-            logger.info(f"Alpaca returned {len(df)} bars for {ticker}")
-            return df
-    except Exception as e:
-        logger.warning(f"Alpaca failed for {ticker}, fallback to yfinance: {e}")
-    return await fetch_historical_yfinance(ticker, "3y", "1d")
+        if interval == "1d":
+            return await fetch_historical_yfinance(yf_ticker, "3y", "1d")
+        hourly = await fetch_historical_yfinance(yf_ticker, "730d", "1h")
+        return _resample_four_hour(hourly, asset_type) if interval == "4h" else hourly.tail(1000)
+    if interval == "1d":
+        try:
+            df = await fetch_historical_alpaca(ticker)
+            if not df.empty:
+                logger.info(f"Alpaca returned {len(df)} bars for {ticker}")
+                return df
+        except Exception as e:
+            logger.warning(f"Alpaca failed for {ticker}, fallback to yfinance: {e}")
+        return await fetch_historical_yfinance(ticker, "3y", "1d")
+    hourly = await fetch_historical_yfinance(ticker, "730d", "1h")
+    return _resample_four_hour(hourly, asset_type).tail(1000) if interval == "4h" else hourly.tail(1000)
 
 
 def validate_candles_for_storage(df: pd.DataFrame) -> pd.DataFrame:
@@ -232,10 +269,18 @@ async def load_candles(
 
 async def refresh_asset_data(ticker: str, asset_type: AssetType):
     ticker = ticker.strip()
-    df = await fetch_historical(ticker, asset_type)
-    if df.empty:
+    stored = 0
+    for interval in ("1d", "4h", "1h"):
+        try:
+            frame = await fetch_historical(ticker, asset_type, interval)
+            if frame.empty:
+                logger.warning(f"No {interval} data for {ticker}")
+                continue
+            async with async_session() as db:
+                await store_candles(db, ticker, frame, interval)
+            stored += len(frame)
+            logger.info(f"Stored {len(frame)} {interval} candles for {ticker}")
+        except Exception as error:
+            logger.warning(f"Unable to refresh {ticker} {interval}: {error}")
+    if stored == 0:
         logger.warning(f"No data for {ticker}")
-        return
-    async with async_session() as db:
-        await store_candles(db, ticker, df)
-    logger.info(f"Stored {len(df)} candles for {ticker}")

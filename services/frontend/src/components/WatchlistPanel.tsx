@@ -46,6 +46,7 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
   const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
+  const [backtestRegimeFilter, setBacktestRegimeFilter] = useState("all");
   const [earningsData, setEarningsData] = useState<Record<string, { has_earnings: boolean; next_earnings_date: string | null }>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -479,7 +480,8 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
                       e.stopPropagation();
                       setFeedback(`Running backtest for ${a.ticker}...`);
                       try {
-                        const bt = await runBacktest(a.ticker);
+                        const bt = await runBacktest(a.ticker, "max", 10000, a.asset_type);
+                        setBacktestRegimeFilter("all");
                         setBacktestResult(bt);
                         const oos = bt.aggregate.out_of_sample;
                         setFeedback(`${a.ticker}: ${bt.window_count} walk-forward windows, ${oos.total_trades} out-of-sample trades, ${oos.after_cost_return_pct >= 0 ? "+" : ""}${oos.after_cost_return_pct}% after costs`);
@@ -612,14 +614,14 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
           )}
 
           {backtestResult.trades.length > 0 && (
-            <div className="mt-2 max-h-32 overflow-y-auto border-t pt-1">
-              <div className="text-[10px] font-medium mb-1">Out-of-sample trades</div>
-              {backtestResult.trades.map((t, i) => (
+            <div className="mt-2 max-h-40 overflow-y-auto border-t pt-1">
+              <div className="mb-1 flex items-center justify-between gap-2"><div className="text-[10px] font-medium">Out-of-sample trades</div><select value={backtestRegimeFilter} onChange={(event) => setBacktestRegimeFilter(event.target.value)} className="rounded border bg-[var(--input)] px-1 py-0.5 text-[10px]"><option value="all">All regimes</option>{Array.from(new Set(backtestResult.trades.map((trade) => trade.regime_label))).sort().map((label) => <option key={label} value={label}>{label}</option>)}</select></div>
+              {backtestResult.trades.filter((trade) => backtestRegimeFilter === "all" || trade.regime_label === backtestRegimeFilter).map((t, i) => (
                 <div key={i} className="flex items-center justify-between gap-2 py-0.5 text-[10px]">
                   <span className={t.direction === "BUY" ? "text-green-400" : "text-red-400"}>{t.direction}</span>
                   <span>${t.entry.toFixed(2)} -&gt; ${t.exit.toFixed(2)}</span>
                   <span className={t.net_pnl_pct >= 0 ? "text-green-400" : "text-red-400"}>{t.net_pnl_pct >= 0 ? "+" : ""}{t.net_pnl_pct}% net</span>
-                  <span className="text-[var(--muted-foreground)]">{t.market_regime}/{t.volatility_regime}</span>
+                  <span className="text-[var(--muted-foreground)]">{t.market_regime}/{t.volatility_regime}/{t.breadth_regime}/{t.risk_regime}</span>
                 </div>
               ))}
             </div>
