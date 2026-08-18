@@ -409,12 +409,20 @@ def build_attribution(
     unfiltered_net_pnl: float,
     min_sample_size: int,
 ) -> dict[str, object]:
-    """Summary, per-dimension buckets and exact reconciliation for closed trades."""
+    """Summary, per-dimension buckets and exact reconciliation.
+
+    ``trades`` covers every trade carrying realized P&L, including positions still
+    open after a partial exit, so reconciliation always matches the portfolio's
+    realized total.
+    """
     summary = _bucket_stats("all", trades, min_sample_size)
+    fully_closed = [trade for trade in trades if trade.get("fully_closed")]
     return {
         "min_sample_size": min_sample_size,
         "summary": {
             "sample_size": summary["sample_size"],
+            "closed_sample_size": len(fully_closed),
+            "partially_realized_sample_size": summary["sample_size"] - len(fully_closed),
             "gross_pnl": summary["gross_pnl"],
             "costs": summary["costs"],
             "net_pnl": summary["net_pnl"],
@@ -444,6 +452,7 @@ CSV_COLUMNS = (
     "trade_id",
     "ticker",
     "direction",
+    "status",
     "strategy",
     "strategy_version",
     "asset_type",
@@ -456,6 +465,7 @@ CSV_COLUMNS = (
     "average_exit_price",
     "planned_exit_price",
     "quantity",
+    "realized_quantity",
     "planned_quantity",
     "gross_pnl",
     "costs",
@@ -485,7 +495,7 @@ def _csv_cell(value: object) -> str:
 
 
 def attribution_csv(trades: list[dict[str, object]]) -> str:
-    """One CSV row per attributed closed trade, including costs and adherence."""
+    """One CSV row per attributed trade, including costs, excursions and adherence."""
     lines = [",".join(CSV_COLUMNS)]
     for trade in trades:
         adherence = trade.get("rule_adherence") or {}

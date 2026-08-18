@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ATTRIBUTION_DIMENSIONS,
   attributionExportUrl,
@@ -9,6 +9,9 @@ import {
   type AttributedTrade,
   type AttributionGroup,
 } from "@/lib/api";
+import { onTradesChanged } from "@/lib/tradeEvents";
+
+const REFRESH_INTERVAL_MS = 30000;
 
 const DIMENSION_LABELS: Record<AttributionDimension, string> = {
   strategy: "Strategy",
@@ -35,6 +38,17 @@ const money = (value: number) =>
 const optional = (value: number | null | undefined, suffix = "") =>
   value === null || value === undefined ? "Not recorded" : `${value}${suffix}`;
 
+const excursion = (
+  status: string | null,
+  usd: number | null | undefined,
+  pct: number | null | undefined,
+) => {
+  if (status !== "calculated" || usd === null || usd === undefined || pct === null || pct === undefined) {
+    return "Not recorded";
+  }
+  return `${money(usd)} / ${pct}%`;
+};
+
 export default function AttributionPanel() {
   const [data, setData] = useState<AttributionResponse | null>(null);
   const [filters, setFilters] = useState<AttributionFilters>({});
@@ -43,16 +57,29 @@ export default function AttributionPanel() {
   const [loading, setLoading] = useState(true);
   const [expandedTrade, setExpandedTrade] = useState<number | null>(null);
 
+  const load = useCallback(
+    (showSpinner: boolean) => {
+      if (showSpinner) setLoading(true);
+      fetchAttribution(filters)
+        .then((payload) => {
+          setData(payload);
+          setError(null);
+        })
+        .catch(() => setError("Could not load attribution. Is the portfolio engine running?"))
+        .finally(() => setLoading(false));
+    },
+    [filters],
+  );
+
   useEffect(() => {
-    setLoading(true);
-    fetchAttribution(filters)
-      .then((payload) => {
-        setData(payload);
-        setError(null);
-      })
-      .catch(() => setError("Could not load attribution. Is the portfolio engine running?"))
-      .finally(() => setLoading(false));
-  }, [filters]);
+    load(true);
+    const interval = setInterval(() => load(false), REFRESH_INTERVAL_MS);
+    const unsubscribe = onTradesChanged(() => load(false));
+    return () => {
+      clearInterval(interval);
+      unsubscribe();
+    };
+  }, [load]);
 
   if (loading && !data) {
     return <div className="rounded-lg border bg-[var(--card)] p-4 text-sm">Loading attribution...</div>;
@@ -73,8 +100,9 @@ export default function AttributionPanel() {
         <div>
           <h2 className="text-lg font-semibold">Performance Attribution</h2>
           <p className="text-xs text-[var(--muted-foreground)]">
-            Net realized P&amp;L after fees and slippage, attributed across closed trades. Missing
-            metadata is grouped as Unknown &mdash; never inferred.
+            Net realized P&amp;L after fees and slippage, attributed across every trade with realized
+            fills &mdash; including positions still open after a partial exit. Missing metadata is
+            grouped as Unknown, never inferred.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -125,9 +153,14 @@ export default function AttributionPanel() {
           Clear {activeFilters.length} filter{activeFilters.length > 1 ? "s" : ""}
         </button>
       )}
+      {loading && <div className="text-xs text-[var(--muted-foreground)]">Refreshing...</div>}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Stat label="Sample Size" value={`${summary.sample_size} closed`} />
+        <Stat
+          label="Sample Size"
+          value={`${summary.sample_size} realized`}
+          detail={`${summary.closed_sample_size} closed · ${summary.partially_realized_sample_size} partially realized`}
+        />
         <Stat
           label="Net P&L (filtered)"
           value={money(summary.net_pnl)}
@@ -163,9 +196,9 @@ export default function AttributionPanel() {
 
       {!summary.sufficient_sample && (
         <div className="rounded border border-amber-500/40 bg-amber-500/5 p-2 text-xs text-amber-300">
-          {summary.sample_note || `Fewer than ${minSample} closed trades`} — treat groupings as
+          {summary.sample_note || `Fewer than ${minSample} realized trades`} — treat groupings as
           descriptive only. Recommendations and confidence calibration stay suppressed until{" "}
-          {minSample} closed trades are attributed.
+          {minSample} trades are attributed.
         </div>
       )}
 
@@ -190,7 +223,7 @@ export default function AttributionPanel() {
         </div>
         {groups.length === 0 ? (
           <p className="text-xs text-[var(--muted-foreground)]">
-            No closed trades match these filters yet.
+            No realized trades match these filters yet.
           </p>
         ) : (
           <div className="overflow-x-auto">
@@ -219,7 +252,7 @@ export default function AttributionPanel() {
       <div className="space-y-2">
         <div className="text-sm font-medium">Confidence Calibration</div>
         {data.confidence_calibration.length === 0 ? (
-          <p className="text-xs text-[var(--muted-foreground)]">No closed trades to calibrate.</p>
+          <p className="text-xs text-[var(--muted-foreground)]">No realized trades to calibrate.</p>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
             {data.confidence_calibration.map((band) => (
@@ -269,6 +302,11 @@ export default function AttributionPanel() {
                     <span className="rounded bg-[var(--muted)] px-1.5 py-0.5 text-[10px] text-[var(--muted-foreground)]">
                       {trade.exit_count} exit{trade.exit_count === 1 ? "" : "s"}
                     </span>
+                    {!trade.fully_closed && (
+                      <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-300">
+                        Partially realized · {trade.remaining_quantity} open
+                      </span>
+                    )}
                   </span>
                   <span
                     className={`text-sm font-medium ${
@@ -338,14 +376,8 @@ function TradeDetail({ trade, summary }: { trade: AttributedTrade; summary: stri
         <Detail label="Confidence" value={optional(trade.signal_confidence, "%")} />
         <Detail label="Gross P&L" value={money(trade.gross_pnl ?? 0)} />
         <Detail label="Costs" value={money(trade.costs)} />
-        <Detail
-          label="MFE / MAE"
-          value={
-            trade.excursion_status === "calculated"
-              ? `${money(trade.mfe_usd ?? 0)} / ${money(trade.mae_usd ?? 0)}`
-              : `Unavailable (${trade.excursion_status})`
-          }
-        />
+        <Detail label="MFE ($ / %)" value={excursion(trade.excursion_status, trade.mfe_usd, trade.mfe_pct)} />
+        <Detail label="MAE ($ / %)" value={excursion(trade.excursion_status, trade.mae_usd, trade.mae_pct)} />
         <Detail label="Sector / Asset" value={`${trade.sector ?? "Unknown"} · ${trade.asset_type ?? "Unknown"}`} />
       </div>
       <div className="space-y-1">

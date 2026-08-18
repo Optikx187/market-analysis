@@ -306,6 +306,66 @@ def test_partial_exit_rejects_quantity_above_remaining(client: TestClient) -> No
     assert response.status_code == 400
     assert "remaining" in response.json()["detail"]
 
+    client.post(f"/api/trades/{trade['id']}/close", json={"exit_price": 110, "quantity": 4})
+    rejected = client.post(
+        f"/api/trades/{trade['id']}/close",
+        json={"exit_price": 110, "quantity": 7},
+    )
+    unchanged = client.get("/api/trades").json()
+
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"] == "Exit quantity exceeds the remaining 6 units"
+    position = next(row for row in unchanged if row["id"] == trade["id"])
+    assert position["status"] == "OPEN"
+    assert position["remaining_quantity"] == pytest.approx(6)
+
+
+def test_attribution_includes_partially_realized_open_trades(client: TestClient) -> None:
+    trade = client.post("/api/trades/manual", json=_trade("AAPL", "BUY")).json()
+
+    partial = client.post(
+        f"/api/trades/{trade['id']}/close",
+        json={"exit_price": 110, "quantity": 4, "fees": 1, "slippage": 0.25},
+    ).json()
+
+    portfolio = client.get("/api/portfolio").json()
+    payload = client.get("/api/attribution").json()
+
+    assert partial["status"] == "OPEN"
+    assert payload["reconciliation"]["attributed_net_pnl"] == pytest.approx(portfolio["total_pnl"])
+    assert payload["reconciliation"]["delta"] == 0
+    assert payload["reconciliation"]["reconciles"] is True
+    assert payload["summary"]["sample_size"] == 1
+    assert payload["summary"]["closed_sample_size"] == 0
+    assert payload["summary"]["partially_realized_sample_size"] == 1
+    assert payload["summary"]["net_pnl"] == pytest.approx(38.15)
+
+    attributed = payload["trades"][0]
+    assert attributed["status"] == "OPEN"
+    assert attributed["fully_closed"] is False
+    assert attributed["realized_quantity"] == pytest.approx(4)
+    assert attributed["remaining_quantity"] == pytest.approx(6)
+    assert attributed["exit_count"] == 1
+    assert payload["journals"] == []
+    assert client.get(f"/api/trades/{trade['id']}/journal").status_code == 404
+
+    csv_body = client.get("/api/attribution/export", params={"format": "csv"}).text
+    assert "status" in csv_body.splitlines()[0]
+    assert "OPEN" in csv_body.splitlines()[1]
+
+    client.post(f"/api/trades/{trade['id']}/close", json={"exit_price": 115, "quantity": 6, "fees": 1, "slippage": 0.25})
+
+    final_portfolio = client.get("/api/portfolio").json()
+    final_payload = client.get("/api/attribution").json()
+    assert final_payload["summary"]["sample_size"] == 1
+    assert final_payload["summary"]["closed_sample_size"] == 1
+    assert final_payload["summary"]["partially_realized_sample_size"] == 0
+    assert final_payload["reconciliation"]["attributed_net_pnl"] == pytest.approx(
+        final_portfolio["total_pnl"]
+    )
+    assert final_payload["reconciliation"]["reconciles"] is True
+    assert len(final_payload["journals"]) == 1
+
 
 def test_attribution_reconciles_exactly_to_portfolio_total_pnl(client: TestClient) -> None:
     long_trade = client.post("/api/trades/manual", json=_trade("AAPL", "BUY")).json()

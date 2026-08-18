@@ -7,11 +7,13 @@ import {
   logManualTrade,
   closeTrade,
   fetchReplyTrades,
+  apiErrorMessage,
   type Portfolio,
   type PortfolioRisk,
   type Trade,
   type ReplyTradesResponse,
 } from "@/lib/api";
+import { notifyTradesChanged } from "@/lib/tradeEvents";
 
 export default function PortfolioPanel() {
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
@@ -44,6 +46,7 @@ export default function PortfolioPanel() {
   const [exitPrice, setExitPrice] = useState("");
   const [exitQuantity, setExitQuantity] = useState("");
   const [exitFees, setExitFees] = useState("");
+  const [closeError, setCloseError] = useState<string | null>(null);
 
   // Tab
   const [activeTab, setActiveTab] = useState<"open" | "closed" | "telegram">("open");
@@ -92,6 +95,7 @@ export default function PortfolioPanel() {
         sector: tradeForm.sector.trim() || "Unclassified",
       });
       setTradeFormMsg({ type: "success", text: `${tradeForm.direction} logged for ${tradeForm.ticker.trim().toUpperCase()}` });
+      notifyTradesChanged();
       setTradeForm({
         ticker: "",
         direction: "BUY",
@@ -116,13 +120,18 @@ export default function PortfolioPanel() {
     setExitPrice("");
     setExitQuantity("");
     setExitFees("");
+    setCloseError(null);
   };
 
   const handleCloseTrade = async (tradeId: number) => {
     const price = parseFloat(exitPrice);
-    if (isNaN(price) || price <= 0) return;
+    if (isNaN(price) || price <= 0) {
+      setCloseError("Enter an exit price greater than 0.");
+      return;
+    }
     const quantity = parseFloat(exitQuantity);
     const fees = parseFloat(exitFees);
+    setCloseError(null);
     try {
       await closeTrade(tradeId, price, {
         quantity: isNaN(quantity) || quantity <= 0 ? undefined : quantity,
@@ -130,8 +139,9 @@ export default function PortfolioPanel() {
       });
       resetCloseForm();
       loadAll();
-    } catch {
-      // error handled visually
+      notifyTradesChanged();
+    } catch (err: unknown) {
+      setCloseError(apiErrorMessage(err, "Failed to close position. Please try again."));
     }
   };
 
@@ -383,7 +393,8 @@ export default function PortfolioPanel() {
                   <PositionRisk trade={t} />
                 </div>
                 {closingTradeId === t.id ? (
-                  <div className="flex items-center gap-1">
+                  <div className="flex flex-col items-end gap-1">
+                    <div className="flex items-center gap-1">
                     <input
                       type="number"
                       placeholder="Exit price"
@@ -415,10 +426,14 @@ export default function PortfolioPanel() {
                     />
                     <button onClick={() => handleCloseTrade(t.id)} className="rounded bg-red-600 text-white px-2 py-1 text-xs">Close</button>
                     <button onClick={resetCloseForm} className="text-xs text-[var(--muted-foreground)]">X</button>
+                    </div>
+                    {closeError && (
+                      <span className="text-xs text-red-400 text-right max-w-[280px]">{closeError}</span>
+                    )}
                   </div>
                 ) : (
                   <button
-                    onClick={() => setClosingTradeId(t.id)}
+                    onClick={() => { setClosingTradeId(t.id); setCloseError(null); }}
                     className="rounded bg-[var(--secondary)] px-2 py-1 text-xs hover:bg-red-600/20"
                   >
                     Close Position

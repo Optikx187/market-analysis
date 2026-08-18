@@ -2,6 +2,14 @@ import axios from "axios";
 
 const api = axios.create({ baseURL: "/api" });
 
+export const apiErrorMessage = (error: unknown, fallback: string): string => {
+  if (axios.isAxiosError(error)) {
+    const detail: unknown = error.response?.data?.detail;
+    if (typeof detail === "string" && detail) return detail;
+  }
+  return fallback;
+};
+
 export interface Asset {
   id: number;
   ticker: string;
@@ -518,6 +526,8 @@ export interface AttributionGroup {
 
 export interface AttributionSummary {
   sample_size: number;
+  closed_sample_size: number;
+  partially_realized_sample_size: number;
   gross_pnl: number;
   costs: number;
   net_pnl: number;
@@ -567,6 +577,10 @@ export interface AttributedTrade {
   id: number;
   ticker: string;
   direction: string;
+  status: string;
+  fully_closed: boolean;
+  realized_quantity: number;
+  remaining_quantity: number;
   strategy: string | null;
   strategy_version: string | null;
   asset_type: string | null;

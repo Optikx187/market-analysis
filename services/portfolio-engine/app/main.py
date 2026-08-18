@@ -16,7 +16,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -933,6 +933,7 @@ def _execution_dict(execution: TradeExecution) -> dict[str, object]:
 
 def _trade_attribution_dict(trade: Trade, executions: list[dict[str, object]]) -> dict[str, object]:
     direction = trade.direction.value if isinstance(trade.direction, SignalDirection) else str(trade.direction)
+    status = trade.status.value if isinstance(trade.status, TradeStatus) else str(trade.status)
     exits = [row for row in executions if row["kind"] == "EXIT"]
     exit_quantity = sum(float(row["quantity"]) for row in exits)
     average_exit = (
@@ -945,6 +946,10 @@ def _trade_attribution_dict(trade: Trade, executions: list[dict[str, object]]) -
         "id": trade.id,
         "ticker": trade.ticker,
         "direction": direction,
+        "status": status,
+        "fully_closed": status == TradeStatus.CLOSED.value,
+        "realized_quantity": trade.realized_quantity or 0.0,
+        "remaining_quantity": trade.remaining_quantity,
         "strategy": trade.strategy_name,
         "strategy_version": trade.strategy_version,
         "asset_type": trade.asset_type,
@@ -1072,14 +1077,19 @@ async def _attribution_payload(
     portfolio = await get_or_create_portfolio(db)
     result = await db.execute(
         select(Trade)
-        .where(Trade.status == TradeStatus.CLOSED)
-        .order_by(desc(Trade.closed_at))
+        .where(
+            or_(
+                Trade.status == TradeStatus.CLOSED,
+                Trade.realized_quantity > 0,
+            )
+        )
+        .order_by(desc(Trade.closed_at), desc(Trade.id))
     )
-    closed = list(result.scalars().all())
-    executions = await _trade_executions(db, [trade.id for trade in closed])
+    realized = list(result.scalars().all())
+    executions = await _trade_executions(db, [trade.id for trade in realized])
     all_trades = [
         _trade_attribution_dict(trade, executions.get(trade.id, []))
-        for trade in closed
+        for trade in realized
     ]
     journal_result = await db.execute(
         select(TradeJournal).order_by(desc(TradeJournal.created_at))

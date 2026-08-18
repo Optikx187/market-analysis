@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchRegime, fetchTrades, logManualTrade, type Trade } from "@/lib/api";
+import { notifyTradesChanged } from "@/lib/tradeEvents";
 
 function formatDateTime(dateStr: string | null): string {
   if (!dateStr) return "—";
@@ -50,6 +51,7 @@ export default function TradesPanel() {
       setForm({ ticker: "", direction: "BUY", asset_type: "stock", entry_price: "", quantity: "", stop_loss: "", target_price: "" });
       setShowForm(false);
       loadTrades();
+      notifyTradesChanged();
     } catch {
       setMessage({ type: "error", text: "Failed to log trade." });
     }
