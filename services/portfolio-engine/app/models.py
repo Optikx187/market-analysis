@@ -1,5 +1,7 @@
 import enum
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Enum as SAEnum, Text
+from sqlalchemy import (
+    Column, Integer, String, Float, DateTime, Boolean, Enum as SAEnum, Text, ForeignKey,
+)
 from sqlalchemy.sql import func
 
 from app.database import Base
@@ -14,6 +16,11 @@ class SignalDirection(str, enum.Enum):
 class TradeStatus(str, enum.Enum):
     OPEN = "OPEN"
     CLOSED = "CLOSED"
+
+
+class ExecutionKind(str, enum.Enum):
+    ENTRY = "ENTRY"
+    EXIT = "EXIT"
 
 
 class Trade(Base):
@@ -36,11 +43,72 @@ class Trade(Base):
     risk_regime = Column(String(20), nullable=False, default="unknown")
     regime_label = Column(String(200), nullable=False, default="Unknown")
     timeframe_agreement = Column(Float, nullable=True)
+    strategy_name = Column(String(100), nullable=True)
+    strategy_version = Column(String(50), nullable=True)
+    timeframe = Column(String(20), nullable=True)
+    signal_confidence = Column(Float, nullable=True)
+    signal_context_json = Column(Text, nullable=True)
+    execution_context_json = Column(Text, nullable=True)
+    planned_entry_price = Column(Float, nullable=True)
+    planned_exit_price = Column(Float, nullable=True)
+    planned_quantity = Column(Float, nullable=True)
+    entry_fees = Column(Float, nullable=False, default=0.0)
+    entry_slippage = Column(Float, nullable=False, default=0.0)
+    entry_costs_allocated = Column(Float, nullable=False, default=0.0)
+    exit_fees_total = Column(Float, nullable=False, default=0.0)
+    exit_slippage_total = Column(Float, nullable=False, default=0.0)
+    costs_total = Column(Float, nullable=False, default=0.0)
+    realized_quantity = Column(Float, nullable=False, default=0.0)
+    gross_pnl = Column(Float, nullable=True)
+    mfe_usd = Column(Float, nullable=True)
+    mae_usd = Column(Float, nullable=True)
+    mfe_pct = Column(Float, nullable=True)
+    mae_pct = Column(Float, nullable=True)
+    excursion_status = Column(String(20), nullable=False, default="not_calculated")
     status = Column(SAEnum(TradeStatus), default=TradeStatus.OPEN)
     pnl = Column(Float, nullable=True)
     pnl_pct = Column(Float, nullable=True)
     opened_at = Column(DateTime, server_default=func.now())
     closed_at = Column(DateTime, nullable=True)
+
+    @property
+    def remaining_quantity(self) -> float:
+        return round((self.quantity or 0.0) - (self.realized_quantity or 0.0), 8)
+
+
+class TradeExecution(Base):
+    """Individual entry/exit fill so fees and partial P&L stay auditable."""
+
+    __tablename__ = "trade_executions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_id = Column(Integer, ForeignKey("trades.id"), nullable=False, index=True)
+    kind = Column(SAEnum(ExecutionKind), nullable=False)
+    price = Column(Float, nullable=False)
+    quantity = Column(Float, nullable=False)
+    fees = Column(Float, nullable=False, default=0.0)
+    slippage = Column(Float, nullable=False, default=0.0)
+    entry_costs_allocated = Column(Float, nullable=False, default=0.0)
+    gross_pnl = Column(Float, nullable=True)
+    net_pnl = Column(Float, nullable=True)
+    note = Column(Text, nullable=True)
+    executed_at = Column(DateTime, server_default=func.now())
+
+
+class TradeJournal(Base):
+    """One automated post-trade journal entry per fully closed trade."""
+
+    __tablename__ = "trade_journals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_id = Column(Integer, ForeignKey("trades.id"), nullable=False, unique=True, index=True)
+    ticker = Column(String(20), nullable=False, index=True)
+    strategy_name = Column(String(100), nullable=True)
+    outcome = Column(String(20), nullable=False)
+    net_pnl = Column(Float, nullable=False)
+    summary = Column(Text, nullable=False)
+    journal_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
 
 
 class Portfolio(Base):

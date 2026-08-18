@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     FRACTIONAL_KELLY_CAP: float = 0.10
     EQUITY_SHOCK_PCT: float = 0.05
     CRYPTO_SHOCK_PCT: float = 0.20
+    ATTRIBUTION_MIN_SAMPLE_SIZE: int = 20
+    ATTRIBUTION_CANDLE_INTERVAL: str = "1d"
     AUTH_ENABLED: bool = False
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
