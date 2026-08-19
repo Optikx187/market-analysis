@@ -1,10 +1,17 @@
+import datetime
 import enum
+
 from sqlalchemy import (
     Column, Integer, String, Float, DateTime, Boolean, Enum as SAEnum, Text, ForeignKey,
 )
 from sqlalchemy.sql import func
 
 from app.database import Base
+
+
+def _utc_now() -> datetime.datetime:
+    """Naive UTC timestamp with microseconds so audit rows stay strictly ordered."""
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
 
 class SignalDirection(str, enum.Enum):
@@ -109,6 +116,87 @@ class TradeJournal(Base):
     summary = Column(Text, nullable=False)
     journal_json = Column(Text, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
+
+
+class PaperOrder(Base):
+    """A simulated order. There is no live-money submission path."""
+
+    __tablename__ = "paper_orders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    idempotency_key = Column(String(120), nullable=False, unique=True, index=True)
+    ticker = Column(String(20), nullable=False, index=True)
+    asset_type = Column(String(20), nullable=False, default="stock")
+    side = Column(String(10), nullable=False)
+    order_type = Column(String(20), nullable=False)
+    role = Column(String(20), nullable=False, default="standalone")
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    quantity = Column(Float, nullable=False)
+    filled_quantity = Column(Float, nullable=False, default=0.0)
+    limit_price = Column(Float, nullable=True)
+    stop_price = Column(Float, nullable=True)
+    trail_percent = Column(Float, nullable=True)
+    trail_amount = Column(Float, nullable=True)
+    trail_reference_price = Column(Float, nullable=True)
+    effective_stop_price = Column(Float, nullable=True)
+    triggered = Column(Boolean, nullable=False, default=False)
+    triggered_at = Column(DateTime, nullable=True)
+    time_in_force = Column(String(10), nullable=False, default="gtc")
+    expires_at = Column(DateTime, nullable=True)
+    reference_price = Column(Float, nullable=True)
+    reserved_cash = Column(Float, nullable=False, default=0.0)
+    reservation_price = Column(Float, nullable=True)
+    average_fill_price = Column(Float, nullable=True)
+    filled_notional = Column(Float, nullable=False, default=0.0)
+    fees_total = Column(Float, nullable=False, default=0.0)
+    slippage_total = Column(Float, nullable=False, default=0.0)
+    parent_id = Column(Integer, ForeignKey("paper_orders.id"), nullable=True, index=True)
+    oco_group = Column(String(60), nullable=True, index=True)
+    trade_id = Column(Integer, ForeignKey("trades.id"), nullable=True, index=True)
+    last_candle_at = Column(DateTime, nullable=True)
+    reject_reason = Column(Text, nullable=True)
+    cancel_reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+    updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
+
+    @property
+    def remaining_quantity(self) -> float:
+        return round((self.quantity or 0.0) - (self.filled_quantity or 0.0), 8)
+
+    @property
+    def costs_total(self) -> float:
+        return round((self.fees_total or 0.0) + (self.slippage_total or 0.0), 6)
+
+
+class PaperOrderFill(Base):
+    """One immutable simulated execution against a single candle."""
+
+    __tablename__ = "paper_order_fills"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_id = Column(Integer, ForeignKey("paper_orders.id"), nullable=False, index=True)
+    quantity = Column(Float, nullable=False)
+    price = Column(Float, nullable=False)
+    fees = Column(Float, nullable=False, default=0.0)
+    slippage = Column(Float, nullable=False, default=0.0)
+    candle_timestamp = Column(DateTime, nullable=False)
+    trade_id = Column(Integer, ForeignKey("trades.id"), nullable=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+
+
+class PaperOrderEvent(Base):
+    """Append-only audit event; rows are never updated or deleted."""
+
+    __tablename__ = "paper_order_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_id = Column(Integer, ForeignKey("paper_orders.id"), nullable=False, index=True)
+    event_type = Column(String(40), nullable=False)
+    from_status = Column(String(20), nullable=True)
+    to_status = Column(String(20), nullable=True)
+    message = Column(Text, nullable=True)
+    detail_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
 
 
 class Portfolio(Base):

@@ -86,3 +86,57 @@ def test_legacy_closed_trades_backfill_attribution_columns(tmp_path) -> None:
     }.issubset(columns)
     assert rows[0] == ("AAPL", 10, 120, 0, None, None, "not_calculated")
     assert rows[1] == ("BTC", 0, None, 0, None, None, "not_calculated")
+
+
+def test_legacy_paper_order_table_receives_lifecycle_columns(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-paper.db'}")
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE paper_orders ("
+            "id INTEGER PRIMARY KEY, idempotency_key VARCHAR(80), ticker VARCHAR(20) NOT NULL, "
+            "side VARCHAR(10), order_type VARCHAR(20), status VARCHAR(20), quantity FLOAT)"
+        ))
+        connection.execute(text(
+            "INSERT INTO paper_orders "
+            "(idempotency_key, ticker, side, order_type, status, quantity) "
+            "VALUES ('legacy-1', 'AAPL', 'BUY', 'market', 'submitted', 5)"
+        ))
+        _migrate_existing_tables(connection)
+
+        columns = {column["name"] for column in inspect(connection).get_columns("paper_orders")}
+        row = connection.execute(text(
+            "SELECT ticker, asset_type, role, filled_quantity, triggered, time_in_force, "
+            "reserved_cash, filled_notional FROM paper_orders"
+        )).one()
+
+    assert {
+        "role",
+        "asset_type",
+        "filled_quantity",
+        "limit_price",
+        "stop_price",
+        "trail_percent",
+        "trail_amount",
+        "trail_reference_price",
+        "effective_stop_price",
+        "triggered",
+        "triggered_at",
+        "time_in_force",
+        "expires_at",
+        "reference_price",
+        "reserved_cash",
+        "reservation_price",
+        "average_fill_price",
+        "filled_notional",
+        "fees_total",
+        "slippage_total",
+        "parent_id",
+        "oco_group",
+        "trade_id",
+        "last_candle_at",
+        "reject_reason",
+        "cancel_reason",
+        "created_at",
+        "updated_at",
+    }.issubset(columns)
+    assert row == ("AAPL", "stock", "standalone", 0, 0, "gtc", 0, 0)

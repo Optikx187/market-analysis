@@ -646,6 +646,212 @@ export const attributionExportUrl = (format: "json" | "csv", filters: Attributio
   return `/api/attribution/export?${params.toString()}`;
 };
 
+// Deterministic paper orders — simulated fills only, no broker submission
+export const PAPER_ORDER_STATUSES = [
+  "pending",
+  "submitted",
+  "partially_filled",
+  "filled",
+  "canceled",
+  "rejected",
+  "expired",
+] as const;
+
+export type PaperOrderStatus = (typeof PAPER_ORDER_STATUSES)[number];
+
+export const PAPER_ORDER_TYPES = [
+  "market",
+  "limit",
+  "stop",
+  "stop_limit",
+  "bracket",
+  "trailing_stop",
+] as const;
+
+export type PaperOrderType = (typeof PAPER_ORDER_TYPES)[number];
+
+export interface PaperOrderFill {
+  id: number;
+  quantity: number;
+  price: number;
+  fees: number;
+  slippage: number;
+  notional: number;
+  candle_timestamp: string | null;
+  trade_id: number | null;
+  created_at: string | null;
+}
+
+export interface PaperOrderEvent {
+  id: number;
+  event_type: string;
+  from_status: string | null;
+  to_status: string | null;
+  message: string | null;
+  detail: Record<string, unknown> | null;
+  created_at: string | null;
+}
+
+export interface PaperOrder {
+  id: number;
+  idempotency_key: string;
+  ticker: string;
+  asset_type: string;
+  side: string;
+  order_type: PaperOrderType;
+  role: string;
+  status: PaperOrderStatus;
+  quantity: number;
+  filled_quantity: number;
+  remaining_quantity: number;
+  limit_price: number | null;
+  stop_price: number | null;
+  trail_percent: number | null;
+  trail_amount: number | null;
+  trail_reference_price: number | null;
+  effective_stop_price: number | null;
+  triggered: boolean;
+  triggered_at: string | null;
+  time_in_force: string;
+  expires_at: string | null;
+  reference_price: number | null;
+  reserved_cash: number;
+  reservation_price: number | null;
+  average_fill_price: number | null;
+  filled_notional: number;
+  fees_total: number;
+  slippage_total: number;
+  costs_total: number;
+  parent_id: number | null;
+  oco_group: string | null;
+  trade_id: number | null;
+  last_candle_at: string | null;
+  reject_reason: string | null;
+  cancel_reason: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  mode: string;
+  children?: PaperOrder[];
+  fills?: PaperOrderFill[];
+  events?: PaperOrderEvent[];
+}
+
+export interface PaperMode {
+  mode: string;
+  live_trading_enabled: boolean;
+  notice: string;
+  spread_pct: number;
+  slippage_pct: number;
+  participation_pct: number;
+  fee_pct: number;
+  candle_interval: string;
+}
+
+export interface PaperOrderFilters {
+  status?: string;
+  ticker?: string;
+  asset_type?: string;
+  side?: string;
+  order_type?: string;
+}
+
+export interface PaperOrderListResponse {
+  mode: string;
+  live_trading_enabled: boolean;
+  notice: string;
+  orders: PaperOrder[];
+  filters_available: {
+    status: string[];
+    order_type: string[];
+    side: string[];
+    asset_type: string[];
+  };
+}
+
+export interface PaperOrderInput {
+  idempotency_key: string;
+  ticker: string;
+  side: string;
+  order_type: PaperOrderType;
+  quantity: number;
+  asset_type?: string;
+  limit_price?: number;
+  stop_price?: number;
+  trail_percent?: number;
+  trail_amount?: number;
+  reference_price?: number;
+  take_profit_price?: number;
+  stop_loss_price?: number;
+  time_in_force?: string;
+  expires_at?: string;
+}
+
+export interface PaperCandleInput {
+  timestamp: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface PaperProcessInput {
+  ticker: string;
+  candles?: PaperCandleInput[];
+  interval?: string;
+  order_id?: number;
+}
+
+export interface PaperProcessResponse {
+  ticker: string;
+  candle_source: string;
+  processed_candles: number;
+  orders: PaperOrder[];
+  portfolio: { balance: number; equity: number; reserved_cash: number };
+}
+
+export interface PaperReconciliation {
+  mode: string;
+  live_trading_enabled: boolean;
+  notice: string;
+  orders: number;
+  status_counts: Record<string, number>;
+  fills: number;
+  filled_quantity: number;
+  order_filled_quantity: number;
+  filled_notional: number;
+  fees_total: number;
+  slippage_total: number;
+  reserved_cash: number;
+  position_capital: number;
+  balance: number;
+  equity: number;
+  expected_equity: number;
+  fills_match_orders: boolean;
+  equity_balanced: boolean;
+}
+
+export const fetchPaperMode = () =>
+  api.get<PaperMode>("/paper-orders/mode").then((r) => r.data);
+
+export const fetchPaperOrders = (filters: PaperOrderFilters = {}) =>
+  api.get<PaperOrderListResponse>("/paper-orders", { params: filters }).then((r) => r.data);
+
+export const fetchPaperOrder = (orderId: number) =>
+  api.get<PaperOrder>(`/paper-orders/${orderId}`).then((r) => r.data);
+
+export const createPaperOrder = (payload: PaperOrderInput) =>
+  api.post<PaperOrder>("/paper-orders", payload).then((r) => r.data);
+
+export const cancelPaperOrder = (orderId: number, reason?: string) =>
+  api.post<PaperOrder>(`/paper-orders/${orderId}/cancel`, { reason }).then((r) => r.data);
+
+export const processPaperOrders = (payload: PaperProcessInput) =>
+  api.post<PaperProcessResponse>("/paper-orders/process", payload).then((r) => r.data);
+
+export const fetchPaperReconciliation = () =>
+  api.get<PaperReconciliation>("/paper-orders/reconcile").then((r) => r.data);
+
 // Notification channel toggles
 export interface ChannelStatus {
   configured: boolean;

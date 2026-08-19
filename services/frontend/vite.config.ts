@@ -31,6 +31,7 @@ export default defineConfig({
       "/api/backtest": "http://localhost:8001",
       "/api/attribution": "http://localhost:8002",
       "/api/portfolio": "http://localhost:8002",
+      "/api/paper-orders": "http://localhost:8002",
       "/api/dashboard-summary": "http://localhost:8002",
       "/api/auth": "http://localhost:8002",
       "/api/trades": "http://localhost:8002",
