@@ -455,6 +455,81 @@ def test_expired_orders_release_cash_and_stop_working(client: TestClient) -> Non
     assert _order(client, order["id"])["filled_quantity"] == 0
 
 
+def test_day_orders_expire_on_the_next_session_without_an_explicit_expiry(
+    tmp_path, monkeypatch
+) -> None:
+    """A DAY order anchors to its first candle's session and dies on the next one."""
+    database_path = tmp_path / "paper-orders-day.db"
+    with _service(database_path, monkeypatch) as client:
+        order = _create(
+            client,
+            idempotency_key="day-order",
+            ticker="NFLX",
+            order_type="limit",
+            quantity=1,
+            limit_price=50,
+            time_in_force="day",
+        )
+        assert order["expires_at"] is None
+        assert order["reserved_cash"] == 50.0
+
+        # Non-marketable candle: the order works for the rest of its own session.
+        _process(client, "NFLX", [_candle(2, 60, 61, 55, 58, 10_000)])
+        anchored = _order(client, order["id"])
+        assert anchored["status"] == "submitted"
+        assert anchored["expires_at"].startswith("2024-01-03T00:00:00")
+        assert anchored["reserved_cash"] == 50.0
+        assert "day_session_anchored" in _event_types(anchored)
+
+        # The next session's candle expires it and gives the reservation back.
+        _process(client, "NFLX", [_candle(3, 59, 60, 54, 57, 10_000)])
+        expired = _order(client, order["id"])
+        assert expired["status"] == "expired"
+        assert expired["reserved_cash"] == 0.0
+        assert _portfolio(client)["balance"] == 10000.0
+        expiry = [event for event in expired["events"] if event["event_type"] == "expired"]
+        assert len(expiry) == 1
+        assert expiry[0]["to_status"] == "expired"
+        assert expiry[0]["created_at"] is not None
+
+    with _service(database_path, monkeypatch) as client:
+        restored = _order(client, order["id"])
+        assert restored == expired
+
+        # A marketable candle after expiry can never fill an expired order.
+        _process(client, "NFLX", [_candle(4, 45, 46, 40, 44, 10_000)])
+        assert _order(client, restored["id"]) == restored
+        assert _portfolio(client)["balance"] == 10000.0
+
+
+def test_day_bracket_children_expire_only_after_activation(client: TestClient) -> None:
+    parent = _create(
+        client,
+        idempotency_key="day-bracket",
+        order_type="bracket",
+        quantity=1,
+        limit_price=100,
+        take_profit_price=120,
+        stop_loss_price=90,
+        time_in_force="day",
+    )
+    # Pending children are not working orders, so the first session cannot expire them.
+    _process(client, "AAPL", [_candle(2, 99, 101, 98, 100.5, 10_000)])
+    filled = _order(client, parent["id"])
+    assert filled["status"] == "filled"
+    assert [child["status"] for child in filled["children"]] == ["submitted", "submitted"]
+    assert all(child["expires_at"] is None for child in filled["children"])
+
+    # Once activated they anchor to the candle that works them, then expire.
+    _process(client, "AAPL", [_candle(3, 105, 106, 104, 105.5, 10_000)])
+    activated = _order(client, parent["id"])
+    assert [child["status"] for child in activated["children"]] == ["submitted", "submitted"]
+
+    _process(client, "AAPL", [_candle(4, 105, 106, 104, 105.5, 10_000)])
+    expired = _order(client, parent["id"])
+    assert [child["status"] for child in expired["children"]] == ["expired", "expired"]
+
+
 def test_terminal_orders_reject_further_transitions(client: TestClient) -> None:
     order = _create(client, idempotency_key="fill-then-cancel", quantity=1, reference_price=110)
     _process(client, "AAPL", [_candle(2, 100, 101, 99, 100.5, 10_000)])
@@ -656,6 +731,34 @@ class TestSimulationSemantics:
     def test_weighted_average_price_of_fills(self) -> None:
         assert paper.weighted_average_price([(5, 101.0), (5, 103.02)]) == 102.01
         assert paper.weighted_average_price([]) is None
+
+    def test_prices_round_half_up_at_four_decimals(self) -> None:
+        assert paper.round_price(101.07575) == 101.0758
+        assert paper.round_price(105.07875) == 105.0788
+        assert paper.round_price(-105.07875) == -105.0788
+        assert paper.round_price(101.075749) == 101.0757
+        assert paper.round_price(2.5) == 2.5
+
+    def test_half_tick_weighted_average_rounds_half_up(self) -> None:
+        assert paper.weighted_average_price([(1, 100.0), (1, 102.1515)]) == 101.0758
+
+    def test_half_tick_fill_price_rounds_half_up(self) -> None:
+        state = paper.OrderState(side="BUY", order_type="market", quantity=1)
+        candle = self._candle(open=105.07875, high=105.5, low=104.0, close=105.0)
+        outcome = paper.simulate_candle(state, candle, paper.FillConfig())
+        # The raw half-tick 105.07875 persists as 105.0788, not a truncated 105.0787.
+        assert outcome.fill_price == 105.0788
+
+    def test_rounding_never_fills_a_limit_order_past_its_limit(self) -> None:
+        state = paper.OrderState(
+            side="BUY", order_type="limit", quantity=1, limit_price=105.07875
+        )
+        outcome = paper.simulate_candle(
+            state,
+            self._candle(open=105.07875, high=105.5, low=104.0, close=105.0),
+            paper.FillConfig(),
+        )
+        assert outcome.fill_price == 105.07875
 
     def test_intraday_candles_are_never_fabricated(self) -> None:
         with pytest.raises(ValueError):

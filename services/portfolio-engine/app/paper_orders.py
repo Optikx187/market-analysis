@@ -7,7 +7,8 @@ orders never reach a broker: the simulation below is the only execution path.
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
 MARKET = "market"
@@ -58,11 +59,14 @@ TAKE_PROFIT = "take_profit"
 STOP_LOSS = "stop_loss"
 STANDALONE = "standalone"
 
-TIME_IN_FORCE = ("gtc", "day")
+GTC = "gtc"
+DAY = "day"
+TIME_IN_FORCE = (GTC, DAY)
 
 QUANTITY_EPSILON = 1e-9
 QUANTITY_PRECISION = 8
-PRICE_PRECISION = 6
+PRICE_PRECISION = 4
+PRICE_QUANTUM = Decimal(1).scaleb(-PRICE_PRECISION)
 
 
 def transition_allowed(current: str, target: str) -> bool:
@@ -74,7 +78,25 @@ def round_quantity(value: float) -> float:
 
 
 def round_price(value: float) -> float:
-    return round(value, PRICE_PRECISION)
+    """Quantize a price to four decimals with financial ROUND_HALF_UP.
+
+    Every persisted or reported price passes through here, so half-ticks such as
+    101.07575 resolve to 101.0758 instead of following binary float or banker's
+    rounding. Execution semantics are unaffected: prices are computed at full
+    precision first and priced orders are clamped to their limit afterwards.
+    """
+    return float(Decimal(str(float(value))).quantize(PRICE_QUANTUM, rounding=ROUND_HALF_UP))
+
+
+def day_session_end(timestamp: datetime) -> datetime:
+    """Deterministic close of the DAY session containing ``timestamp``.
+
+    Candles are normalized to naive UTC, so a session spans one UTC calendar
+    day: that matches crypto's continuous 24h session and, for stocks, keeps a
+    DAY order alive for the whole session of the candle that opened it without
+    ever consulting the wall clock.
+    """
+    return datetime.combine(timestamp.date(), datetime.min.time()) + timedelta(days=1)
 
 
 @dataclass(frozen=True)
@@ -357,6 +379,9 @@ def simulate_candle(state: OrderState, candle: Candle, config: FillConfig) -> Ca
         return outcome("no_liquidity")
     fill_quantity = round_quantity(min(remaining, participation_cap))
     fill_price = round_price(price)
+    if limit_price is not None:
+        # Rounding may never push a fill past its limit.
+        fill_price = min(fill_price, limit_price) if state.side == BUY else max(fill_price, limit_price)
     adverse = fill_price - base_price if state.side == BUY else base_price - fill_price
     slippage = max(0.0, adverse) * fill_quantity
     return outcome(

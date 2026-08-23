@@ -2211,6 +2211,21 @@ async def _paper_process_candles(
                 continue
             if order.last_candle_at is not None and candle.timestamp <= order.last_candle_at:
                 continue
+            if order.expires_at is None and order.time_in_force == paper.DAY:
+                order.expires_at = paper.day_session_end(candle.timestamp)
+                _paper_audit(
+                    db,
+                    order,
+                    "day_session_anchored",
+                    message=(
+                        f"DAY order anchored to the session of {candle.timestamp.isoformat()}; "
+                        f"expires at {order.expires_at.isoformat()}"
+                    ),
+                    detail={
+                        "expires_at": order.expires_at,
+                        "candle": _candle_detail(candle),
+                    },
+                )
             if order.expires_at is not None and candle.timestamp >= order.expires_at:
                 await _expire_paper_order(db, order, portfolio, candle)
                 touched.append(order.id)
