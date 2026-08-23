@@ -193,6 +193,13 @@ def test_market_buy_partial_fills_track_cash_position_and_weighted_average(clien
     assert reconcile["equity_balanced"] is True
     assert reconcile["filled_quantity"] == 10
 
+    # The reported components are cent-exact, so the displayed sum is the reported total.
+    components = ["balance", "position_capital", "reserved_cash"]
+    assert sum(paper.to_cents(reconcile[key]) for key in components) == paper.to_cents(
+        reconcile["expected_equity"]
+    )
+    assert abs(paper.to_cents(reconcile["equity"]) - paper.to_cents(reconcile["expected_equity"])) <= 1
+
 
 def test_buy_limit_never_fills_worse_than_its_limit(client: TestClient) -> None:
     order = _create(
@@ -759,6 +766,27 @@ class TestSimulationSemantics:
             paper.FillConfig(),
         )
         assert outcome.fill_price == 105.07875
+
+    def test_cash_rounds_half_up_to_cents(self) -> None:
+        assert paper.round_cash(1115.835) == 1115.84
+        assert paper.round_cash(1115.8349) == 1115.83
+        assert paper.to_cents(1115.835) == 111584
+        assert paper.to_cents(8935.67) == 893567
+
+    def test_equity_tolerance_accepts_exactly_one_cent(self) -> None:
+        components = [8935.67, 1115.84, 0.0]
+        assert paper.equity_balanced(10051.51, components) is True  # 0 cents
+        assert paper.equity_balanced(10051.50, components) is True  # 1 cent below
+        assert paper.equity_balanced(10051.52, components) is True  # 1 cent above
+        assert paper.equity_balanced(10051.49, components) is False  # 2 cents
+        assert paper.equity_balanced(10051.53, components) is False  # 2 cents
+
+    def test_equity_tolerance_uses_the_rounded_component_values(self) -> None:
+        # Position capital carries a half cent: the comparison must use the 1115.84
+        # the API and UI display, not the raw 1115.835.
+        assert paper.equity_balanced(10051.51, [8935.67, 1115.835, 0.0]) is True
+        assert paper.equity_balanced(10051.50, [8935.67, 1115.835, 0.0]) is True
+        assert paper.equity_balanced(10049.51, [8935.67, 1115.835, 0.0]) is False
 
     def test_intraday_candles_are_never_fabricated(self) -> None:
         with pytest.raises(ValueError):

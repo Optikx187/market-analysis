@@ -67,6 +67,9 @@ QUANTITY_EPSILON = 1e-9
 QUANTITY_PRECISION = 8
 PRICE_PRECISION = 4
 PRICE_QUANTUM = Decimal(1).scaleb(-PRICE_PRECISION)
+CASH_PRECISION = 2
+CASH_QUANTUM = Decimal(1).scaleb(-CASH_PRECISION)
+EQUITY_TOLERANCE_CENTS = 1
 
 
 def transition_allowed(current: str, target: str) -> bool:
@@ -86,6 +89,27 @@ def round_price(value: float) -> float:
     precision first and priced orders are clamped to their limit afterwards.
     """
     return float(Decimal(str(float(value))).quantize(PRICE_QUANTUM, rounding=ROUND_HALF_UP))
+
+
+def round_cash(value: float) -> float:
+    """Quantize a cash amount to whole cents with financial ROUND_HALF_UP."""
+    return float(Decimal(str(float(value))).quantize(CASH_QUANTUM, rounding=ROUND_HALF_UP))
+
+
+def to_cents(value: float) -> int:
+    """Whole cents of a cash amount, using the same ROUND_HALF_UP contract."""
+    return int(Decimal(str(float(value))).quantize(CASH_QUANTUM, rounding=ROUND_HALF_UP).scaleb(2))
+
+
+def equity_balanced(equity: float, components: list[float]) -> bool:
+    """Whether equity matches its components within the inclusive one-cent tolerance.
+
+    Cash, position capital and reservations are each rounded to cents before the
+    comparison, so the check is made on the same integer-cent values the API and
+    UI display. A single cent of rounding residue is accepted; two are not.
+    """
+    expected = sum(to_cents(component) for component in components)
+    return abs(to_cents(equity) - expected) <= EQUITY_TOLERANCE_CENTS
 
 
 def day_session_end(timestamp: datetime) -> datetime:

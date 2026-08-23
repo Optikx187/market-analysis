@@ -1585,12 +1585,12 @@ async def reconcile_paper_orders(db: AsyncSession = Depends(get_db)):
         status_counts[order.status] = status_counts.get(order.status, 0) + 1
     filled_quantity = paper.round_quantity(sum(fill.quantity for fill in fills))
     order_filled_quantity = paper.round_quantity(sum(order.filled_quantity or 0.0 for order in orders))
-    locked = round(
-        sum(position.entry_price * position.remaining_quantity for position in positions), 2
+    locked = paper.round_cash(
+        sum(position.entry_price * position.remaining_quantity for position in positions)
     )
-    reserved = round(await _reserved_paper_cash(db), 2)
-    balance = round(portfolio.balance, 2)
-    equity = round(portfolio.equity, 2)
+    reserved = paper.round_cash(await _reserved_paper_cash(db))
+    balance = paper.round_cash(portfolio.balance)
+    equity = paper.round_cash(portfolio.equity)
     return {
         **PAPER_MODE,
         "orders": len(orders),
@@ -1598,16 +1598,16 @@ async def reconcile_paper_orders(db: AsyncSession = Depends(get_db)):
         "fills": len(fills),
         "filled_quantity": filled_quantity,
         "order_filled_quantity": order_filled_quantity,
-        "filled_notional": round(sum(fill.quantity * fill.price for fill in fills), 2),
+        "filled_notional": paper.round_cash(sum(fill.quantity * fill.price for fill in fills)),
         "fees_total": round(sum(fill.fees for fill in fills), 6),
         "slippage_total": round(sum(fill.slippage for fill in fills), 6),
         "reserved_cash": reserved,
         "position_capital": locked,
         "balance": balance,
         "equity": equity,
-        "expected_equity": round(balance + locked + reserved, 2),
+        "expected_equity": paper.round_cash(balance + locked + reserved),
         "fills_match_orders": abs(filled_quantity - order_filled_quantity) <= paper.QUANTITY_EPSILON,
-        "equity_balanced": abs(equity - (balance + locked + reserved)) <= 0.01,
+        "equity_balanced": paper.equity_balanced(equity, [balance, locked, reserved]),
     }
 
 
