@@ -73,6 +73,41 @@ def _migrate_existing_tables(conn: Connection) -> None:
             conn.execute(text(
                 "UPDATE trades SET gross_pnl = pnl WHERE gross_pnl IS NULL AND pnl IS NOT NULL"
             ))
+    if "paper_orders" in tables:
+        columns = {column["name"] for column in inspector.get_columns("paper_orders")}
+        paper_order_columns = {
+            "role": "VARCHAR(20) NOT NULL DEFAULT 'standalone'",
+            "asset_type": "VARCHAR(20) NOT NULL DEFAULT 'stock'",
+            "filled_quantity": "FLOAT NOT NULL DEFAULT 0",
+            "limit_price": "FLOAT",
+            "stop_price": "FLOAT",
+            "trail_percent": "FLOAT",
+            "trail_amount": "FLOAT",
+            "trail_reference_price": "FLOAT",
+            "effective_stop_price": "FLOAT",
+            "triggered": "BOOLEAN NOT NULL DEFAULT 0",
+            "triggered_at": "DATETIME",
+            "time_in_force": "VARCHAR(10) NOT NULL DEFAULT 'gtc'",
+            "expires_at": "DATETIME",
+            "reference_price": "FLOAT",
+            "reserved_cash": "FLOAT NOT NULL DEFAULT 0",
+            "reservation_price": "FLOAT",
+            "average_fill_price": "FLOAT",
+            "filled_notional": "FLOAT NOT NULL DEFAULT 0",
+            "fees_total": "FLOAT NOT NULL DEFAULT 0",
+            "slippage_total": "FLOAT NOT NULL DEFAULT 0",
+            "parent_id": "INTEGER",
+            "oco_group": "VARCHAR(60)",
+            "trade_id": "INTEGER",
+            "last_candle_at": "DATETIME",
+            "reject_reason": "TEXT",
+            "cancel_reason": "TEXT",
+            "created_at": "DATETIME",
+            "updated_at": "DATETIME",
+        }
+        for name, definition in paper_order_columns.items():
+            if name not in columns:
+                conn.execute(text(f"ALTER TABLE paper_orders ADD COLUMN {name} {definition}"))
     if "alert_logs" in tables:
         columns = {column["name"] for column in inspector.get_columns("alert_logs")}
         if "approved" not in columns:

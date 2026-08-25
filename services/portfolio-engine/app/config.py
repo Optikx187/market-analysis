@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     CRYPTO_SHOCK_PCT: float = 0.20
     ATTRIBUTION_MIN_SAMPLE_SIZE: int = 20
     ATTRIBUTION_CANDLE_INTERVAL: str = "1d"
+    PAPER_SPREAD_PCT: float = 0.0005
+    PAPER_SLIPPAGE_PCT: float = 0.0005
+    PAPER_VOLUME_PARTICIPATION_PCT: float = 0.01
+    PAPER_FEE_PCT: float = 0.0
+    PAPER_ORDER_CANDLE_INTERVAL: str = "1d"
     AUTH_ENABLED: bool = False
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"

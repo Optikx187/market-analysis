@@ -11,12 +11,14 @@ import ScannerPanel from "@/components/ScannerPanel";
 import PriceAlertsPanel from "@/components/PriceAlertsPanel";
 import HistoricalChart from "@/components/HistoricalChart";
 import AttributionPanel from "@/components/AttributionPanel";
+import OrdersPanel from "@/components/OrdersPanel";
 import { fetchOnboardingStatus } from "@/lib/api";
 
 const APP_VERSION = "3.0.0";
 
 type Tab =
   | "alerts"
+  | "orders"
   | "trades"
   | "performance"
   | "scanner"
@@ -72,6 +74,7 @@ function App() {
 
   const tabLabels: Record<Tab, string> = {
     alerts: "Alerts",
+    orders: "Orders",
     trades: "Trades",
     performance: "Performance",
     scanner: "Scanner",
@@ -82,7 +85,10 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
+    <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)] border-t-4 border-amber-500">
+      <div className="bg-amber-500 px-4 py-1 text-center text-xs font-bold uppercase tracking-wide text-black">
+        Paper trading mode &middot; simulated fills only &middot; no broker order is ever submitted
+      </div>
       <header className="border-b border-[var(--border)] bg-[var(--card)]">
         <div className="container mx-auto px-4 py-4 flex items-center justify-between">
           <div>
@@ -136,6 +142,7 @@ function App() {
         </div>
 
         {tab === "alerts" && <AlertsPanel />}
+        {tab === "orders" && <OrdersPanel />}
         {tab === "trades" && <TradesPanel />}
         {tab === "performance" && <AttributionPanel />}
         {tab === "scanner" && <ScannerPanel />}
@@ -148,6 +155,7 @@ function App() {
       <footer className="border-t border-[var(--border)] py-4 mt-8">
         <div className="container mx-auto px-4 text-center text-xs text-[var(--muted-foreground)]">
           Market Analysis v{APP_VERSION} &middot; Capital Preservation First &middot; Docker Orchestrated
+          &middot; <span className="font-semibold text-amber-500">PAPER</span>
         </div>
       </footer>
     </div>
