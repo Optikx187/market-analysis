@@ -395,7 +395,7 @@ function WidgetCard({ id, data, detailed }: { id: string; data: DashboardSummary
     }
     const quality = health.data_quality;
     const connectivity = Object.entries(health.connectivity ?? {});
-    const down = connectivity.filter(([, value]) => value.status !== "ok").map(([name]) => name);
+    const down = connectivity.filter(([, value]) => !value.online).map(([name]) => name);
     return (
       <DashboardCard
         label={label}

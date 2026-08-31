@@ -1070,7 +1070,7 @@ export interface DashboardSummary {
   provider_health?: {
     available: boolean;
     reason?: string | null;
-    connectivity?: Record<string, { status: string; last_success: string | null; last_error: string | null }>;
+    connectivity?: Record<string, { online: boolean; last_checked: string | null; last_online: string | null; last_offline: string | null }>;
     data_quality?: { total: number; healthy: number; warnings: number; blocked: number };
     current_time?: string;
   };

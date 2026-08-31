@@ -14,6 +14,7 @@ from app.models import ActionItem
 
 SCANNER_STATUS: dict[str, object] = {
     "last_scan_result": {
+        "timestamp": "2026-01-02T00:00:00+00:00",
         "signals": [
             {
                 "ticker": "AAPL",
@@ -93,7 +94,16 @@ def env(tmp_path, monkeypatch):
         return EARNINGS
 
     async def data_status() -> dict[str, object]:
-        return {"connectivity": {"yahoo": {"status": "ok", "last_success": None, "last_error": None}}}
+        return {
+            "connectivity": {
+                "yahoo": {
+                    "online": True,
+                    "last_checked": None,
+                    "last_online": None,
+                    "last_offline": None,
+                }
+            }
+        }
 
     async def candles(ticker: str, interval: str) -> list[dict[str, object]]:
         return [{"close": 92.0}]
@@ -387,6 +397,27 @@ def test_resolved_source_clears_and_reopens_when_condition_changes(client, monke
     assert reopened["id"] == resolved["id"]
 
 
+def test_resolved_source_reopens_when_unchanged_source_returns(client, monkeypatch):
+    client.post("/api/action-items/refresh")
+
+    async def quiet_earnings() -> dict[str, object]:
+        return {"upcoming": []}
+
+    monkeypatch.setattr(main, "_fetch_upcoming_earnings", quiet_earnings)
+    client.post("/api/action-items/refresh")
+    resolved = _by_key(client.get("/api/action-items?status=resolved").json())["earnings:AAPL"]
+
+    async def restored_earnings() -> dict[str, object]:
+        return EARNINGS
+
+    monkeypatch.setattr(main, "_fetch_upcoming_earnings", restored_earnings)
+    client.post("/api/action-items/refresh")
+    reopened = _by_key(client.get("/api/action-items").json())["earnings:AAPL"]
+    assert reopened["status"] == "open"
+    assert reopened["source_active"] is True
+    assert reopened["id"] == resolved["id"]
+
+
 def test_service_failure_creates_operational_item_without_failing(client, monkeypatch):
     async def broken_scanner() -> dict[str, object]:
         return {"error": "Connection refused"}
@@ -485,8 +516,10 @@ def test_dashboard_summary_exposes_widget_inputs(client):
 
     assert summary["cash"]["available"] is True
     assert summary["regime"]["available"] is True
+    assert summary["regime"]["scanned_at"] == "2026-01-02T00:00:00+00:00"
     assert summary["top_opportunities"]["items"][0]["ticker"] == "AAPL"
     assert summary["provider_health"]["available"] is True
+    assert summary["provider_health"]["connectivity"]["yahoo"]["online"] is True
     assert summary["action_counts"]["unresolved"] >= 1
 
 

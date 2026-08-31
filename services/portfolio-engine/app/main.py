@@ -636,7 +636,7 @@ def _widget_regime(scanner: dict[str, object]) -> dict[str, object]:
                 "volatility": regime.get("volatility"),
                 "breadth": regime.get("breadth"),
                 "risk": regime.get("risk"),
-                "scanned_at": scan.get("scanned_at") if isinstance(scan, dict) else None,
+                "scanned_at": scan.get("timestamp") if isinstance(scan, dict) else None,
             }
     return {"available": False, "reason": "Latest scan carried no regime snapshot"}
 
@@ -2607,6 +2607,7 @@ async def _refresh_action_items(db: AsyncSession, user_key: str) -> dict[str, in
             created += 1
             continue
         changed_payload = item.payload_hash != candidate.payload_hash
+        was_active = item.source_active
         item.source_type = candidate.source_type
         item.category = candidate.category
         item.severity = candidate.severity
@@ -2626,8 +2627,7 @@ async def _refresh_action_items(db: AsyncSession, user_key: str) -> dict[str, in
         if actions.expired_snooze(item.status, item.snoozed_until, now):
             item.status = actions.STATUS_OPEN
             item.snoozed_until = None
-        if item.status == actions.STATUS_RESOLVED and changed_payload:
-            # The condition changed after it was resolved, so it needs a fresh decision.
+        if item.status == actions.STATUS_RESOLVED and (changed_payload or not was_active):
             item.status = actions.STATUS_OPEN
             item.resolved_at = None
         updated += 1
