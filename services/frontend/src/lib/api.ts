@@ -1039,10 +1039,175 @@ export interface DashboardSummary {
   win_rate: number;
   total_trades: number;
   risk: PortfolioRisk;
+  cash?: {
+    available: boolean;
+    balance: number;
+    reserved: number;
+    free: number;
+    peak_equity: number;
+  };
+  regime?: {
+    available: boolean;
+    reason?: string | null;
+    label?: string;
+    trend?: string;
+    volatility?: string;
+    breadth?: string;
+    risk?: string;
+    scanned_at?: string | null;
+  };
+  top_opportunities?: {
+    available: boolean;
+    reason?: string | null;
+    items: Array<{
+      id: string;
+      ticker: string;
+      direction: string;
+      score: number;
+      user_decision: string;
+    }>;
+  };
+  provider_health?: {
+    available: boolean;
+    reason?: string | null;
+    connectivity?: Record<string, { status: string; last_success: string | null; last_error: string | null }>;
+    data_quality?: { total: number; healthy: number; warnings: number; blocked: number };
+    current_time?: string;
+  };
+  action_counts?: ActionItemCounts;
 }
 
 export const fetchDashboardSummary = () =>
   api.get<DashboardSummary>("/dashboard-summary").then((r) => r.data);
+
+// Issue #50: Action Required inbox
+export type ActionItemStatus = "open" | "acknowledged" | "snoozed" | "resolved";
+export type ActionItemSeverity = "critical" | "warning" | "info";
+export type ActionItemCategory =
+  | "opportunity"
+  | "risk"
+  | "data"
+  | "event"
+  | "execution"
+  | "operations";
+
+export interface ActionItemDeepLink {
+  tab: string;
+  ticker?: string;
+  opportunity_id?: string;
+  trade_id?: number;
+  order_id?: number;
+  section?: string;
+}
+
+export interface ActionItem {
+  id: number;
+  source_key: string;
+  source_type: string;
+  category: ActionItemCategory;
+  severity: ActionItemSeverity;
+  is_mandatory: boolean;
+  title: string;
+  message: string;
+  ticker: string | null;
+  trade_id: number | null;
+  order_id: number | null;
+  context_id: string | null;
+  deep_link: ActionItemDeepLink;
+  payload: Record<string, unknown>;
+  payload_hash: string;
+  status: ActionItemStatus;
+  source_active: boolean;
+  snoozed_until: string | null;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  updated_at: string | null;
+  acknowledged_at: string | null;
+  snoozed_at: string | null;
+  resolved_at: string | null;
+}
+
+export interface ActionItemCounts {
+  total: number;
+  unresolved: number;
+  open: number;
+  mandatory: number;
+  by_status: Record<ActionItemStatus, number>;
+  by_severity: Record<ActionItemSeverity, number>;
+  by_category: Record<ActionItemCategory, number>;
+}
+
+export interface ActionItemListResponse {
+  user_key: string;
+  items: ActionItem[];
+  counts: ActionItemCounts;
+  mandatory_note: string;
+  refreshed?: { created: number; updated: number; cleared: number };
+}
+
+export interface ActionItemFilters {
+  status?: string;
+  category?: string;
+  severity?: string;
+  source_type?: string;
+}
+
+export const fetchActionItems = (filters: ActionItemFilters = {}) =>
+  api.get<ActionItemListResponse>("/action-items", { params: filters }).then((r) => r.data);
+
+export const refreshActionItems = (filters: ActionItemFilters = {}) =>
+  api.post<ActionItemListResponse>("/action-items/refresh", null, { params: filters }).then((r) => r.data);
+
+export const acknowledgeActionItem = (id: number) =>
+  api.post<ActionItem>(`/action-items/${id}/acknowledge`).then((r) => r.data);
+
+export const snoozeActionItem = (id: number, minutes: number) =>
+  api.post<ActionItem>(`/action-items/${id}/snooze`, { minutes }).then((r) => r.data);
+
+export const resolveActionItem = (id: number) =>
+  api.post<ActionItem>(`/action-items/${id}/resolve`).then((r) => r.data);
+
+export const reopenActionItem = (id: number) =>
+  api.post<ActionItem>(`/action-items/${id}/reopen`).then((r) => r.data);
+
+// Issue #50: per-user dashboard layout preferences
+export type DashboardMode = "compact" | "detailed";
+
+export interface DashboardWidgetPreference {
+  id: string;
+  enabled: boolean;
+}
+
+export interface DashboardLayout {
+  widgets: DashboardWidgetPreference[];
+  mode: DashboardMode;
+}
+
+export interface DashboardPreferences extends DashboardLayout {
+  user_key: string;
+  layouts: Record<string, DashboardLayout>;
+  available_widgets: string[];
+  updated_at: string | null;
+}
+
+export const fetchDashboardPreferences = () =>
+  api.get<DashboardPreferences>("/dashboard-preferences").then((r) => r.data);
+
+export const saveDashboardPreferences = (layout: DashboardLayout) =>
+  api.put<DashboardPreferences>("/dashboard-preferences", layout).then((r) => r.data);
+
+export const resetDashboardPreferences = () =>
+  api.post<DashboardPreferences>("/dashboard-preferences/reset").then((r) => r.data);
+
+export const saveDashboardLayout = (name: string, layout: DashboardLayout) =>
+  api
+    .put<DashboardPreferences>(`/dashboard-preferences/layouts/${encodeURIComponent(name)}`, layout)
+    .then((r) => r.data);
+
+export const deleteDashboardLayout = (name: string) =>
+  api
+    .delete<DashboardPreferences>(`/dashboard-preferences/layouts/${encodeURIComponent(name)}`)
+    .then((r) => r.data);
 
 // Phase 3: Price Alerts
 export interface PriceAlertItem {

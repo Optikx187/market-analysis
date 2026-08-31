@@ -108,6 +108,54 @@ def _migrate_existing_tables(conn: Connection) -> None:
         for name, definition in paper_order_columns.items():
             if name not in columns:
                 conn.execute(text(f"ALTER TABLE paper_orders ADD COLUMN {name} {definition}"))
+    if "action_items" in tables:
+        columns = {column["name"] for column in inspector.get_columns("action_items")}
+        action_item_columns = {
+            "user_key": "VARCHAR(120) NOT NULL DEFAULT 'default'",
+            "source_type": "VARCHAR(40) NOT NULL DEFAULT 'operational'",
+            "category": "VARCHAR(40) NOT NULL DEFAULT 'operations'",
+            "severity": "VARCHAR(20) NOT NULL DEFAULT 'info'",
+            "is_mandatory": "BOOLEAN NOT NULL DEFAULT 0",
+            "title": "VARCHAR(200) NOT NULL DEFAULT ''",
+            "message": "TEXT NOT NULL DEFAULT ''",
+            "ticker": "VARCHAR(20)",
+            "trade_id": "INTEGER",
+            "order_id": "INTEGER",
+            "context_id": "VARCHAR(120)",
+            "deep_link_tab": "VARCHAR(40) NOT NULL DEFAULT 'settings'",
+            "deep_link_json": "TEXT NOT NULL DEFAULT '{}'",
+            "payload_json": "TEXT NOT NULL DEFAULT '{}'",
+            "payload_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
+            "status": "VARCHAR(20) NOT NULL DEFAULT 'open'",
+            "source_active": "BOOLEAN NOT NULL DEFAULT 1",
+            "snoozed_until": "DATETIME",
+            "first_seen_at": "DATETIME",
+            "last_seen_at": "DATETIME",
+            "updated_at": "DATETIME",
+            "acknowledged_at": "DATETIME",
+            "snoozed_at": "DATETIME",
+            "resolved_at": "DATETIME",
+        }
+        for name, definition in action_item_columns.items():
+            if name not in columns:
+                conn.execute(text(f"ALTER TABLE action_items ADD COLUMN {name} {definition}"))
+        index_names = {index["name"] for index in inspector.get_indexes("action_items")}
+        if "uq_action_item_source" not in index_names:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_action_item_source "
+                "ON action_items (user_key, source_key)"
+            ))
+    if "dashboard_preferences" in tables:
+        columns = {column["name"] for column in inspector.get_columns("dashboard_preferences")}
+        preference_columns = {
+            "widgets_json": "TEXT NOT NULL DEFAULT '[]'",
+            "mode": "VARCHAR(20) NOT NULL DEFAULT 'detailed'",
+            "layouts_json": "TEXT NOT NULL DEFAULT '{}'",
+            "updated_at": "DATETIME",
+        }
+        for name, definition in preference_columns.items():
+            if name not in columns:
+                conn.execute(text(f"ALTER TABLE dashboard_preferences ADD COLUMN {name} {definition}"))
     if "alert_logs" in tables:
         columns = {column["name"] for column in inspector.get_columns("alert_logs")}
         if "approved" not in columns:

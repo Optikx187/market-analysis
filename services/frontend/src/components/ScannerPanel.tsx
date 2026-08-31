@@ -9,6 +9,7 @@ import {
   type ScannerStatus,
   type ScanResult,
 } from "@/lib/api";
+import type { DeepLinkFocus } from "@/lib/deepLink";
 
 interface SavedView {
   name: string;
@@ -31,8 +32,9 @@ const SAVED_VIEWS_KEY = "scanner-opportunity-views";
 const money = (value: number) => value.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 const price = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 6 });
 
-export default function ScannerPanel() {
+export default function ScannerPanel({ focus }: { focus?: DeepLinkFocus }) {
   const [status, setStatus] = useState<ScannerStatus | null>(null);
+  const [tickerFilter, setTickerFilter] = useState("");
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [msg, setMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -62,14 +64,25 @@ export default function ScannerPanel() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    if (!focus) return;
+    setTickerFilter(focus.ticker ?? "");
+    setMinimumScore(0);
+    setEligibility("all");
+    setDirection("all");
+    if (focus.opportunityId) setExpandedId(focus.opportunityId);
+  }, [focus]);
+
   const filteredSignals = useMemo(() => {
     if (!scanResult) return [];
+    const ticker = tickerFilter.trim().toUpperCase();
     return scanResult.signals
+      .filter((signal) => !ticker || signal.ticker.toUpperCase().includes(ticker))
       .filter((signal) => signal.score >= minimumScore)
       .filter((signal) => eligibility === "all" || (eligibility === "eligible" ? signal.eligible : !signal.eligible))
       .filter((signal) => direction === "all" || signal.direction === direction)
       .sort((first, second) => second.score - first.score || first.ticker.localeCompare(second.ticker));
-  }, [scanResult, minimumScore, eligibility, direction]);
+  }, [scanResult, minimumScore, eligibility, direction, tickerFilter]);
 
   const handleScanNow = async () => {
     setScanning(true);
@@ -221,7 +234,10 @@ export default function ScannerPanel() {
         </div>
       )}
 
-      <div className="grid gap-2 rounded border border-[var(--border)] bg-[var(--background)] p-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-2 rounded border border-[var(--border)] bg-[var(--background)] p-3 sm:grid-cols-2 lg:grid-cols-5">
+        <label className="text-[10px] text-[var(--muted-foreground)]">Ticker
+          <input value={tickerFilter} onChange={(event) => setTickerFilter(event.target.value)} placeholder="All tickers" className="mt-1 w-full rounded border bg-[var(--card)] px-2 py-1 text-xs" />
+        </label>
         <label className="text-[10px] text-[var(--muted-foreground)]">Minimum score
           <input type="number" min="0" max="100" value={minimumScore} onChange={(event) => setMinimumScore(Number(event.target.value))} className="mt-1 w-full rounded border bg-[var(--card)] px-2 py-1 text-xs" />
         </label>

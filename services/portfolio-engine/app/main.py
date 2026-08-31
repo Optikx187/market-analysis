@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
@@ -24,7 +24,9 @@ from app.database import get_db, init_db, async_session
 from app.models import (
     Trade, TradeStatus, SignalDirection, Portfolio, EquitySnapshot, AlertLog, CredentialSecret, User,
     TradeExecution, TradeJournal, ExecutionKind, PaperOrder, PaperOrderEvent, PaperOrderFill,
+    ActionItem, DashboardPreference, _utc_now,
 )
+from app import action_items as actions
 from app import attribution as attribution_math
 from app import paper_orders as paper
 from app.auth import create_token, hash_password, verify_password, get_current_user
@@ -616,8 +618,54 @@ async def evaluate_portfolio_risk(
     )
 
 
+def _widget_regime(scanner: dict[str, object]) -> dict[str, object]:
+    """Current regime from the latest scan, or an explicit unavailable marker."""
+    scan = scanner.get("last_scan_result")
+    signals = scan.get("signals") if isinstance(scan, dict) else None
+    if not isinstance(signals, list):
+        return {"available": False, "reason": "No completed scan available"}
+    for signal in signals:
+        if not isinstance(signal, dict):
+            continue
+        regime = signal.get("market_regime")
+        if isinstance(regime, dict) and regime.get("label"):
+            return {
+                "available": True,
+                "label": regime.get("label"),
+                "trend": regime.get("trend"),
+                "volatility": regime.get("volatility"),
+                "breadth": regime.get("breadth"),
+                "risk": regime.get("risk"),
+                "scanned_at": scan.get("scanned_at") if isinstance(scan, dict) else None,
+            }
+    return {"available": False, "reason": "Latest scan carried no regime snapshot"}
+
+
+def _widget_top_opportunities(scanner: dict[str, object], limit: int = 5) -> dict[str, object]:
+    scan = scanner.get("last_scan_result")
+    signals = scan.get("signals") if isinstance(scan, dict) else None
+    if not isinstance(signals, list):
+        return {"available": False, "reason": "No completed scan available", "items": []}
+    rows: list[dict[str, object]] = []
+    for signal in signals:
+        if not isinstance(signal, dict):
+            continue
+        opportunity = signal.get("opportunity")
+        if not isinstance(opportunity, dict) or not bool(opportunity.get("eligible")):
+            continue
+        rows.append({
+            "id": opportunity.get("id"),
+            "ticker": opportunity.get("ticker") or signal.get("ticker"),
+            "direction": opportunity.get("direction"),
+            "score": float(opportunity.get("score") or 0.0),
+            "user_decision": opportunity.get("user_decision", "pending"),
+        })
+    rows.sort(key=lambda row: -float(row["score"] or 0.0))
+    return {"available": True, "items": rows[:limit]}
+
+
 @app.get("/api/dashboard-summary")
-async def dashboard_summary(db: AsyncSession = Depends(get_db)):
+async def dashboard_summary(request: Request, db: AsyncSession = Depends(get_db)):
     """Return at-a-glance portfolio metrics for the dashboard widget."""
     portfolio = await get_or_create_portfolio(db)
 
@@ -642,6 +690,16 @@ async def dashboard_summary(db: AsyncSession = Depends(get_db)):
     win_rate = (portfolio.win_count / total_trades * 100) if total_trades > 0 else 0
     risk = await _portfolio_risk_status(db)
 
+    user_key = _action_user_key(request)
+    await _expire_action_snoozes(db, user_key)
+    action_result = await db.execute(select(ActionItem).where(ActionItem.user_key == user_key))
+    action_counts = _action_counts([_action_item_dict(item) for item in action_result.scalars().all()])
+
+    scanner = await _fetch_scanner_status()
+    scanner_error = str(scanner["error"]) if "error" in scanner else None
+    data_status = await _fetch_data_status()
+    reserved_cash = await _reserved_paper_cash(db)
+
     return {
         "balance": round(portfolio.balance, 2),
         "equity": round(portfolio.equity, 2),
@@ -653,6 +711,34 @@ async def dashboard_summary(db: AsyncSession = Depends(get_db)):
         "win_rate": round(win_rate, 2),
         "total_trades": total_trades,
         "risk": risk,
+        "cash": {
+            "available": True,
+            "balance": round(portfolio.balance, 2),
+            "reserved": round(reserved_cash, 2),
+            "free": round(portfolio.balance - reserved_cash, 2),
+            "peak_equity": round(portfolio.peak_equity, 2),
+        },
+        "regime": (
+            {"available": False, "reason": scanner_error}
+            if scanner_error
+            else _widget_regime(scanner)
+        ),
+        "top_opportunities": (
+            {"available": False, "reason": scanner_error, "items": []}
+            if scanner_error
+            else _widget_top_opportunities(scanner)
+        ),
+        "provider_health": (
+            {"available": False, "reason": str(data_status["error"])}
+            if "error" in data_status
+            else {
+                "available": True,
+                "connectivity": data_status.get("connectivity"),
+                "data_quality": data_status.get("data_quality"),
+                "current_time": data_status.get("current_time"),
+            }
+        ),
+        "action_counts": action_counts,
     }
 
 
@@ -2351,6 +2437,549 @@ async def process_paper_orders(
             "reserved_cash": round(await _reserved_paper_cash(db), 2),
         },
     }
+
+
+async def _get_json(url: str, params: Optional[dict[str, object]] = None) -> dict[str, object]:
+    """Fetch a service payload, returning ``{"error": ...}`` instead of raising."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, timeout=8)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        logger.warning("Service payload unavailable at %s: %s", url, exc)
+        return {"error": str(exc) or exc.__class__.__name__}
+    if not isinstance(payload, dict):
+        return {"error": "Unexpected payload shape"}
+    return payload
+
+
+async def _fetch_scanner_status() -> dict[str, object]:
+    return await _get_json(f"{settings.QUANT_ENGINE_URL}/api/scanner/status")
+
+
+async def _fetch_data_quality() -> dict[str, object]:
+    return await _get_json(f"{settings.DATA_INGESTION_URL}/api/data-quality")
+
+
+async def _fetch_upcoming_earnings() -> dict[str, object]:
+    return await _get_json(f"{settings.DATA_INGESTION_URL}/api/earnings/upcoming/all")
+
+
+async def _fetch_data_status() -> dict[str, object]:
+    return await _get_json(f"{settings.DATA_INGESTION_URL}/api/status")
+
+
+async def _latest_closes(tickers: list[str]) -> dict[str, Optional[float]]:
+    """Latest stored candle close per ticker; ``None`` when data-ingestion has none."""
+    closes: dict[str, Optional[float]] = {}
+    for ticker in sorted(set(tickers)):
+        candles = await _fetch_candles(ticker, settings.ACTION_ITEM_CANDLE_INTERVAL)
+        close = None
+        if candles:
+            try:
+                close = float(candles[-1]["close"])  # type: ignore[arg-type]
+            except (KeyError, TypeError, ValueError):
+                close = None
+        closes[ticker] = close
+    return closes
+
+
+def _action_user_key(request: Request) -> str:
+    return get_current_user(request) or actions.DEFAULT_USER_KEY
+
+
+async def _collect_action_candidates(db: AsyncSession) -> list[actions.ActionCandidate]:
+    candidates: list[actions.ActionCandidate] = []
+
+    scanner = await _fetch_scanner_status()
+    if "error" in scanner:
+        candidates.append(actions.operational_candidate("quant-engine scanner", str(scanner["error"])))
+    else:
+        candidates.extend(actions.build_opportunity_candidates(scanner))
+
+    quality = await _fetch_data_quality()
+    if "error" in quality:
+        candidates.append(actions.operational_candidate("data-ingestion data quality", str(quality["error"])))
+    else:
+        candidates.extend(actions.build_data_quality_candidates(quality))
+
+    earnings = await _fetch_upcoming_earnings()
+    if "error" in earnings:
+        candidates.append(actions.operational_candidate("data-ingestion earnings", str(earnings["error"])))
+    else:
+        candidates.extend(actions.build_earnings_candidates(earnings, settings.ACTION_EARNINGS_WINDOW_DAYS))
+
+    open_result = await db.execute(select(Trade).where(Trade.status == TradeStatus.OPEN))
+    open_trades = list(open_result.scalars().all())
+    trade_rows = [
+        {
+            "id": trade.id,
+            "ticker": trade.ticker,
+            "direction": trade.direction.value if isinstance(trade.direction, SignalDirection) else str(trade.direction),
+            "entry_price": trade.entry_price,
+            "stop_loss": trade.trailing_stop or trade.stop_loss,
+        }
+        for trade in open_trades
+    ]
+    closes = await _latest_closes([str(row["ticker"]) for row in trade_rows])
+    candidates.extend(actions.build_stop_proximity_candidates(
+        trade_rows,
+        closes,
+        settings.ACTION_STOP_PROXIMITY_PCT,
+    ))
+
+    risk = await _portfolio_risk_status(db)
+    breaker = risk.get("breaker")
+    if isinstance(breaker, dict):
+        candidates.extend(actions.build_breaker_candidates(breaker))
+
+    order_result = await db.execute(
+        select(PaperOrder).where(PaperOrder.status.in_(actions.ORDER_REVIEW_STATUSES))
+    )
+    candidates.extend(actions.build_order_review_candidates([
+        {
+            "id": order.id,
+            "ticker": order.ticker,
+            "status": order.status,
+            "side": order.side,
+            "order_type": order.order_type,
+            "quantity": order.quantity,
+            "reject_reason": order.reject_reason,
+            "cancel_reason": order.cancel_reason,
+        }
+        for order in order_result.scalars().all()
+    ]))
+    return candidates
+
+
+async def _expire_action_snoozes(db: AsyncSession, user_key: str) -> None:
+    now = _utc_now()
+    result = await db.execute(
+        select(ActionItem).where(
+            ActionItem.user_key == user_key,
+            ActionItem.status == actions.STATUS_SNOOZED,
+        )
+    )
+    changed = False
+    for item in result.scalars().all():
+        if actions.expired_snooze(item.status, item.snoozed_until, now):
+            item.status = actions.STATUS_OPEN
+            item.snoozed_until = None
+            changed = True
+    if changed:
+        await db.commit()
+
+
+async def _refresh_action_items(db: AsyncSession, user_key: str) -> dict[str, int]:
+    """Upsert every active source into the durable inbox without creating duplicates."""
+    now = _utc_now()
+    candidates = await _collect_action_candidates(db)
+    existing_result = await db.execute(select(ActionItem).where(ActionItem.user_key == user_key))
+    existing = {item.source_key: item for item in existing_result.scalars().all()}
+    created = 0
+    updated = 0
+    for candidate in candidates:
+        item = existing.get(candidate.source_key)
+        if item is None:
+            db.add(ActionItem(
+                user_key=user_key,
+                source_key=candidate.source_key,
+                source_type=candidate.source_type,
+                category=candidate.category,
+                severity=candidate.severity,
+                is_mandatory=candidate.is_mandatory,
+                title=candidate.title,
+                message=candidate.message,
+                ticker=candidate.ticker,
+                trade_id=candidate.trade_id,
+                order_id=candidate.order_id,
+                context_id=candidate.context_id,
+                deep_link_tab=candidate.deep_link_tab,
+                deep_link_json=json.dumps(candidate.deep_link, sort_keys=True, default=str),
+                payload_json=json.dumps(candidate.payload, sort_keys=True, default=str),
+                payload_hash=candidate.payload_hash,
+                status=actions.STATUS_OPEN,
+                source_active=True,
+                first_seen_at=now,
+                last_seen_at=now,
+            ))
+            created += 1
+            continue
+        changed_payload = item.payload_hash != candidate.payload_hash
+        item.source_type = candidate.source_type
+        item.category = candidate.category
+        item.severity = candidate.severity
+        item.is_mandatory = candidate.is_mandatory
+        item.title = candidate.title
+        item.message = candidate.message
+        item.ticker = candidate.ticker
+        item.trade_id = candidate.trade_id
+        item.order_id = candidate.order_id
+        item.context_id = candidate.context_id
+        item.deep_link_tab = candidate.deep_link_tab
+        item.deep_link_json = json.dumps(candidate.deep_link, sort_keys=True, default=str)
+        item.payload_json = json.dumps(candidate.payload, sort_keys=True, default=str)
+        item.payload_hash = candidate.payload_hash
+        item.source_active = True
+        item.last_seen_at = now
+        if actions.expired_snooze(item.status, item.snoozed_until, now):
+            item.status = actions.STATUS_OPEN
+            item.snoozed_until = None
+        if item.status == actions.STATUS_RESOLVED and changed_payload:
+            # The condition changed after it was resolved, so it needs a fresh decision.
+            item.status = actions.STATUS_OPEN
+            item.resolved_at = None
+        updated += 1
+    active_keys = {candidate.source_key for candidate in candidates}
+    cleared = 0
+    for source_key, item in existing.items():
+        if source_key in active_keys or not item.source_active:
+            continue
+        item.source_active = False
+        item.status = actions.STATUS_RESOLVED
+        item.resolved_at = now
+        item.snoozed_until = None
+        cleared += 1
+    await db.commit()
+    return {"created": created, "updated": updated, "cleared": cleared}
+
+
+def _action_item_dict(item: ActionItem) -> dict[str, object]:
+    return {
+        "id": item.id,
+        "source_key": item.source_key,
+        "source_type": item.source_type,
+        "category": item.category,
+        "severity": item.severity,
+        "is_mandatory": bool(item.is_mandatory),
+        "title": item.title,
+        "message": item.message,
+        "ticker": item.ticker,
+        "trade_id": item.trade_id,
+        "order_id": item.order_id,
+        "context_id": item.context_id,
+        "deep_link": {
+            **(_json_field(item.deep_link_json) or {}),
+            "tab": item.deep_link_tab,
+        },
+        "payload": _json_field(item.payload_json) or {},
+        "payload_hash": item.payload_hash,
+        "status": item.status,
+        "source_active": bool(item.source_active),
+        "snoozed_until": item.snoozed_until.isoformat() if item.snoozed_until else None,
+        "first_seen_at": item.first_seen_at.isoformat() if item.first_seen_at else None,
+        "last_seen_at": item.last_seen_at.isoformat() if item.last_seen_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+        "acknowledged_at": item.acknowledged_at.isoformat() if item.acknowledged_at else None,
+        "snoozed_at": item.snoozed_at.isoformat() if item.snoozed_at else None,
+        "resolved_at": item.resolved_at.isoformat() if item.resolved_at else None,
+    }
+
+
+def _csv_filter(raw: Optional[str], allowed: tuple[str, ...], name: str) -> Optional[set[str]]:
+    if not raw:
+        return None
+    values = {value.strip() for value in raw.split(",") if value.strip()}
+    unknown = values - set(allowed)
+    if unknown:
+        raise HTTPException(400, f"Unknown {name} filter: {', '.join(sorted(unknown))}")
+    return values or None
+
+
+async def _action_items_payload(
+    db: AsyncSession,
+    user_key: str,
+    status: Optional[str],
+    category: Optional[str],
+    severity: Optional[str],
+    source_type: Optional[str],
+) -> dict[str, object]:
+    await _expire_action_snoozes(db, user_key)
+    statuses = _csv_filter(status, actions.STATUSES, "status")
+    categories = _csv_filter(category, actions.CATEGORIES, "category")
+    severities = _csv_filter(severity, actions.SEVERITIES, "severity")
+    source_types = _csv_filter(source_type, tuple(actions.SOURCE_TYPES), "source_type")
+    result = await db.execute(select(ActionItem).where(ActionItem.user_key == user_key))
+    rows = [_action_item_dict(item) for item in result.scalars().all()]
+
+    def keep(row: dict[str, object]) -> bool:
+        if statuses and str(row["status"]) not in statuses:
+            return False
+        if row["is_mandatory"]:
+            # Mandatory items ignore ordinary category/severity/source filters.
+            return True
+        if categories and str(row["category"]) not in categories:
+            return False
+        if severities and str(row["severity"]) not in severities:
+            return False
+        if source_types and str(row["source_type"]) not in source_types:
+            return False
+        return True
+
+    visible = sorted((row for row in rows if keep(row)), key=actions.sort_key)
+    return {
+        "user_key": user_key,
+        "items": visible,
+        "counts": _action_counts(rows),
+        "filters_applied": {
+            "status": sorted(statuses) if statuses else None,
+            "category": sorted(categories) if categories else None,
+            "severity": sorted(severities) if severities else None,
+            "source_type": sorted(source_types) if source_types else None,
+        },
+        "mandatory_note": (
+            "Critical risk-breaker and blocked-data items stay visible even when "
+            "opportunity or category filters are applied."
+        ),
+    }
+
+
+def _action_counts(rows: list[dict[str, object]]) -> dict[str, object]:
+    unresolved = [row for row in rows if row["status"] != actions.STATUS_RESOLVED]
+    by_status = {status: sum(row["status"] == status for row in rows) for status in actions.STATUSES}
+    by_severity = {
+        level: sum(row["severity"] == level for row in unresolved) for level in actions.SEVERITIES
+    }
+    by_category = {
+        name: sum(row["category"] == name for row in unresolved) for name in actions.CATEGORIES
+    }
+    return {
+        "total": len(rows),
+        "unresolved": len(unresolved),
+        "open": by_status[actions.STATUS_OPEN],
+        "mandatory": sum(bool(row["is_mandatory"]) for row in unresolved),
+        "by_status": by_status,
+        "by_severity": by_severity,
+        "by_category": by_category,
+    }
+
+
+@app.get("/api/action-items")
+async def list_action_items(
+    request: Request,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    severity: Optional[str] = None,
+    source_type: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    user_key = _action_user_key(request)
+    return await _action_items_payload(db, user_key, status, category, severity, source_type)
+
+
+@app.post("/api/action-items/refresh")
+async def refresh_action_items(
+    request: Request,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    severity: Optional[str] = None,
+    source_type: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    user_key = _action_user_key(request)
+    refreshed = await _refresh_action_items(db, user_key)
+    payload = await _action_items_payload(db, user_key, status, category, severity, source_type)
+    return {**payload, "refreshed": refreshed}
+
+
+async def _action_item(db: AsyncSession, user_key: str, item_id: int) -> ActionItem:
+    result = await db.execute(
+        select(ActionItem).where(ActionItem.id == item_id, ActionItem.user_key == user_key)
+    )
+    item = result.scalar_one_or_none()
+    if item is None:
+        raise HTTPException(404, "Action item not found")
+    return item
+
+
+@app.get("/api/action-items/{item_id}")
+async def get_action_item(item_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    user_key = _action_user_key(request)
+    await _expire_action_snoozes(db, user_key)
+    return _action_item_dict(await _action_item(db, user_key, item_id))
+
+
+class ActionSnoozeRequest(BaseModel):
+    minutes: int = Field(60, gt=0, le=60 * 24 * 30)
+
+
+@app.post("/api/action-items/{item_id}/acknowledge")
+async def acknowledge_action_item(item_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    user_key = _action_user_key(request)
+    item = await _action_item(db, user_key, item_id)
+    if item.status != actions.STATUS_ACKNOWLEDGED:
+        item.status = actions.STATUS_ACKNOWLEDGED
+        item.acknowledged_at = _utc_now()
+        item.snoozed_until = None
+        await db.commit()
+    return _action_item_dict(item)
+
+
+@app.post("/api/action-items/{item_id}/snooze")
+async def snooze_action_item(
+    item_id: int,
+    payload: ActionSnoozeRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    user_key = _action_user_key(request)
+    item = await _action_item(db, user_key, item_id)
+    now = _utc_now()
+    item.status = actions.STATUS_SNOOZED
+    item.snoozed_at = now
+    item.snoozed_until = now + datetime.timedelta(minutes=payload.minutes)
+    await db.commit()
+    return _action_item_dict(item)
+
+
+@app.post("/api/action-items/{item_id}/resolve")
+async def resolve_action_item(item_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    user_key = _action_user_key(request)
+    item = await _action_item(db, user_key, item_id)
+    if item.status != actions.STATUS_RESOLVED:
+        item.status = actions.STATUS_RESOLVED
+        item.resolved_at = _utc_now()
+        item.snoozed_until = None
+        await db.commit()
+    return _action_item_dict(item)
+
+
+@app.post("/api/action-items/{item_id}/reopen")
+async def reopen_action_item(item_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    user_key = _action_user_key(request)
+    item = await _action_item(db, user_key, item_id)
+    if item.status != actions.STATUS_OPEN:
+        item.status = actions.STATUS_OPEN
+        item.resolved_at = None
+        item.snoozed_until = None
+        await db.commit()
+    return _action_item_dict(item)
+
+
+async def _get_or_create_preference(db: AsyncSession, user_key: str) -> DashboardPreference:
+    result = await db.execute(
+        select(DashboardPreference).where(DashboardPreference.user_key == user_key)
+    )
+    preference = result.scalar_one_or_none()
+    if preference is None:
+        preference = DashboardPreference(
+            user_key=user_key,
+            widgets_json=json.dumps(actions.default_widgets()),
+            mode="detailed",
+            layouts_json="{}",
+        )
+        db.add(preference)
+        await db.commit()
+        await db.refresh(preference)
+    return preference
+
+
+def _preference_dict(preference: DashboardPreference) -> dict[str, object]:
+    layouts_raw = _json_field(preference.layouts_json) or {}
+    layouts = {
+        name: {
+            "widgets": actions.normalize_widgets((layout or {}).get("widgets")),
+            "mode": actions.normalize_mode((layout or {}).get("mode")),
+        }
+        for name, layout in layouts_raw.items()
+        if isinstance(layout, dict)
+    }
+    try:
+        stored_widgets = json.loads(preference.widgets_json)
+    except ValueError:
+        stored_widgets = []
+    return {
+        "user_key": preference.user_key,
+        "widgets": actions.normalize_widgets(stored_widgets),
+        "mode": actions.normalize_mode(preference.mode),
+        "layouts": layouts,
+        "available_widgets": list(actions.WIDGET_IDS),
+        "updated_at": preference.updated_at.isoformat() if preference.updated_at else None,
+    }
+
+
+class DashboardWidgetPreference(BaseModel):
+    id: str
+    enabled: bool = True
+
+
+class DashboardPreferenceRequest(BaseModel):
+    widgets: list[DashboardWidgetPreference]
+    mode: str = "detailed"
+
+
+def _validated_widgets(widgets: list[DashboardWidgetPreference]) -> list[dict[str, object]]:
+    unknown = [widget.id for widget in widgets if widget.id not in actions.WIDGET_IDS]
+    if unknown:
+        raise HTTPException(400, f"Unknown widget id: {', '.join(sorted(set(unknown)))}")
+    return actions.normalize_widgets([widget.model_dump() for widget in widgets])
+
+
+def _validated_mode(mode: str) -> str:
+    if mode not in actions.MODES:
+        raise HTTPException(400, f"Mode must be one of: {', '.join(actions.MODES)}")
+    return mode
+
+
+@app.get("/api/dashboard-preferences")
+async def get_dashboard_preferences(request: Request, db: AsyncSession = Depends(get_db)):
+    return _preference_dict(await _get_or_create_preference(db, _action_user_key(request)))
+
+
+@app.put("/api/dashboard-preferences")
+async def update_dashboard_preferences(
+    payload: DashboardPreferenceRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    preference = await _get_or_create_preference(db, _action_user_key(request))
+    preference.widgets_json = json.dumps(_validated_widgets(payload.widgets))
+    preference.mode = _validated_mode(payload.mode)
+    await db.commit()
+    return _preference_dict(preference)
+
+
+@app.post("/api/dashboard-preferences/reset")
+async def reset_dashboard_preferences(request: Request, db: AsyncSession = Depends(get_db)):
+    preference = await _get_or_create_preference(db, _action_user_key(request))
+    preference.widgets_json = json.dumps(actions.default_widgets())
+    preference.mode = "detailed"
+    await db.commit()
+    return _preference_dict(preference)
+
+
+@app.put("/api/dashboard-preferences/layouts/{name}")
+async def save_dashboard_layout(
+    name: str,
+    payload: DashboardPreferenceRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    layout_name = name.strip()
+    if not layout_name or len(layout_name) > 60:
+        raise HTTPException(400, "Layout name must be 1-60 characters")
+    preference = await _get_or_create_preference(db, _action_user_key(request))
+    layouts = _json_field(preference.layouts_json) or {}
+    layouts[layout_name] = {
+        "widgets": _validated_widgets(payload.widgets),
+        "mode": _validated_mode(payload.mode),
+    }
+    preference.layouts_json = json.dumps(layouts, sort_keys=True)
+    await db.commit()
+    return _preference_dict(preference)
+
+
+@app.delete("/api/dashboard-preferences/layouts/{name}")
+async def delete_dashboard_layout(name: str, request: Request, db: AsyncSession = Depends(get_db)):
+    preference = await _get_or_create_preference(db, _action_user_key(request))
+    layouts = _json_field(preference.layouts_json) or {}
+    if name not in layouts:
+        raise HTTPException(404, "Saved layout not found")
+    layouts.pop(name)
+    preference.layouts_json = json.dumps(layouts, sort_keys=True)
+    await db.commit()
+    return _preference_dict(preference)
 
 
 @app.get("/api/alerts", response_model=list[AlertLogResponse])

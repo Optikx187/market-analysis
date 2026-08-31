@@ -3,6 +3,7 @@ import enum
 
 from sqlalchemy import (
     Column, Integer, String, Float, DateTime, Boolean, Enum as SAEnum, Text, ForeignKey,
+    UniqueConstraint,
 )
 from sqlalchemy.sql import func
 
@@ -257,6 +258,53 @@ class CredentialSecret(Base):
     verified = Column(Boolean, default=False)
     last_error = Column(Text, nullable=True)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class ActionItem(Base):
+    """A durable Action Required inbox row deduplicated by (user_key, source_key)."""
+
+    __tablename__ = "action_items"
+    __table_args__ = (UniqueConstraint("user_key", "source_key", name="uq_action_item_source"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_key = Column(String(120), nullable=False, default="default", index=True)
+    source_key = Column(String(200), nullable=False, index=True)
+    source_type = Column(String(40), nullable=False)
+    category = Column(String(40), nullable=False, index=True)
+    severity = Column(String(20), nullable=False, index=True)
+    is_mandatory = Column(Boolean, nullable=False, default=False)
+    title = Column(String(200), nullable=False)
+    message = Column(Text, nullable=False)
+    ticker = Column(String(20), nullable=True, index=True)
+    trade_id = Column(Integer, nullable=True)
+    order_id = Column(Integer, nullable=True)
+    context_id = Column(String(120), nullable=True)
+    deep_link_tab = Column(String(40), nullable=False)
+    deep_link_json = Column(Text, nullable=False, default="{}")
+    payload_json = Column(Text, nullable=False, default="{}")
+    payload_hash = Column(String(64), nullable=False, default="")
+    status = Column(String(20), nullable=False, default="open", index=True)
+    source_active = Column(Boolean, nullable=False, default=True)
+    snoozed_until = Column(DateTime, nullable=True)
+    first_seen_at = Column(DateTime, nullable=False, default=_utc_now)
+    last_seen_at = Column(DateTime, nullable=False, default=_utc_now)
+    updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
+    acknowledged_at = Column(DateTime, nullable=True)
+    snoozed_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+
+
+class DashboardPreference(Base):
+    """Per-user dashboard widget layout, density mode, and named saved layouts."""
+
+    __tablename__ = "dashboard_preferences"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_key = Column(String(120), nullable=False, unique=True, index=True)
+    widgets_json = Column(Text, nullable=False, default="[]")
+    mode = Column(String(20), nullable=False, default="detailed")
+    layouts_json = Column(Text, nullable=False, default="{}")
+    updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
 
 
 class User(Base):

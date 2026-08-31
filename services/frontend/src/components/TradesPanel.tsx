@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { fetchRegime, fetchTrades, logManualTrade, type Trade } from "@/lib/api";
 import { notifyTradesChanged } from "@/lib/tradeEvents";
+import type { DeepLinkFocus } from "@/lib/deepLink";
 
 function formatDateTime(dateStr: string | null): string {
   if (!dateStr) return "—";
@@ -10,8 +11,10 @@ function formatDateTime(dateStr: string | null): string {
   });
 }
 
-export default function TradesPanel() {
+export default function TradesPanel({ focus }: { focus?: DeepLinkFocus }) {
   const [trades, setTrades] = useState<Trade[]>([]);
+  const [focusedTicker, setFocusedTicker] = useState<string | null>(null);
+  const [focusedTradeId, setFocusedTradeId] = useState<number | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ ticker: "", direction: "BUY", asset_type: "stock", entry_price: "", quantity: "", stop_loss: "", target_price: "" });
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -19,6 +22,16 @@ export default function TradesPanel() {
 
   const loadTrades = () => fetchTrades().then(setTrades).catch(() => {});
   useEffect(() => { loadTrades(); }, []);
+
+  useEffect(() => {
+    if (!focus) return;
+    setFocusedTicker(focus.ticker ? focus.ticker.toUpperCase() : null);
+    setFocusedTradeId(focus.tradeId ?? null);
+  }, [focus]);
+
+  const visibleTrades = focusedTicker
+    ? trades.filter((trade) => trade.ticker.toUpperCase() === focusedTicker)
+    : trades;
 
   const handleSubmit = async () => {
     const price = parseFloat(form.entry_price);
@@ -112,7 +125,23 @@ export default function TradesPanel() {
         </div>
       )}
 
-      {trades.length === 0 ? (
+      {(focusedTicker || focusedTradeId != null) && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded border border-blue-600/50 bg-blue-600/10 p-2 text-xs">
+          <span>
+            Focused from Action Required:{" "}
+            {focusedTicker ?? "all tickers"}
+            {focusedTradeId != null ? ` · trade #${focusedTradeId}` : ""}
+          </span>
+          <button
+            onClick={() => { setFocusedTicker(null); setFocusedTradeId(null); }}
+            className="rounded bg-[var(--secondary)] px-2 py-0.5"
+          >
+            Clear focus
+          </button>
+        </div>
+      )}
+
+      {visibleTrades.length === 0 ? (
         <p className="text-sm text-[var(--muted-foreground)]">No trades yet.</p>
       ) : (
         <div className="overflow-x-auto">
@@ -131,8 +160,12 @@ export default function TradesPanel() {
               </tr>
             </thead>
             <tbody>
-              {trades.map((t) => (
-                <tr key={t.id} className="border-b border-[var(--border)]">
+              {visibleTrades.map((t) => (
+                <tr
+                  key={t.id}
+                  aria-current={t.id === focusedTradeId ? "true" : undefined}
+                  className={`border-b border-[var(--border)] ${t.id === focusedTradeId ? "outline outline-2 outline-blue-500" : ""}`}
+                >
                   <td className="py-1.5 font-medium">{t.ticker}</td>
                   <td className={t.direction === "BUY" ? "text-green-400" : "text-red-400"}>
                     {t.direction}

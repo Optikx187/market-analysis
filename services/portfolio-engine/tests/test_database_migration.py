@@ -88,6 +88,63 @@ def test_legacy_closed_trades_backfill_attribution_columns(tmp_path) -> None:
     assert rows[1] == ("BTC", 0, None, 0, None, None, "not_calculated")
 
 
+def test_legacy_action_item_and_preference_tables_are_migrated(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-actions.db'}")
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE action_items ("
+            "id INTEGER PRIMARY KEY, source_key VARCHAR(200) NOT NULL)"
+        ))
+        connection.execute(text(
+            "CREATE TABLE dashboard_preferences (id INTEGER PRIMARY KEY, user_key VARCHAR(120))"
+        ))
+        connection.execute(text("INSERT INTO action_items (source_key) VALUES ('earnings:AAPL')"))
+        connection.execute(text("INSERT INTO dashboard_preferences (user_key) VALUES ('default')"))
+        _migrate_existing_tables(connection)
+
+        inspector = inspect(connection)
+        action_columns = {column["name"] for column in inspector.get_columns("action_items")}
+        preference_columns = {column["name"] for column in inspector.get_columns("dashboard_preferences")}
+        indexes = {index["name"] for index in inspector.get_indexes("action_items")}
+        action_row = connection.execute(text(
+            "SELECT user_key, status, severity, category, is_mandatory, source_active FROM action_items"
+        )).one()
+        preference_row = connection.execute(text(
+            "SELECT user_key, widgets_json, mode, layouts_json FROM dashboard_preferences"
+        )).one()
+
+    assert {
+        "user_key",
+        "source_type",
+        "category",
+        "severity",
+        "is_mandatory",
+        "title",
+        "message",
+        "ticker",
+        "trade_id",
+        "order_id",
+        "context_id",
+        "deep_link_tab",
+        "deep_link_json",
+        "payload_json",
+        "payload_hash",
+        "status",
+        "source_active",
+        "snoozed_until",
+        "first_seen_at",
+        "last_seen_at",
+        "updated_at",
+        "acknowledged_at",
+        "snoozed_at",
+        "resolved_at",
+    }.issubset(action_columns)
+    assert {"widgets_json", "mode", "layouts_json", "updated_at"}.issubset(preference_columns)
+    assert "uq_action_item_source" in indexes
+    assert action_row == ("default", "open", "info", "operations", 0, 1)
+    assert preference_row == ("default", "[]", "detailed", "{}")
+
+
 def test_legacy_paper_order_table_receives_lifecycle_columns(tmp_path) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'legacy-paper.db'}")
     with engine.begin() as connection:

@@ -12,7 +12,9 @@ import PriceAlertsPanel from "@/components/PriceAlertsPanel";
 import HistoricalChart from "@/components/HistoricalChart";
 import AttributionPanel from "@/components/AttributionPanel";
 import OrdersPanel from "@/components/OrdersPanel";
-import { fetchOnboardingStatus } from "@/lib/api";
+import ActionInbox from "@/components/ActionInbox";
+import { fetchOnboardingStatus, type ActionItem } from "@/lib/api";
+import { deepLinkFocus, deepLinkTab, type DeepLinkFocus } from "@/lib/deepLink";
 
 const APP_VERSION = "3.0.0";
 
@@ -27,11 +29,71 @@ type Tab =
   | "settings"
   | "help";
 
+const TAB_ORDER: Tab[] = [
+  "alerts",
+  "orders",
+  "trades",
+  "performance",
+  "scanner",
+  "price-alerts",
+  "chart",
+  "settings",
+  "help",
+];
+
+/** Shortcuts must never fire while the user is typing. */
+const isTypingTarget = (target: EventTarget | null): boolean => {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+};
+
 function App() {
   const [tab, setTab] = useState<Tab>("alerts");
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [selectedChartTicker, setSelectedChartTicker] = useState<string | null>(null);
+  const [focus, setFocus] = useState<DeepLinkFocus | null>(null);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+
+  const openContext = (item: ActionItem) => {
+    const nextTab = deepLinkTab(item.deep_link);
+    setFocus(deepLinkFocus(item.deep_link, Date.now()));
+    setTab(nextTab);
+    if (item.ticker) setSelectedChartTicker(item.ticker);
+  };
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isTypingTarget(event.target)) return;
+      if (event.key === "a") {
+        window.dispatchEvent(new Event("focus-action-inbox"));
+        event.preventDefault();
+        return;
+      }
+      if (event.key === "d") {
+        document.getElementById("dashboard-heading")?.scrollIntoView({ block: "start" });
+        event.preventDefault();
+        return;
+      }
+      if (event.key === "]" || event.key === "[") {
+        const delta = event.key === "]" ? 1 : -1;
+        setTab((current) => {
+          const index = TAB_ORDER.indexOf(current);
+          return TAB_ORDER[(index + delta + TAB_ORDER.length) % TAB_ORDER.length];
+        });
+        event.preventDefault();
+        return;
+      }
+      if (event.key === "?") {
+        setShowShortcuts((current) => !current);
+        event.preventDefault();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   useEffect(() => {
     console.log(`%cMarket Analysis v${APP_VERSION}`, "font-weight:bold;font-size:14px;color:#22c55e");
@@ -115,7 +177,28 @@ function App() {
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-6 space-y-6">
+      <main className="container mx-auto max-w-full overflow-x-hidden px-4 py-6 space-y-6">
+        <ActionInbox onOpenContext={openContext} />
+
+        <div className="flex flex-col gap-1 text-[10px] text-[var(--muted-foreground)] sm:flex-row sm:items-center sm:justify-between">
+          <button
+            onClick={() => setShowShortcuts((current) => !current)}
+            aria-expanded={showShortcuts}
+            aria-controls="keyboard-shortcuts"
+            className="self-start rounded border px-2 py-0.5 focus-visible:ring-2 focus-visible:ring-blue-400"
+          >
+            Keyboard shortcuts (press ?)
+          </button>
+          {showShortcuts && (
+            <ul id="keyboard-shortcuts" className="flex flex-wrap gap-3">
+              <li><kbd className="rounded border px-1">a</kbd> focus Action Required</li>
+              <li><kbd className="rounded border px-1">d</kbd> jump to dashboard</li>
+              <li><kbd className="rounded border px-1">[</kbd> / <kbd className="rounded border px-1">]</kbd> previous / next tab</li>
+              <li><kbd className="rounded border px-1">?</kbd> toggle this list</li>
+            </ul>
+          )}
+        </div>
+
         <DashboardWidget />
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -142,13 +225,13 @@ function App() {
         </div>
 
         {tab === "alerts" && <AlertsPanel />}
-        {tab === "orders" && <OrdersPanel />}
-        {tab === "trades" && <TradesPanel />}
+        {tab === "orders" && <OrdersPanel focus={focus ?? undefined} />}
+        {tab === "trades" && <TradesPanel focus={focus ?? undefined} />}
         {tab === "performance" && <AttributionPanel />}
-        {tab === "scanner" && <ScannerPanel />}
+        {tab === "scanner" && <ScannerPanel focus={focus ?? undefined} />}
         {tab === "price-alerts" && <PriceAlertsPanel />}
         {tab === "chart" && <HistoricalChart ticker={selectedChartTicker} />}
-        {tab === "settings" && <SettingsPanel />}
+        {tab === "settings" && <SettingsPanel focus={focus ?? undefined} />}
         {tab === "help" && <HelpPanel />}
       </main>
 
