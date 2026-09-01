@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     PAPER_VOLUME_PARTICIPATION_PCT: float = 0.01
     PAPER_FEE_PCT: float = 0.0
     PAPER_ORDER_CANDLE_INTERVAL: str = "1d"
+    ACTION_ITEM_CANDLE_INTERVAL: str = "1d"
+    ACTION_STOP_PROXIMITY_PCT: float = 0.25
+    ACTION_EARNINGS_WINDOW_DAYS: int = 7
     AUTH_ENABLED: bool = False
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"

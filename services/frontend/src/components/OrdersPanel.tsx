@@ -17,6 +17,7 @@ import {
   type PaperReconciliation,
 } from "@/lib/api";
 import { notifyTradesChanged } from "@/lib/tradeEvents";
+import type { DeepLinkFocus } from "@/lib/deepLink";
 
 const TERMINAL_STATUSES = ["filled", "canceled", "rejected", "expired"];
 
@@ -245,7 +246,7 @@ function OrderDetail({ order }: { order: PaperOrder }) {
   );
 }
 
-export default function OrdersPanel() {
+export default function OrdersPanel({ focus }: { focus?: DeepLinkFocus }) {
   const [mode, setMode] = useState<PaperMode | null>(null);
   const [orders, setOrders] = useState<PaperOrder[]>([]);
   const [details, setDetails] = useState<Record<number, PaperOrder>>({});
@@ -281,6 +282,16 @@ export default function OrdersPanel() {
       setMessage({ type: "error", text: apiErrorMessage(error, "Failed to load paper orders.") });
     });
   }, [loadOrders]);
+
+  useEffect(() => {
+    if (!focus) return;
+    setFilters(focus.ticker ? { ticker: focus.ticker.toUpperCase() } : {});
+    if (focus.orderId == null) return;
+    setExpanded(focus.orderId);
+    fetchPaperOrder(focus.orderId)
+      .then((detail) => { setDetails((current) => ({ ...current, [detail.id]: detail })); })
+      .catch(() => {});
+  }, [focus]);
 
   const refresh = async (orderId?: number) => {
     await loadOrders();

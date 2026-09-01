@@ -14,6 +14,7 @@ import {
   type ChannelStatus,
   type SystemStatus,
 } from "@/lib/api";
+import type { DeepLinkFocus } from "@/lib/deepLink";
 
 interface EditingService {
   name: string;
@@ -94,7 +95,7 @@ const SERVICE_INFO: Record<string, { subtitle: string; help: string }> = {
 
 const isMasked = (value?: string) => Boolean(value && value.includes("•"));
 
-export default function SettingsPanel() {
+export default function SettingsPanel({ focus }: { focus?: DeepLinkFocus }) {
   const [status, setStatus] = useState<CredentialStatus | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [formData, setFormData] = useState<Record<string, string>>({});
@@ -121,6 +122,11 @@ export default function SettingsPanel() {
   // System health refresh state
   const [healthRefreshing, setHealthRefreshing] = useState(false);
   const [healthLastUpdated, setHealthLastUpdated] = useState<Date | null>(null);
+
+  useEffect(() => {
+    if (!focus?.section) return;
+    document.getElementById(`settings-${focus.section}`)?.scrollIntoView({ block: "start" });
+  }, [focus]);
 
   const loadStatus = () => fetchCredentialStatus().then(setStatus).catch(() => {});
   const loadEnvSettings = () => fetchEnvSettings().then(setEnvSettings).catch(() => {});
@@ -181,6 +187,14 @@ export default function SettingsPanel() {
   return (
     <div className="rounded-lg border bg-[var(--card)] p-4">
       <h2 className="text-lg font-semibold mb-1">Settings & Credentials</h2>
+
+      {focus?.section && (
+        <div className="mb-3 rounded border border-blue-600/50 bg-blue-600/10 p-2 text-xs">
+          Opened from Action Required: <span className="font-semibold">{focus.section.replace(/-/g, " ")}</span>
+          {focus.ticker ? ` · ${focus.ticker}` : ""}. Data eligibility, risk limits, and provider
+          connectivity are shown in the sections below.
+        </div>
+      )}
       <p className="text-xs text-[var(--muted-foreground)] mb-4">
         Credentials are stored locally, masked by default, and synced to the local <code>.env</code> after save or verification.
       </p>
@@ -350,7 +364,7 @@ export default function SettingsPanel() {
 
       {/* Environment Settings Section */}
       <div className="mt-6 pt-4 border-t border-[var(--border)]">
-        <h3 className="text-sm font-medium mb-3">Environment Settings</h3>
+        <h3 id="settings-risk-limits" className="text-sm font-medium mb-3">Environment Settings</h3>
         <p className="text-xs text-[var(--muted-foreground)] mb-3">
           Adjust risk parameters and simulation settings. These values are synced to your .env file.
         </p>
@@ -423,7 +437,7 @@ export default function SettingsPanel() {
       </div>
 
       {/* System Health — Issue #12 */}
-      <div className="mt-6 pt-4 border-t border-[var(--border)]">
+      <div id="settings-system-health" className="mt-6 pt-4 border-t border-[var(--border)]">
         <div className="flex items-center justify-between mb-2">
           <h3 className="text-sm font-medium">System Health</h3>
           <div className="flex items-center gap-2">
@@ -471,7 +485,7 @@ export default function SettingsPanel() {
               </div>
             </div>
             {sysStatus.data_quality && (
-              <div className="rounded bg-[var(--background)] p-3 mb-3">
+              <div id="settings-data-quality" className="rounded bg-[var(--background)] p-3 mb-3">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm font-medium">Market Data Quality</span>
                   <span className={`text-xs font-medium ${sysStatus.data_quality.blocked > 0 ? "text-red-400" : "text-green-400"}`}>
