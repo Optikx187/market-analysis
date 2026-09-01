@@ -151,10 +151,16 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)] border-t-4 border-amber-500">
-      <div className="bg-amber-500 px-4 py-1 text-center text-xs font-bold uppercase tracking-wide text-black">
-        Paper trading mode &middot; simulated fills only &middot; no broker order is ever submitted
-      </div>
+    <div className={`min-h-screen bg-[var(--background)] text-[var(--foreground)] border-t-4 ${tab === "live" ? "border-red-600" : "border-amber-500"}`}>
+      {tab === "live" ? (
+        <div className="bg-red-700 px-4 py-1 text-center text-xs font-bold uppercase tracking-wide text-white">
+          Live trading controls &middot; real broker orders possible when armed &middot; real money at risk
+        </div>
+      ) : (
+        <div className="bg-amber-500 px-4 py-1 text-center text-xs font-bold uppercase tracking-wide text-black">
+          Paper trading mode &middot; simulated fills only &middot; no broker order is ever submitted
+        </div>
+      )}
       <header className="border-b border-[var(--border)] bg-[var(--card)]">
         <div className="container mx-auto px-4 py-4 flex items-center justify-between">
           <div>
