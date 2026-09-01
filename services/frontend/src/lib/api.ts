@@ -852,6 +852,168 @@ export const processPaperOrders = (payload: PaperProcessInput) =>
 export const fetchPaperReconciliation = () =>
   api.get<PaperReconciliation>("/paper-orders/reconcile").then((r) => r.data);
 
+// Guarded live-broker execution. Separate endpoints, storage and UI from paper.
+export interface LiveModeStatus {
+  mode: string;
+  armed: boolean;
+  config_enabled: boolean;
+  acknowledged: boolean;
+  acknowledged_by: string | null;
+  acknowledged_at: string | null;
+  trading_disabled: boolean;
+  disabled_reason: string | null;
+  disabled_by: string | null;
+  disabled_at: string | null;
+  broker: string | null;
+  broker_configured: boolean;
+  broker_endpoint: string;
+  sandbox: boolean;
+  acknowledgement_phrase: string;
+  max_order_notional: number;
+  max_price_age_seconds: number;
+  notice: string;
+}
+
+export interface LiveCheck {
+  name: string;
+  passed: boolean;
+  blocking: boolean;
+  detail: string;
+}
+
+export interface LiveOrderFill {
+  id: number;
+  broker_fill_id: string;
+  quantity: number;
+  price: number;
+  filled_at: string | null;
+  created_at: string | null;
+}
+
+export interface LiveAuditEntry {
+  id: number;
+  order_id: number | null;
+  event_type: string;
+  actor: string;
+  message: string;
+  previous_hash: string;
+  entry_hash: string;
+  created_at: string | null;
+}
+
+export interface LiveOrder {
+  id: number;
+  mode: string;
+  idempotency_key: string;
+  client_order_id: string;
+  broker: string;
+  broker_order_id: string | null;
+  broker_endpoint: string;
+  sandbox: boolean;
+  ticker: string;
+  asset_type: string;
+  side: string;
+  order_type: string;
+  quantity: number;
+  filled_quantity: number;
+  limit_price: number | null;
+  stop_price: number | null;
+  time_in_force: string;
+  reference_price: number | null;
+  estimated_notional: number | null;
+  average_fill_price: number | null;
+  status: string;
+  preflight: LiveCheck[];
+  request_fingerprint: string;
+  reject_reason: string | null;
+  cancel_reason: string | null;
+  broker_status_raw: string | null;
+  submitted_at: string | null;
+  reconciled_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  fills?: LiveOrderFill[];
+  audit?: LiveAuditEntry[];
+}
+
+export interface LiveOrderInput {
+  ticker: string;
+  side: string;
+  order_type: string;
+  quantity: number;
+  asset_type?: string;
+  limit_price?: number;
+  stop_price?: number;
+  time_in_force?: string;
+}
+
+export interface LivePreview extends LiveModeStatus {
+  request: Record<string, unknown>;
+  approval_fingerprint: string;
+  estimated_notional: number | null;
+  reference_price: number | null;
+  buying_power: number | null;
+  checks: LiveCheck[];
+  blockers: LiveCheck[];
+  submittable: boolean;
+}
+
+export interface LiveOrderListResponse extends LiveModeStatus {
+  orders: LiveOrder[];
+}
+
+export interface LiveCancelAllResponse extends LiveModeStatus {
+  requested: number;
+  canceled: number;
+  failed: number;
+  results: { order_id: number; canceled: boolean; error: string | null }[];
+}
+
+export const fetchLiveStatus = () =>
+  api.get<LiveModeStatus>("/live-trading/status").then((r) => r.data);
+
+export const acknowledgeLiveTrading = (phrase: string, note?: string) =>
+  api.post<LiveModeStatus>("/live-trading/acknowledge", { phrase, note }).then((r) => r.data);
+
+export const revokeLiveTrading = () =>
+  api.post<LiveModeStatus>("/live-trading/revoke", {}).then((r) => r.data);
+
+export const disableLiveTrading = (reason?: string) =>
+  api.post<LiveModeStatus>("/live-trading/disable", { reason }).then((r) => r.data);
+
+export const enableLiveTrading = () =>
+  api.post<LiveModeStatus>("/live-trading/enable", {}).then((r) => r.data);
+
+export const previewLiveOrder = (payload: LiveOrderInput) =>
+  api.post<LivePreview>("/live-orders/preview", payload).then((r) => r.data);
+
+export const submitLiveOrder = (
+  payload: LiveOrderInput & { idempotency_key: string; approval_fingerprint: string },
+) => api.post<LiveOrder>("/live-orders", payload).then((r) => r.data);
+
+export const fetchLiveOrders = () =>
+  api.get<LiveOrderListResponse>("/live-orders").then((r) => r.data);
+
+export const fetchLiveOrder = (orderId: number) =>
+  api.get<LiveOrder>(`/live-orders/${orderId}`).then((r) => r.data);
+
+export const cancelLiveOrder = (orderId: number, reason?: string) =>
+  api.post<LiveOrder>(`/live-orders/${orderId}/cancel`, { reason }).then((r) => r.data);
+
+export const cancelAllLiveOrders = (reason?: string) =>
+  api.post<LiveCancelAllResponse>("/live-orders/cancel-all", { reason }).then((r) => r.data);
+
+export const reconcileLiveOrders = () =>
+  api.post<{ checked: number; out_of_sync: number; errors: number }>(
+    "/live-orders/reconcile",
+    {},
+  ).then((r) => r.data);
+
+export const verifyLiveAudit = () =>
+  api.get<{ entries: number; intact: boolean; broken_entry_id: number | null }>(
+    "/live-orders/audit/verify",
+  ).then((r) => r.data);
+
 // Notification channel toggles
 export interface ChannelStatus {
   configured: boolean;

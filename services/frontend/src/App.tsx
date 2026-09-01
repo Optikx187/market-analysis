@@ -12,6 +12,7 @@ import PriceAlertsPanel from "@/components/PriceAlertsPanel";
 import HistoricalChart from "@/components/HistoricalChart";
 import AttributionPanel from "@/components/AttributionPanel";
 import OrdersPanel from "@/components/OrdersPanel";
+import LiveTradingPanel from "@/components/LiveTradingPanel";
 import ActionInbox from "@/components/ActionInbox";
 import { fetchOnboardingStatus, type ActionItem } from "@/lib/api";
 import { deepLinkFocus, deepLinkTab, type DeepLinkFocus } from "@/lib/deepLink";
@@ -21,6 +22,7 @@ const APP_VERSION = "3.0.0";
 type Tab =
   | "alerts"
   | "orders"
+  | "live"
   | "trades"
   | "performance"
   | "scanner"
@@ -32,6 +34,7 @@ type Tab =
 const TAB_ORDER: Tab[] = [
   "alerts",
   "orders",
+  "live",
   "trades",
   "performance",
   "scanner",
@@ -136,7 +139,8 @@ function App() {
 
   const tabLabels: Record<Tab, string> = {
     alerts: "Alerts",
-    orders: "Orders",
+    orders: "Orders (Paper)",
+    live: "Live Trading",
     trades: "Trades",
     performance: "Performance",
     scanner: "Scanner",
@@ -226,6 +230,7 @@ function App() {
 
         {tab === "alerts" && <AlertsPanel />}
         {tab === "orders" && <OrdersPanel focus={focus ?? undefined} />}
+        {tab === "live" && <LiveTradingPanel />}
         {tab === "trades" && <TradesPanel focus={focus ?? undefined} />}
         {tab === "performance" && <AttributionPanel />}
         {tab === "scanner" && <ScannerPanel focus={focus ?? undefined} />}

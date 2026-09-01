@@ -307,6 +307,106 @@ class DashboardPreference(Base):
     updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
 
 
+class LiveTradingControl(Base):
+    """Singleton row holding the live-execution arming state and kill switch.
+
+    Live trading needs both configuration (``LIVE_TRADING_ENABLED``) and a
+    durable operator acknowledgement recorded here, so restarting the service
+    with the flag on is not by itself enough to submit an order.
+    """
+
+    __tablename__ = "live_trading_control"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    acknowledged = Column(Boolean, nullable=False, default=False)
+    acknowledged_by = Column(String(120), nullable=True)
+    acknowledged_at = Column(DateTime, nullable=True)
+    acknowledgement_note = Column(Text, nullable=True)
+    trading_disabled = Column(Boolean, nullable=False, default=False)
+    disabled_reason = Column(Text, nullable=True)
+    disabled_by = Column(String(120), nullable=True)
+    disabled_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
+
+
+class LiveOrder(Base):
+    """A real-money order routed to a broker.
+
+    Stored separately from ``paper_orders`` so simulated and live executions can
+    never be listed, reconciled or aggregated together by accident.
+    """
+
+    __tablename__ = "live_orders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    idempotency_key = Column(String(120), nullable=False, unique=True, index=True)
+    client_order_id = Column(String(120), nullable=False, unique=True, index=True)
+    broker = Column(String(40), nullable=False)
+    broker_order_id = Column(String(120), nullable=True, index=True)
+    broker_endpoint = Column(String(200), nullable=False, default="")
+    sandbox = Column(Boolean, nullable=False, default=True)
+    user_key = Column(String(120), nullable=False, default="default", index=True)
+    ticker = Column(String(20), nullable=False, index=True)
+    asset_type = Column(String(20), nullable=False, default="stock")
+    side = Column(String(10), nullable=False)
+    order_type = Column(String(20), nullable=False)
+    quantity = Column(Float, nullable=False)
+    filled_quantity = Column(Float, nullable=False, default=0.0)
+    limit_price = Column(Float, nullable=True)
+    stop_price = Column(Float, nullable=True)
+    time_in_force = Column(String(10), nullable=False, default="day")
+    reference_price = Column(Float, nullable=True)
+    estimated_notional = Column(Float, nullable=True)
+    average_fill_price = Column(Float, nullable=True)
+    status = Column(String(20), nullable=False, default="new", index=True)
+    preflight_json = Column(Text, nullable=False, default="[]")
+    request_fingerprint = Column(String(64), nullable=False, default="")
+    reject_reason = Column(Text, nullable=True)
+    cancel_reason = Column(Text, nullable=True)
+    submitted_at = Column(DateTime, nullable=True)
+    reconciled_at = Column(DateTime, nullable=True)
+    broker_status_raw = Column(String(40), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+    updated_at = Column(DateTime, nullable=False, default=_utc_now, onupdate=_utc_now)
+
+
+class LiveOrderFill(Base):
+    """A fill reported by the broker, deduplicated by broker fill identity."""
+
+    __tablename__ = "live_order_fills"
+    __table_args__ = (
+        UniqueConstraint("order_id", "broker_fill_id", name="uq_live_fill_broker_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_id = Column(Integer, ForeignKey("live_orders.id"), nullable=False, index=True)
+    broker_fill_id = Column(String(120), nullable=False)
+    quantity = Column(Float, nullable=False)
+    price = Column(Float, nullable=False)
+    filled_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+
+
+class LiveExecutionAudit(Base):
+    """Append-only, hash-chained audit of every live-execution action.
+
+    ``entry_hash`` commits to ``previous_hash`` and the record body, so any
+    later edit or deletion is detectable through ``/api/live-orders/audit/verify``.
+    """
+
+    __tablename__ = "live_execution_audit"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_id = Column(Integer, ForeignKey("live_orders.id"), nullable=True, index=True)
+    event_type = Column(String(40), nullable=False, index=True)
+    actor = Column(String(120), nullable=False, default="default")
+    message = Column(Text, nullable=False, default="")
+    record_json = Column(Text, nullable=False, default="{}")
+    previous_hash = Column(String(64), nullable=False, default="")
+    entry_hash = Column(String(64), nullable=False, default="")
+    created_at = Column(DateTime, nullable=False, default=_utc_now)
+
+
 class User(Base):
     __tablename__ = "users"
 

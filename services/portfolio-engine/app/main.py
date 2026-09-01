@@ -24,11 +24,14 @@ from app.database import get_db, init_db, async_session
 from app.models import (
     Trade, TradeStatus, SignalDirection, Portfolio, EquitySnapshot, AlertLog, CredentialSecret, User,
     TradeExecution, TradeJournal, ExecutionKind, PaperOrder, PaperOrderEvent, PaperOrderFill,
-    ActionItem, DashboardPreference, _utc_now,
+    ActionItem, DashboardPreference, LiveTradingControl, LiveOrder, LiveOrderFill,
+    LiveExecutionAudit, _utc_now,
 )
 from app import action_items as actions
 from app import attribution as attribution_math
 from app import paper_orders as paper
+from app import live_execution as live
+from app.brokers import AlpacaBroker, BrokerAdapter, BrokerError
 from app.auth import create_token, hash_password, verify_password, get_current_user
 from app.risk_engine import (
     ClosedTradeResult,
@@ -3461,3 +3464,938 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
 async def auth_status():
     """Return whether multi-user auth is enabled."""
     return {"auth_enabled": settings.AUTH_ENABLED}
+
+
+# ---------------------------------------------------------------------------
+# Guarded live-broker execution
+#
+# Live trading is disabled by default and stays unreachable until three
+# independent conditions hold: LIVE_TRADING_ENABLED is true, a durable operator
+# acknowledgement exists, and no kill switch is engaged. Every submission must
+# echo the fingerprint of a preview it was approved from, and every gate failure
+# is stored as a rejected order with a hash-chained audit trail.
+# ---------------------------------------------------------------------------
+
+
+class LiveOrderRequestBody(BaseModel):
+    ticker: str
+    side: str
+    order_type: str
+    quantity: float
+    asset_type: str = "stock"
+    limit_price: Optional[float] = None
+    stop_price: Optional[float] = None
+    time_in_force: str = live.DAY
+
+
+class LiveOrderSubmitBody(LiveOrderRequestBody):
+    idempotency_key: str
+    approval_fingerprint: str
+    approved_by: Optional[str] = None
+
+
+class LiveAcknowledgeBody(BaseModel):
+    phrase: str
+    note: Optional[str] = None
+
+
+class LiveDisableBody(BaseModel):
+    reason: Optional[str] = None
+
+
+class LiveCancelBody(BaseModel):
+    reason: Optional[str] = None
+
+
+def get_broker() -> Optional[BrokerAdapter]:
+    """Resolve the configured broker adapter.
+
+    Returns ``None`` when no adapter is configured; tests override this
+    dependency with a fake adapter so no sandbox or production account is
+    required for the guard logic.
+    """
+    if settings.LIVE_BROKER.strip().lower() != "alpaca":
+        return None
+    broker = AlpacaBroker(
+        api_key=settings.ALPACA_API_KEY,
+        api_secret=settings.ALPACA_SECRET_KEY,
+        base_url=settings.LIVE_BROKER_BASE_URL,
+    )
+    return broker
+
+
+def _live_user_key(request: Request) -> str:
+    return get_current_user(request) or "default"
+
+
+async def _live_control(db: AsyncSession) -> LiveTradingControl:
+    control = (
+        await db.execute(select(LiveTradingControl).order_by(LiveTradingControl.id).limit(1))
+    ).scalar_one_or_none()
+    if control is None:
+        control = LiveTradingControl(acknowledged=False, trading_disabled=False)
+        db.add(control)
+        await db.flush()
+    return control
+
+
+async def _live_audit(
+    db: AsyncSession,
+    *,
+    event_type: str,
+    message: str,
+    actor: str,
+    record: dict[str, object],
+    order: Optional[LiveOrder] = None,
+) -> LiveExecutionAudit:
+    """Append one hash-chained audit entry."""
+    previous = (
+        await db.execute(
+            select(LiveExecutionAudit).order_by(desc(LiveExecutionAudit.id)).limit(1)
+        )
+    ).scalar_one_or_none()
+    previous_hash = previous.entry_hash if previous else ""
+    body = {
+        "event_type": event_type,
+        "actor": actor,
+        "message": message,
+        "order_id": order.id if order else None,
+        "record": record,
+    }
+    entry = LiveExecutionAudit(
+        order_id=order.id if order else None,
+        event_type=event_type,
+        actor=actor,
+        message=message,
+        record_json=json.dumps(body, sort_keys=True, default=str),
+        previous_hash=previous_hash,
+        entry_hash=live.audit_hash(previous_hash, body),
+    )
+    db.add(entry)
+    await db.flush()
+    return entry
+
+
+def _audit_dict(entry: LiveExecutionAudit) -> dict[str, object]:
+    return {
+        "id": entry.id,
+        "order_id": entry.order_id,
+        "event_type": entry.event_type,
+        "actor": entry.actor,
+        "message": entry.message,
+        "record": _json_field(entry.record_json),
+        "previous_hash": entry.previous_hash,
+        "entry_hash": entry.entry_hash,
+        "created_at": entry.created_at,
+    }
+
+
+def _live_order_request(payload: LiveOrderRequestBody) -> live.OrderRequest:
+    return live.OrderRequest(
+        ticker=payload.ticker.strip().upper(),
+        asset_type="crypto" if payload.asset_type.strip().lower() == "crypto" else "stock",
+        side=payload.side.strip().upper(),
+        order_type=payload.order_type.strip().lower(),
+        quantity=payload.quantity,
+        time_in_force=payload.time_in_force.strip().lower(),
+        limit_price=payload.limit_price,
+        stop_price=payload.stop_price,
+    )
+
+
+async def _live_held_quantity(db: AsyncSession, ticker: str) -> float:
+    positions = (
+        await db.execute(
+            select(Trade).where(Trade.ticker == ticker, Trade.status == TradeStatus.OPEN)
+        )
+    ).scalars().all()
+    return round(
+        sum(
+            position.remaining_quantity
+            for position in positions
+            if position.direction == SignalDirection.BUY
+        ),
+        8,
+    )
+
+
+async def _live_data_state(ticker: str) -> tuple[Optional[bool], Optional[str], Optional[float]]:
+    """Data-quality eligibility, reason and price age in seconds."""
+    report = await _get_json(f"{settings.DATA_INGESTION_URL}/api/data-quality/{ticker}")
+    if "error" in report:
+        return None, f"Market-data quality is unavailable: {report['error']}", None
+    eligible = bool(report.get("is_eligible"))
+    issues = report.get("issues")
+    reason = "; ".join(str(issue) for issue in issues) if isinstance(issues, list) and issues else None
+    age_hours = report.get("age_hours")
+    try:
+        age_seconds = float(age_hours) * 3600.0 if age_hours is not None else None
+    except (TypeError, ValueError):
+        age_seconds = None
+    if not eligible and not reason:
+        reason = f"Market data status is {report.get('status', 'unknown')}"
+    return eligible, reason, age_seconds
+
+
+async def _live_gate_context(
+    db: AsyncSession,
+    request: live.OrderRequest,
+    broker: Optional[BrokerAdapter],
+) -> tuple[live.GateContext, dict[str, object]]:
+    """Collect every gate input. Unavailable inputs stay ``None`` so gates fail closed."""
+    control = await _live_control(db)
+    eligible, data_reason, price_age = await _live_data_state(request.ticker)
+    closes = await _latest_closes([request.ticker])
+    reference_price = closes.get(request.ticker)
+
+    buying_power: Optional[float] = None
+    trading_blocked = False
+    account_error: Optional[str] = None
+    tradable: Optional[bool] = None
+    shortable: Optional[bool] = None
+    halted: Optional[bool] = None
+    asset_error: Optional[str] = None
+    credentials_present = bool(broker and broker.configured())
+    if broker is not None and credentials_present:
+        try:
+            account = await broker.get_account()
+            buying_power = account.buying_power
+            trading_blocked = account.trading_blocked
+        except BrokerError as exc:
+            account_error = str(exc)
+        try:
+            asset = await broker.get_asset(request.ticker)
+            tradable = asset.tradable
+            shortable = asset.shortable
+            halted = asset.halted
+        except BrokerError as exc:
+            asset_error = str(exc)
+
+    risk = await _portfolio_risk_status(db)
+    breaker = risk.get("breaker") if isinstance(risk, dict) else None
+    breaker_active: Optional[bool] = None
+    breaker_reasons: list[str] = []
+    if isinstance(breaker, dict):
+        breaker_active = bool(breaker.get("active"))
+        raw_reasons = breaker.get("reasons")
+        if isinstance(raw_reasons, list):
+            breaker_reasons = [str(reason) for reason in raw_reasons]
+    disabled_reason = control.disabled_reason
+    trading_disabled = bool(control.trading_disabled)
+    if trading_blocked:
+        trading_disabled = True
+        disabled_reason = "The broker account itself has trading blocked"
+
+    context = live.GateContext(
+        now=datetime.datetime.now(datetime.timezone.utc),
+        config_enabled=bool(settings.LIVE_TRADING_ENABLED),
+        acknowledged=bool(control.acknowledged),
+        trading_disabled=trading_disabled,
+        disabled_reason=disabled_reason,
+        broker=broker.name if broker else None,
+        credentials_present=credentials_present,
+        sandbox=bool(broker.sandbox) if broker else True,
+        reference_price=reference_price,
+        price_age_seconds=price_age,
+        max_price_age_seconds=settings.LIVE_MAX_PRICE_AGE_SECONDS,
+        data_eligible=eligible,
+        data_reason=data_reason,
+        halted=halted,
+        tradable=tradable,
+        shortable=shortable,
+        held_quantity=await _live_held_quantity(db, request.ticker),
+        buying_power=buying_power,
+        breaker_active=breaker_active,
+        breaker_reasons=breaker_reasons,
+        max_order_notional=settings.LIVE_MAX_ORDER_NOTIONAL_USD,
+    )
+    diagnostics: dict[str, object] = {
+        "account_error": account_error,
+        "asset_error": asset_error,
+        "risk_breaker": breaker,
+    }
+    return context, diagnostics
+
+
+def _live_order_dict(
+    order: LiveOrder,
+    fills: Optional[list[LiveOrderFill]] = None,
+    events: Optional[list[LiveExecutionAudit]] = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "id": order.id,
+        "mode": live.LIVE,
+        "idempotency_key": order.idempotency_key,
+        "client_order_id": order.client_order_id,
+        "broker": order.broker,
+        "broker_order_id": order.broker_order_id,
+        "broker_endpoint": order.broker_endpoint,
+        "sandbox": order.sandbox,
+        "ticker": order.ticker,
+        "asset_type": order.asset_type,
+        "side": order.side,
+        "order_type": order.order_type,
+        "quantity": order.quantity,
+        "filled_quantity": order.filled_quantity,
+        "limit_price": order.limit_price,
+        "stop_price": order.stop_price,
+        "time_in_force": order.time_in_force,
+        "reference_price": order.reference_price,
+        "estimated_notional": order.estimated_notional,
+        "average_fill_price": order.average_fill_price,
+        "status": order.status,
+        "preflight": _json_field(order.preflight_json) or [],
+        "request_fingerprint": order.request_fingerprint,
+        "reject_reason": order.reject_reason,
+        "cancel_reason": order.cancel_reason,
+        "broker_status_raw": order.broker_status_raw,
+        "submitted_at": order.submitted_at,
+        "reconciled_at": order.reconciled_at,
+        "created_at": order.created_at,
+        "updated_at": order.updated_at,
+    }
+    if fills is not None:
+        payload["fills"] = [
+            {
+                "id": fill.id,
+                "broker_fill_id": fill.broker_fill_id,
+                "quantity": fill.quantity,
+                "price": fill.price,
+                "filled_at": fill.filled_at,
+                "created_at": fill.created_at,
+            }
+            for fill in fills
+        ]
+    if events is not None:
+        payload["audit"] = [_audit_dict(event) for event in events]
+    return payload
+
+
+async def _live_order_detail(db: AsyncSession, order: LiveOrder) -> dict[str, object]:
+    fills = (
+        await db.execute(
+            select(LiveOrderFill).where(LiveOrderFill.order_id == order.id).order_by(LiveOrderFill.id)
+        )
+    ).scalars().all()
+    events = (
+        await db.execute(
+            select(LiveExecutionAudit)
+            .where(LiveExecutionAudit.order_id == order.id)
+            .order_by(LiveExecutionAudit.id)
+        )
+    ).scalars().all()
+    return _live_order_dict(order, fills=list(fills), events=list(events))
+
+
+def _live_mode_payload(broker: Optional[BrokerAdapter], control: LiveTradingControl) -> dict[str, object]:
+    armed = (
+        bool(settings.LIVE_TRADING_ENABLED)
+        and bool(control.acknowledged)
+        and not control.trading_disabled
+        and broker is not None
+        and broker.configured()
+    )
+    return {
+        "mode": live.LIVE,
+        "armed": armed,
+        "config_enabled": bool(settings.LIVE_TRADING_ENABLED),
+        "acknowledged": bool(control.acknowledged),
+        "acknowledged_by": control.acknowledged_by,
+        "acknowledged_at": control.acknowledged_at,
+        "trading_disabled": bool(control.trading_disabled),
+        "disabled_reason": control.disabled_reason,
+        "disabled_by": control.disabled_by,
+        "disabled_at": control.disabled_at,
+        "broker": broker.name if broker else None,
+        "broker_configured": bool(broker and broker.configured()),
+        "broker_endpoint": settings.LIVE_BROKER_BASE_URL,
+        "sandbox": bool(broker.sandbox) if broker else True,
+        "acknowledgement_phrase": settings.LIVE_ACK_PHRASE,
+        "max_order_notional": settings.LIVE_MAX_ORDER_NOTIONAL_USD,
+        "max_price_age_seconds": settings.LIVE_MAX_PRICE_AGE_SECONDS,
+        "notice": (
+            "Live orders reach a real broker account. Paper orders remain fully separate."
+            if armed
+            else "Live execution is not armed; no live order can be submitted."
+        ),
+    }
+
+
+@app.get("/api/live-trading/status")
+async def live_trading_status(
+    db: AsyncSession = Depends(get_db),
+    broker: Optional[BrokerAdapter] = Depends(get_broker),
+):
+    """Arming state of live execution. Safe to call with no broker configured."""
+    control = await _live_control(db)
+    await db.commit()
+    return _live_mode_payload(broker, control)
+
+
+@app.post("/api/live-trading/acknowledge")
+async def acknowledge_live_trading(
+    payload: LiveAcknowledgeBody,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    broker: Optional[BrokerAdapter] = Depends(get_broker),
+):
+    """Record the explicit operator acknowledgement required before live orders."""
+    if not settings.LIVE_TRADING_ENABLED:
+        raise HTTPException(
+            403,
+            "Live trading is disabled by configuration; set LIVE_TRADING_ENABLED=true first",
+        )
+    if payload.phrase.strip() != settings.LIVE_ACK_PHRASE:
+        raise HTTPException(400, f'The acknowledgement phrase must be exactly "{settings.LIVE_ACK_PHRASE}"')
+    actor = _live_user_key(request)
+    control = await _live_control(db)
+    control.acknowledged = True
+    control.acknowledged_by = actor
+    control.acknowledged_at = _utc_now()
+    control.acknowledgement_note = payload.note
+    await _live_audit(
+        db,
+        event_type="acknowledged",
+        message="Operator acknowledged live trading",
+        actor=actor,
+        record={"note": payload.note},
+    )
+    await db.commit()
+    return _live_mode_payload(broker, control)
+
+
+@app.post("/api/live-trading/revoke")
+async def revoke_live_trading(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    broker: Optional[BrokerAdapter] = Depends(get_broker),
+):
+    """Withdraw the acknowledgement so live submission is blocked again."""
+    actor = _live_user_key(request)
+    control = await _live_control(db)
+    control.acknowledged = False
+    control.acknowledged_by = None
+    control.acknowledged_at = None
+    await _live_audit(
+        db,
+        event_type="acknowledgement_revoked",
+        message="Live-trading acknowledgement revoked",
+        actor=actor,
+        record={},
+    )
+    await db.commit()
+    return _live_mode_payload(broker, control)
+
+
+@app.post("/api/live-trading/disable")
+async def disable_live_trading(
+    payload: LiveDisableBody,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    broker: Optional[BrokerAdapter] = Depends(get_broker),
+):
+    """Engage the kill switch. Local-only, so it works while the broker is down."""
+    actor = _live_user_key(request)
+    control = await _live_control(db)
+    control.trading_disabled = True
+    control.disabled_reason = (payload.reason or "Disabled by operator").strip()
+    control.disabled_by = actor
+    control.disabled_at = _utc_now()
+    await _live_audit(
+        db,
+        event_type="trading_disabled",
+        message=control.disabled_reason,
+        actor=actor,
+        record={"reason": control.disabled_reason},
+    )
+    await db.commit()
+    return _live_mode_payload(broker, control)
+
+
+@app.post("/api/live-trading/enable")
+async def enable_live_trading(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    broker: Optional[BrokerAdapter] = Depends(get_broker),
+):
+    """Clear the kill switch. Requires configuration and an acknowledgement."""
+    if not settings.LIVE_TRADING_ENABLED:
+        raise HTTPException(403, "Live trading is disabled by configuration")
+    control = await _live_control(db)
+    if not control.acknowledged:
+        raise HTTPException(403, "Acknowledge live trading before clearing the kill switch")
+    actor = _live_user_key(request)
+    control.trading_disabled = False
+    control.disabled_reason = None
+    control.disabled_by = None
+    control.disabled_at = None
+    await _live_audit(
+        db,
+        event_type="trading_enabled",
+        message="Kill switch cleared",
+        actor=actor,
+        record={},
+    )
+    await db.commit()
+    return _live_mode_payload(broker, control)
+
+
+@app.post("/api/live-orders/preview")
+async def preview_live_order(
+    payload: LiveOrderRequestBody,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    broker: Optional[BrokerAdapter] = Depends(get_broker),
+):
+    """Evaluate every gate without contacting the broker's order endpoint."""
+    order_request = _live_order_request(payload)
+    context, diagnostics = await _live_gate_context(db, order_request, broker)
+    checks = live.preflight(order_request, context)
+    fingerprint = live.fingerprint(order_request)
+    control = await _live_control(db)
+    await _live_audit(
+        db,
+        event_type="preview",
+        message=(
+            f"Previewed live {order_request.order_type} {order_request.side} "
+            f"{order_request.quantity:g} {order_request.ticker}"
+        ),
+        actor=_live_user_key(request),
+        record={
+            "request": order_request.as_dict(),
+            "fingerprint": fingerprint,
+            "blockers": [check.name for check in live.blockers(checks)],
+        },
+    )
+    await db.commit()
+    return {
+        **_live_mode_payload(broker, control),
+        "request": order_request.as_dict(),
+        "approval_fingerprint": fingerprint,
+        "estimated_notional": live.estimated_notional(order_request, context.reference_price),
+        "reference_price": context.reference_price,
+        "buying_power": context.buying_power,
+        "checks": [check.as_dict() for check in checks],
+        "blockers": [check.as_dict() for check in live.blockers(checks)],
+        "submittable": live.submittable(checks),
+        "diagnostics": diagnostics,
+    }
+
+
+@app.post("/api/live-orders", status_code=201)
+async def submit_live_order(
+    payload: LiveOrderSubmitBody,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    broker: Optional[BrokerAdapter] = Depends(get_broker),
+):
+    """Submit a previewed, approved live order.
+
+    Retrying the same ``idempotency_key`` returns the stored order without
+    contacting the broker again, and the broker call itself carries the key as
+    the client order id so a duplicate can never be created upstream.
+    """
+    key = payload.idempotency_key.strip()
+    if not key:
+        raise HTTPException(400, "An idempotency key is required so retries cannot duplicate orders")
+    existing = (
+        await db.execute(select(LiveOrder).where(LiveOrder.idempotency_key == key))
+    ).scalar_one_or_none()
+    if existing is not None:
+        return await _live_order_detail(db, existing)
+
+    actor = _live_user_key(request)
+    order_request = _live_order_request(payload)
+    fingerprint = live.fingerprint(order_request)
+    if payload.approval_fingerprint.strip() != fingerprint:
+        raise HTTPException(
+            400,
+            "The approval fingerprint does not match this order; preview and approve it again",
+        )
+
+    context, diagnostics = await _live_gate_context(db, order_request, broker)
+    checks = live.preflight(order_request, context)
+    notional = live.estimated_notional(order_request, context.reference_price)
+    order = LiveOrder(
+        idempotency_key=key,
+        client_order_id=key,
+        broker=(broker.name if broker else settings.LIVE_BROKER),
+        broker_endpoint=settings.LIVE_BROKER_BASE_URL,
+        sandbox=bool(broker.sandbox) if broker else True,
+        user_key=actor,
+        ticker=order_request.ticker,
+        asset_type=order_request.asset_type,
+        side=order_request.side,
+        order_type=order_request.order_type,
+        quantity=order_request.quantity,
+        limit_price=order_request.limit_price,
+        stop_price=order_request.stop_price,
+        time_in_force=order_request.time_in_force,
+        reference_price=context.reference_price,
+        estimated_notional=notional,
+        status=live.NEW,
+        preflight_json=json.dumps([check.as_dict() for check in checks], default=str),
+        request_fingerprint=fingerprint,
+    )
+    db.add(order)
+    await db.flush()
+    await _live_audit(
+        db,
+        event_type="approved",
+        message=f"{actor} approved live {order_request.side} {order_request.quantity:g} {order_request.ticker}",
+        actor=payload.approved_by or actor,
+        record={"request": order_request.as_dict(), "fingerprint": fingerprint},
+        order=order,
+    )
+
+    blocking = live.blockers(checks)
+    if blocking:
+        order.status = live.REJECTED
+        order.reject_reason = "; ".join(check.detail for check in blocking)
+        await _live_audit(
+            db,
+            event_type="blocked",
+            message=order.reject_reason,
+            actor=actor,
+            record={"blockers": [check.as_dict() for check in blocking], "diagnostics": diagnostics},
+            order=order,
+        )
+        await db.commit()
+        return await _live_order_detail(db, order)
+
+    await _live_audit(
+        db,
+        event_type="order_request",
+        message=f"Submitting to {order.broker} at {order.broker_endpoint}",
+        actor=actor,
+        record={"request": order_request.as_dict(), "client_order_id": order.client_order_id},
+        order=order,
+    )
+    assert broker is not None  # a missing broker is a blocking preflight failure
+    try:
+        response = await broker.submit_order(order_request, order.client_order_id)
+    except BrokerError as exc:
+        order.status = live.REJECTED
+        order.reject_reason = f"Broker rejected the order: {exc}"
+        await _live_audit(
+            db,
+            event_type="broker_error",
+            message=order.reject_reason,
+            actor=actor,
+            record={"status_code": exc.status_code, "body": exc.body},
+            order=order,
+        )
+        await db.commit()
+        return await _live_order_detail(db, order)
+
+    order.broker_order_id = response.broker_order_id
+    order.status = response.status
+    order.broker_status_raw = str(response.raw.get("status", "")) or None
+    order.filled_quantity = response.filled_quantity
+    order.average_fill_price = response.average_fill_price
+    order.submitted_at = _utc_now()
+    await _live_audit(
+        db,
+        event_type="broker_response",
+        message=f"Broker accepted order {response.broker_order_id} as {response.status}",
+        actor=actor,
+        record={"broker_order": response.as_dict()},
+        order=order,
+    )
+    await _record_live_fill(db, order, response, actor)
+    await db.commit()
+    return await _live_order_detail(db, order)
+
+
+async def _record_live_fill(
+    db: AsyncSession,
+    order: LiveOrder,
+    response,
+    actor: str,
+) -> Optional[LiveOrderFill]:
+    """Store a fill row for a cumulative broker fill quantity, once."""
+    if response.filled_quantity <= live.QUANTITY_EPSILON or response.average_fill_price is None:
+        return None
+    fill_id = f"{response.broker_order_id}:{response.filled_quantity:.8f}"
+    existing = (
+        await db.execute(
+            select(LiveOrderFill).where(
+                LiveOrderFill.order_id == order.id,
+                LiveOrderFill.broker_fill_id == fill_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    fill = LiveOrderFill(
+        order_id=order.id,
+        broker_fill_id=fill_id,
+        quantity=response.filled_quantity,
+        price=response.average_fill_price,
+        filled_at=_utc_now(),
+    )
+    db.add(fill)
+    await db.flush()
+    await _live_audit(
+        db,
+        event_type="fill",
+        message=(
+            f"Broker reported {response.filled_quantity:g} filled at "
+            f"${response.average_fill_price:,.4f}"
+        ),
+        actor=actor,
+        record={"broker_fill_id": fill_id, "broker_order": response.as_dict()},
+        order=order,
+    )
+    return fill
+
+
+@app.get("/api/live-orders")
+async def list_live_orders(
+    status: Optional[str] = None,
+    ticker: Optional[str] = None,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    broker: Optional[BrokerAdapter] = Depends(get_broker),
+):
+    """Live orders only; paper orders are stored and served separately."""
+    query = select(LiveOrder).order_by(desc(LiveOrder.id)).limit(max(1, min(limit, 500)))
+    if status:
+        query = query.where(LiveOrder.status == status.strip().lower())
+    if ticker:
+        query = query.where(LiveOrder.ticker == ticker.strip().upper())
+    orders = (await db.execute(query)).scalars().all()
+    control = await _live_control(db)
+    await db.commit()
+    return {
+        **_live_mode_payload(broker, control),
+        "orders": [_live_order_dict(order) for order in orders],
+    }
+
+
+@app.post("/api/live-orders/cancel-all")
+async def cancel_all_live_orders(
+    payload: LiveCancelBody,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    broker: Optional[BrokerAdapter] = Depends(get_broker),
+):
+    """Best-effort cancel of every open live order.
+
+    Local state is always marked ``canceled`` for orders the broker confirms, and
+    broker failures are returned per order instead of aborting the sweep, so a
+    provider outage cannot prevent the operator from stopping trading.
+    """
+    actor = _live_user_key(request)
+    reason = (payload.reason or "Cancel-all requested by operator").strip()
+    orders = (
+        await db.execute(
+            select(LiveOrder).where(LiveOrder.status.in_(live.OPEN_STATUSES)).order_by(LiveOrder.id)
+        )
+    ).scalars().all()
+    results: list[dict[str, object]] = []
+    for order in orders:
+        if broker is None or not order.broker_order_id:
+            results.append({"order_id": order.id, "canceled": False, "error": "No broker order id"})
+            continue
+        try:
+            await broker.cancel_order(order.broker_order_id)
+        except BrokerError as exc:
+            results.append({"order_id": order.id, "canceled": False, "error": str(exc)})
+            await _live_audit(
+                db,
+                event_type="cancel_failed",
+                message=f"Broker cancel failed: {exc}",
+                actor=actor,
+                record={"reason": reason, "error": str(exc)},
+                order=order,
+            )
+            continue
+        order.status = live.CANCELED
+        order.cancel_reason = reason
+        results.append({"order_id": order.id, "canceled": True, "error": None})
+        await _live_audit(
+            db,
+            event_type="canceled",
+            message=reason,
+            actor=actor,
+            record={"reason": reason},
+            order=order,
+        )
+    control = await _live_control(db)
+    await db.commit()
+    failures = [row for row in results if not row["canceled"]]
+    return {
+        **_live_mode_payload(broker, control),
+        "requested": len(orders),
+        "canceled": len(results) - len(failures),
+        "failed": len(failures),
+        "results": results,
+    }
+
+
+@app.post("/api/live-orders/reconcile")
+async def reconcile_live_orders(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    broker: Optional[BrokerAdapter] = Depends(get_broker),
+):
+    """Compare stored live orders with broker state and adopt the broker's truth."""
+    actor = _live_user_key(request)
+    orders = (
+        await db.execute(
+            select(LiveOrder).where(LiveOrder.status.notin_(live.TERMINAL_STATUSES)).order_by(LiveOrder.id)
+        )
+    ).scalars().all()
+    rows: list[dict[str, object]] = []
+    for order in orders:
+        if broker is None:
+            rows.append({"order_id": order.id, "error": "No broker adapter configured"})
+            continue
+        try:
+            remote = (
+                await broker.get_order(order.broker_order_id)
+                if order.broker_order_id
+                else await broker.get_order_by_client_id(order.client_order_id)
+            )
+        except BrokerError as exc:
+            rows.append({"order_id": order.id, "error": str(exc)})
+            continue
+        if remote is None:
+            rows.append({"order_id": order.id, "error": "The broker does not know this order"})
+            continue
+        diff = live.reconcile(
+            {
+                "id": order.id,
+                "broker_order_id": order.broker_order_id,
+                "status": order.status,
+                "filled_quantity": order.filled_quantity,
+            },
+            {"status": remote.raw.get("status"), "filled_qty": remote.filled_quantity},
+        )
+        rows.append(diff)
+        if not diff["in_sync"]:
+            order.status = remote.status
+            order.broker_status_raw = str(remote.raw.get("status", "")) or None
+            order.filled_quantity = remote.filled_quantity
+            order.average_fill_price = remote.average_fill_price
+            order.broker_order_id = order.broker_order_id or remote.broker_order_id
+            await _live_audit(
+                db,
+                event_type="reconciled",
+                message=(
+                    f"Adopted broker state {remote.status} with "
+                    f"{remote.filled_quantity:g} filled"
+                ),
+                actor=actor,
+                record=diff,
+                order=order,
+            )
+            await _record_live_fill(db, order, remote, actor)
+        order.reconciled_at = _utc_now()
+    control = await _live_control(db)
+    await db.commit()
+    return {
+        **_live_mode_payload(broker, control),
+        "checked": len(orders),
+        "out_of_sync": len([row for row in rows if row.get("in_sync") is False]),
+        "errors": len([row for row in rows if row.get("error")]),
+        "results": rows,
+    }
+
+
+@app.get("/api/live-orders/audit")
+async def live_execution_audit(limit: int = 200, db: AsyncSession = Depends(get_db)):
+    """The full append-only audit trail, newest last."""
+    entries = (
+        await db.execute(
+            select(LiveExecutionAudit).order_by(LiveExecutionAudit.id).limit(max(1, min(limit, 1000)))
+        )
+    ).scalars().all()
+    return {"entries": [_audit_dict(entry) for entry in entries]}
+
+
+@app.get("/api/live-orders/audit/verify")
+async def verify_live_audit_chain(db: AsyncSession = Depends(get_db)):
+    """Recompute the audit hash chain to prove no record was edited or removed."""
+    entries = (
+        await db.execute(select(LiveExecutionAudit).order_by(LiveExecutionAudit.id))
+    ).scalars().all()
+    chain = [
+        {
+            "id": entry.id,
+            "record": (_json_field(entry.record_json) or {}),
+            "entry_hash": entry.entry_hash,
+        }
+        for entry in entries
+    ]
+    intact, broken_id = live.verify_chain(chain)
+    return {"entries": len(chain), "intact": intact, "broken_entry_id": broken_id}
+
+
+@app.get("/api/live-orders/{order_id}")
+async def get_live_order(order_id: int, db: AsyncSession = Depends(get_db)):
+    order = (
+        await db.execute(select(LiveOrder).where(LiveOrder.id == order_id))
+    ).scalar_one_or_none()
+    if order is None:
+        raise HTTPException(404, "Live order not found")
+    return await _live_order_detail(db, order)
+
+
+@app.get("/api/live-orders/{order_id}/audit")
+async def live_order_audit(order_id: int, db: AsyncSession = Depends(get_db)):
+    entries = (
+        await db.execute(
+            select(LiveExecutionAudit)
+            .where(LiveExecutionAudit.order_id == order_id)
+            .order_by(LiveExecutionAudit.id)
+        )
+    ).scalars().all()
+    return {"order_id": order_id, "entries": [_audit_dict(entry) for entry in entries]}
+
+
+@app.post("/api/live-orders/{order_id}/cancel")
+async def cancel_live_order(
+    order_id: int,
+    payload: LiveCancelBody,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    broker: Optional[BrokerAdapter] = Depends(get_broker),
+):
+    actor = _live_user_key(request)
+    order = (
+        await db.execute(select(LiveOrder).where(LiveOrder.id == order_id))
+    ).scalar_one_or_none()
+    if order is None:
+        raise HTTPException(404, "Live order not found")
+    if order.status in live.TERMINAL_STATUSES:
+        raise HTTPException(400, f"Order {order_id} is already {order.status}")
+    if broker is None or not order.broker_order_id:
+        raise HTTPException(409, "This order has no broker order id to cancel")
+    reason = (payload.reason or "Canceled by operator").strip()
+    try:
+        await broker.cancel_order(order.broker_order_id)
+    except BrokerError as exc:
+        await _live_audit(
+            db,
+            event_type="cancel_failed",
+            message=f"Broker cancel failed: {exc}",
+            actor=actor,
+            record={"reason": reason, "error": str(exc)},
+            order=order,
+        )
+        await db.commit()
+        raise HTTPException(502, f"The broker did not cancel order {order_id}: {exc}")
+    order.status = live.CANCELED
+    order.cancel_reason = reason
+    await _live_audit(
+        db,
+        event_type="canceled",
+        message=reason,
+        actor=actor,
+        record={"reason": reason},
+        order=order,
+    )
+    await db.commit()
+    return await _live_order_detail(db, order)
