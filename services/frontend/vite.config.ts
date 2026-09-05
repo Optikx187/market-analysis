@@ -32,6 +32,8 @@ export default defineConfig({
       "/api/attribution": "http://localhost:8002",
       "/api/portfolio": "http://localhost:8002",
       "/api/paper-orders": "http://localhost:8002",
+      "/api/live-orders": "http://localhost:8002",
+      "/api/live-trading": "http://localhost:8002",
       "/api/dashboard-summary": "http://localhost:8002",
       "/api/action-items": "http://localhost:8002",
       "/api/dashboard-preferences": "http://localhost:8002",

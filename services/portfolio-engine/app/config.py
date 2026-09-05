@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     ACTION_ITEM_CANDLE_INTERVAL: str = "1d"
     ACTION_STOP_PROXIMITY_PCT: float = 0.25
     ACTION_EARNINGS_WINDOW_DAYS: int = 7
+    LIVE_TRADING_ENABLED: bool = False
+    LIVE_BROKER: str = "alpaca"
+    LIVE_BROKER_BASE_URL: str = "https://paper-api.alpaca.markets"
+    LIVE_ACK_PHRASE: str = "ENABLE LIVE TRADING"
+    LIVE_MAX_ORDER_NOTIONAL_USD: float = 1_000.0
+    LIVE_MAX_PRICE_AGE_SECONDS: float = 300.0
+    ALPACA_API_KEY: str = ""
+    ALPACA_SECRET_KEY: str = ""
     AUTH_ENABLED: bool = False
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
