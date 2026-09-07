@@ -15,12 +15,20 @@ from app.live_execution import OrderRequest
 
 
 class BrokerError(RuntimeError):
-    """Any broker-side or transport failure, carrying the raw response body."""
+    """Broker failure with enough classification for fail-closed recovery."""
 
-    def __init__(self, message: str, *, status_code: Optional[int] = None, body: object = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: Optional[int] = None,
+        body: object = None,
+        ambiguous: bool = False,
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.body = body
+        self.ambiguous = ambiguous
 
 
 @dataclasses.dataclass(frozen=True)
@@ -30,6 +38,15 @@ class BrokerAccount:
     equity: Optional[float]
     trading_blocked: bool
     account_id: Optional[str] = None
+
+    def as_dict(self) -> dict[str, object]:
+        return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass(frozen=True)
+class BrokerPosition:
+    symbol: str
+    quantity: float
 
     def as_dict(self) -> dict[str, object]:
         return dataclasses.asdict(self)
@@ -74,6 +91,9 @@ class BrokerAdapter(Protocol):
     async def get_account(self) -> BrokerAccount: ...
 
     async def get_asset(self, symbol: str) -> BrokerAsset: ...
+
+    async def get_position(self, symbol: str) -> BrokerPosition:
+        """Return current broker-held quantity; zero means no open position."""
 
     async def submit_order(self, request: OrderRequest, client_order_id: str) -> BrokerOrder:
         """Submit ``request``.

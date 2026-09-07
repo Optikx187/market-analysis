@@ -871,6 +871,7 @@ export interface LiveModeStatus {
   acknowledgement_phrase: string;
   max_order_notional: number;
   max_price_age_seconds: number;
+  operator_auth_configured: boolean;
   notice: string;
 }
 
@@ -972,46 +973,81 @@ export interface LiveCancelAllResponse extends LiveModeStatus {
 export const fetchLiveStatus = () =>
   api.get<LiveModeStatus>("/live-trading/status").then((r) => r.data);
 
-export const acknowledgeLiveTrading = (phrase: string, note?: string) =>
-  api.post<LiveModeStatus>("/live-trading/acknowledge", { phrase, note }).then((r) => r.data);
+const liveOperatorConfig = (operatorToken: string) => ({
+  headers: { "X-Live-Operator-Token": operatorToken },
+});
 
-export const revokeLiveTrading = () =>
-  api.post<LiveModeStatus>("/live-trading/revoke", {}).then((r) => r.data);
+export const acknowledgeLiveTrading = (operatorToken: string, phrase: string, note?: string) =>
+  api.post<LiveModeStatus>(
+    "/live-trading/acknowledge",
+    { phrase, note },
+    liveOperatorConfig(operatorToken),
+  ).then((r) => r.data);
 
-export const disableLiveTrading = (reason?: string) =>
-  api.post<LiveModeStatus>("/live-trading/disable", { reason }).then((r) => r.data);
+export const revokeLiveTrading = (operatorToken: string) =>
+  api.post<LiveModeStatus>(
+    "/live-trading/revoke",
+    {},
+    liveOperatorConfig(operatorToken),
+  ).then((r) => r.data);
 
-export const enableLiveTrading = () =>
-  api.post<LiveModeStatus>("/live-trading/enable", {}).then((r) => r.data);
+export const disableLiveTrading = (operatorToken: string, reason?: string) =>
+  api.post<LiveModeStatus>(
+    "/live-trading/disable",
+    { reason },
+    liveOperatorConfig(operatorToken),
+  ).then((r) => r.data);
 
-export const previewLiveOrder = (payload: LiveOrderInput) =>
-  api.post<LivePreview>("/live-orders/preview", payload).then((r) => r.data);
+export const enableLiveTrading = (operatorToken: string) =>
+  api.post<LiveModeStatus>(
+    "/live-trading/enable",
+    {},
+    liveOperatorConfig(operatorToken),
+  ).then((r) => r.data);
+
+export const previewLiveOrder = (operatorToken: string, payload: LiveOrderInput) =>
+  api.post<LivePreview>(
+    "/live-orders/preview",
+    payload,
+    liveOperatorConfig(operatorToken),
+  ).then((r) => r.data);
 
 export const submitLiveOrder = (
+  operatorToken: string,
   payload: LiveOrderInput & { idempotency_key: string; approval_fingerprint: string },
-) => api.post<LiveOrder>("/live-orders", payload).then((r) => r.data);
+) => api.post<LiveOrder>("/live-orders", payload, liveOperatorConfig(operatorToken)).then((r) => r.data);
 
-export const fetchLiveOrders = () =>
-  api.get<LiveOrderListResponse>("/live-orders").then((r) => r.data);
+export const fetchLiveOrders = (operatorToken: string) =>
+  api.get<LiveOrderListResponse>("/live-orders", liveOperatorConfig(operatorToken)).then((r) => r.data);
 
-export const fetchLiveOrder = (orderId: number) =>
-  api.get<LiveOrder>(`/live-orders/${orderId}`).then((r) => r.data);
+export const fetchLiveOrder = (operatorToken: string, orderId: number) =>
+  api.get<LiveOrder>(`/live-orders/${orderId}`, liveOperatorConfig(operatorToken)).then((r) => r.data);
 
-export const cancelLiveOrder = (orderId: number, reason?: string) =>
-  api.post<LiveOrder>(`/live-orders/${orderId}/cancel`, { reason }).then((r) => r.data);
+export const cancelLiveOrder = (operatorToken: string, orderId: number, reason?: string) =>
+  api.post<LiveOrder>(
+    `/live-orders/${orderId}/cancel`,
+    { reason },
+    liveOperatorConfig(operatorToken),
+  ).then((r) => r.data);
 
-export const cancelAllLiveOrders = (reason?: string) =>
-  api.post<LiveCancelAllResponse>("/live-orders/cancel-all", { reason }).then((r) => r.data);
+export const cancelAllLiveOrders = (operatorToken: string, reason?: string) =>
+  api.post<LiveCancelAllResponse>(
+    "/live-orders/cancel-all",
+    { reason },
+    liveOperatorConfig(operatorToken),
+  ).then((r) => r.data);
 
-export const reconcileLiveOrders = () =>
+export const reconcileLiveOrders = (operatorToken: string) =>
   api.post<{ checked: number; out_of_sync: number; errors: number }>(
     "/live-orders/reconcile",
     {},
+    liveOperatorConfig(operatorToken),
   ).then((r) => r.data);
 
-export const verifyLiveAudit = () =>
+export const verifyLiveAudit = (operatorToken: string) =>
   api.get<{ entries: number; intact: boolean; broken_entry_id: number | null }>(
     "/live-orders/audit/verify",
+    liveOperatorConfig(operatorToken),
   ).then((r) => r.data);
 
 // Notification channel toggles

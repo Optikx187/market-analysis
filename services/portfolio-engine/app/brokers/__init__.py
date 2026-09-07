@@ -1,6 +1,13 @@
 """Broker adapters for guarded live execution."""
 
-from app.brokers.base import BrokerAdapter, BrokerAsset, BrokerAccount, BrokerError, BrokerOrder
+from app.brokers.base import (
+    BrokerAccount,
+    BrokerAdapter,
+    BrokerAsset,
+    BrokerError,
+    BrokerOrder,
+    BrokerPosition,
+)
 from app.brokers.alpaca import AlpacaBroker
 
 __all__ = [
@@ -10,4 +17,5 @@ __all__ = [
     "BrokerAsset",
     "BrokerError",
     "BrokerOrder",
+    "BrokerPosition",
 ]

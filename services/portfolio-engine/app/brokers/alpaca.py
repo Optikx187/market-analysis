@@ -8,10 +8,17 @@ described as a sandbox in the UI or audit log.
 from __future__ import annotations
 
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 
-from app.brokers.base import BrokerAccount, BrokerAsset, BrokerError, BrokerOrder
+from app.brokers.base import (
+    BrokerAccount,
+    BrokerAsset,
+    BrokerError,
+    BrokerOrder,
+    BrokerPosition,
+)
 from app.live_execution import LIMIT, MARKET, OrderRequest, STOP, STOP_LIMIT, normalize_status
 
 SANDBOX_HOSTS = ("paper-api.alpaca.markets", "broker-api.sandbox.alpaca.markets", "localhost", "127.0.0.1")
@@ -37,7 +44,8 @@ class AlpacaBroker:
 
     @property
     def sandbox(self) -> bool:
-        return any(host in self.base_url for host in SANDBOX_HOSTS)
+        hostname = (urlparse(self.base_url).hostname or "").lower()
+        return hostname in SANDBOX_HOSTS
 
     def configured(self) -> bool:
         return bool(self.api_key and self.api_secret)
@@ -63,7 +71,10 @@ class AlpacaBroker:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.request(method, url, headers=self._headers, json=json_body)
         except httpx.HTTPError as exc:
-            raise BrokerError(f"Alpaca request failed: {exc}") from exc
+            raise BrokerError(
+                "Alpaca transport failed before a definitive response",
+                ambiguous=True,
+            ) from exc
         if response.status_code == 404 and allow_404:
             return None
         if response.status_code >= 400:
@@ -71,6 +82,7 @@ class AlpacaBroker:
                 f"Alpaca returned HTTP {response.status_code}",
                 status_code=response.status_code,
                 body=response.text,
+                ambiguous=response.status_code >= 500,
             )
         if not response.content:
             return None
@@ -90,11 +102,18 @@ class AlpacaBroker:
         payload = await self._request("GET", "/v2/account")
         if not isinstance(payload, dict):
             raise BrokerError("Alpaca account response was not an object")
+        blocking_fields = (
+            "trading_blocked",
+            "account_blocked",
+            "trade_suspended_by_user",
+        )
+        if any(not isinstance(payload.get(field), bool) for field in blocking_fields):
+            raise BrokerError("Alpaca account response did not contain valid trading-state flags")
         return BrokerAccount(
             buying_power=_optional_float(payload.get("buying_power")),
             cash=_optional_float(payload.get("cash")),
             equity=_optional_float(payload.get("equity")),
-            trading_blocked=bool(payload.get("trading_blocked")),
+            trading_blocked=any(bool(payload[field]) for field in blocking_fields),
             account_id=str(payload.get("id") or "") or None,
         )
 
@@ -108,6 +127,20 @@ class AlpacaBroker:
             tradable=bool(payload.get("tradable")),
             shortable=bool(payload.get("shortable")),
             halted=status not in ("active", ""),
+        )
+
+    async def get_position(self, symbol: str) -> BrokerPosition:
+        payload = await self._request("GET", f"/v2/positions/{symbol}", allow_404=True)
+        if payload is None:
+            return BrokerPosition(symbol=symbol, quantity=0.0)
+        if not isinstance(payload, dict):
+            raise BrokerError("Alpaca position response was not an object")
+        quantity = _optional_float(payload.get("qty"))
+        if quantity is None:
+            raise BrokerError("Alpaca position response did not contain a quantity")
+        return BrokerPosition(
+            symbol=str(payload.get("symbol") or symbol),
+            quantity=quantity,
         )
 
     async def submit_order(self, request: OrderRequest, client_order_id: str) -> BrokerOrder:

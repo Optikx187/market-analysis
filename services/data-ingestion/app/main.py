@@ -523,6 +523,8 @@ async def _alpaca_stock_quote(ticker: str) -> QuoteResponse | None:
         prev_bar = snap.get("prevDailyBar") or {}
         daily_bar = snap.get("dailyBar") or {}
         price = trade.get("p")
+        trade_timestamp = trade.get("t")
+        observed_at = trade_timestamp if isinstance(trade_timestamp, str) else now
         prev_close = prev_bar.get("c")
         volume = daily_bar.get("v")
         change_pct = round(((price - prev_close) / prev_close) * 100, 2) if price and prev_close else None
@@ -532,7 +534,7 @@ async def _alpaca_stock_quote(ticker: str) -> QuoteResponse | None:
             price=float(price) if price else None,
             change_pct=change_pct,
             volume=float(volume) if volume else None,
-            updated_at=now,
+            updated_at=observed_at,
         )
     except Exception as e:
         logger.debug(f"Alpaca quote failed for {ticker}: {e}")
@@ -551,6 +553,12 @@ async def get_quote(ticker: str, asset_type: str = "stock"):
                 resp.raise_for_status()
                 data = resp.json()
             record_api_success("binance")
+            close_time = data.get("closeTime")
+            observed_at = (
+                datetime.fromtimestamp(float(close_time) / 1000, timezone.utc).isoformat()
+                if close_time is not None
+                else now
+            )
             return QuoteResponse(
                 ticker=ticker,
                 name=get_crypto_name(ticker),
@@ -558,7 +566,7 @@ async def get_quote(ticker: str, asset_type: str = "stock"):
                 price=float(data.get("lastPrice")) if data.get("lastPrice") else None,
                 change_pct=float(data.get("priceChangePercent")) if data.get("priceChangePercent") else None,
                 volume=float(data.get("volume")) if data.get("volume") else None,
-                updated_at=now,
+                updated_at=observed_at,
             )
         except Exception as e:
             logger.warning(f"Binance quote failed for {ticker}, falling back to yfinance: {e}")

@@ -39,6 +39,8 @@ NEW = "new"
 SUBMITTED = "submitted"
 ACCEPTED = "accepted"
 PARTIALLY_FILLED = "partially_filled"
+CANCEL_PENDING = "cancel_pending"
+SUBMISSION_UNKNOWN = "submission_unknown"
 FILLED = "filled"
 CANCELED = "canceled"
 REJECTED = "rejected"
@@ -50,6 +52,8 @@ ORDER_STATUSES = (
     SUBMITTED,
     ACCEPTED,
     PARTIALLY_FILLED,
+    CANCEL_PENDING,
+    SUBMISSION_UNKNOWN,
     FILLED,
     CANCELED,
     REJECTED,
@@ -57,7 +61,15 @@ ORDER_STATUSES = (
     UNKNOWN,
 )
 
-OPEN_STATUSES = (NEW, SUBMITTED, ACCEPTED, PARTIALLY_FILLED)
+OPEN_STATUSES = (
+    NEW,
+    SUBMITTED,
+    ACCEPTED,
+    PARTIALLY_FILLED,
+    CANCEL_PENDING,
+    SUBMISSION_UNKNOWN,
+    UNKNOWN,
+)
 TERMINAL_STATUSES = (FILLED, CANCELED, REJECTED, EXPIRED)
 
 # Alpaca (and most brokers) report a superset of states; anything unmapped stays
@@ -72,7 +84,7 @@ BROKER_STATUS_MAP = {
     "filled": FILLED,
     "done_for_day": EXPIRED,
     "canceled": CANCELED,
-    "pending_cancel": CANCELED,
+    "pending_cancel": CANCEL_PENDING,
     "expired": EXPIRED,
     "replaced": CANCELED,
     "rejected": REJECTED,
@@ -159,10 +171,11 @@ class GateContext:
     max_price_age_seconds: float
     data_eligible: Optional[bool]
     data_reason: Optional[str]
+    account_trading_allowed: Optional[bool]
     halted: Optional[bool]
     tradable: Optional[bool]
     shortable: Optional[bool]
-    held_quantity: float
+    held_quantity: Optional[float]
     buying_power: Optional[float]
     breaker_active: Optional[bool]
     breaker_reasons: Sequence[str]
@@ -261,6 +274,19 @@ def preflight(request: OrderRequest, context: GateContext) -> list[Check]:
             blocking=False,
         )
     )
+    checks.append(
+        Check(
+            "account_trading_allowed",
+            context.account_trading_allowed is True,
+            "The broker account confirms trading is allowed"
+            if context.account_trading_allowed is True
+            else (
+                "The broker account has trading blocked"
+                if context.account_trading_allowed is False
+                else "Broker account state could not be confirmed"
+            ),
+        )
+    )
     fresh = (
         context.reference_price is not None
         and context.price_age_seconds is not None
@@ -310,17 +336,27 @@ def preflight(request: OrderRequest, context: GateContext) -> list[Check]:
         )
     )
     if request.side == SELL:
-        covered = context.held_quantity + QUANTITY_EPSILON >= request.quantity
-        if covered:
-            short_detail = f"{context.held_quantity:g} units are held, covering the sale"
+        holdings_known = context.held_quantity is not None
+        held_quantity = context.held_quantity or 0.0
+        covered = holdings_known and held_quantity + QUANTITY_EPSILON >= request.quantity
+        if not holdings_known:
+            short_detail = "Broker position quantity could not be confirmed"
+        elif covered:
+            short_detail = f"{held_quantity:g} broker-held units cover the sale"
         elif context.shortable is True:
-            short_detail = "The remainder is short-sellable at the broker"
+            short_detail = "The uncovered quantity is short-sellable at the broker"
         else:
             short_detail = (
-                f"Only {context.held_quantity:g} units are held and the symbol is not "
+                f"Only {held_quantity:g} broker-held units are available and the symbol is not "
                 "confirmed short-sellable"
             )
-        checks.append(Check("short_availability", covered or context.shortable is True, short_detail))
+        checks.append(
+            Check(
+                "short_availability",
+                holdings_known and (covered or context.shortable is True),
+                short_detail,
+            )
+        )
     notional = estimated_notional(request, context.reference_price)
     if request.side == BUY:
         affordable = (
