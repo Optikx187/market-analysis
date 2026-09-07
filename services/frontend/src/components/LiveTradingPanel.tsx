@@ -19,13 +19,23 @@ import {
   type LivePreview,
 } from "@/lib/api";
 
-const OPEN_STATUSES = ["new", "submitted", "accepted", "partially_filled"];
+const OPEN_STATUSES = [
+  "new",
+  "submitted",
+  "accepted",
+  "partially_filled",
+  "cancel_pending",
+  "submission_unknown",
+  "unknown",
+];
 
 const STATUS_STYLES: Record<string, string> = {
   new: "bg-gray-800 text-gray-300",
   submitted: "bg-blue-900 text-blue-300",
   accepted: "bg-blue-900 text-blue-300",
   partially_filled: "bg-amber-900 text-amber-300",
+  cancel_pending: "bg-amber-900 text-amber-300",
+  submission_unknown: "bg-orange-900 text-orange-300",
   filled: "bg-green-900 text-green-300",
   canceled: "bg-gray-800 text-gray-400",
   rejected: "bg-red-900 text-red-300",
@@ -59,6 +69,9 @@ export default function LiveTradingPanel() {
   const [orders, setOrders] = useState<LiveOrder[]>([]);
   const [form, setForm] = useState({ ...emptyForm });
   const [preview, setPreview] = useState<LivePreview | null>(null);
+  const [previewKey, setPreviewKey] = useState<string | null>(null);
+  const [operatorTokenInput, setOperatorTokenInput] = useState("");
+  const [operatorToken, setOperatorToken] = useState("");
   const [phrase, setPhrase] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -66,13 +79,18 @@ export default function LiveTradingPanel() {
 
   const load = useCallback(async () => {
     try {
-      const [nextStatus, list] = await Promise.all([fetchLiveStatus(), fetchLiveOrders()]);
+      const nextStatus = await fetchLiveStatus();
       setStatus(nextStatus);
-      setOrders(list.orders);
+      if (operatorToken) {
+        const list = await fetchLiveOrders(operatorToken);
+        setOrders(list.orders);
+      } else {
+        setOrders([]);
+      }
     } catch (err) {
       setError(apiErrorMessage(err, "Could not load live trading state"));
     }
-  }, []);
+  }, [operatorToken]);
 
   useEffect(() => {
     void load();
@@ -105,8 +123,9 @@ export default function LiveTradingPanel() {
 
   const onPreview = () =>
     run(async () => {
-      const result = await previewLiveOrder(orderInput());
+      const result = await previewLiveOrder(operatorToken, orderInput());
       setPreview(result);
+      setPreviewKey(`live-${crypto.randomUUID()}`);
       return result.submittable
         ? "Preview passed every safety gate. Review it, then approve to submit."
         : "Preview blocked. Resolve the blockers below before approving.";
@@ -114,13 +133,14 @@ export default function LiveTradingPanel() {
 
   const onApprove = () =>
     run(async () => {
-      if (!preview) throw new Error("Preview the order before approving it");
-      const submitted = await submitLiveOrder({
+      if (!preview || !previewKey) throw new Error("Preview the order before approving it");
+      const submitted = await submitLiveOrder(operatorToken, {
         ...orderInput(),
-        idempotency_key: `live-${preview.approval_fingerprint.slice(0, 16)}`,
+        idempotency_key: previewKey,
         approval_fingerprint: preview.approval_fingerprint,
       });
       setPreview(null);
+      setPreviewKey(null);
       setForm({ ...emptyForm });
       return submitted.status === "rejected"
         ? `Order rejected before reaching the broker: ${submitted.reject_reason}`
@@ -158,6 +178,47 @@ export default function LiveTradingPanel() {
 
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <input
+            aria-label="Live operator token"
+            autoComplete="off"
+            className="rounded border border-gray-600 bg-transparent px-2 py-1 text-sm"
+            placeholder="live operator token"
+            type="password"
+            value={operatorTokenInput}
+            onChange={(event) => setOperatorTokenInput(event.target.value)}
+          />
+          <button
+            className="rounded border border-gray-600 px-3 py-1 text-sm disabled:opacity-50"
+            disabled={busy || !operatorTokenInput.trim()}
+            onClick={() => run(async () => {
+              const token = operatorTokenInput.trim();
+              const list = await fetchLiveOrders(token);
+              setOperatorToken(token);
+              setOperatorTokenInput("");
+              setOrders(list.orders);
+              return "Operator authorized for this browser session";
+            })}
+          >
+            Authorize operator
+          </button>
+          <button
+            className="rounded border border-gray-600 px-3 py-1 text-sm disabled:opacity-50"
+            disabled={busy || !operatorToken}
+            onClick={() => {
+              setOperatorToken("");
+              setOrders([]);
+              setPreview(null);
+              setPreviewKey(null);
+              setMessage("Operator authorization cleared");
+            }}
+          >
+            Clear authorization
+          </button>
+          <span className={operatorToken ? "text-sm text-green-400" : "text-sm text-amber-400"}>
+            {operatorToken ? "Operator authorized" : "Operator authorization required"}
+          </span>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <input
             aria-label="Acknowledgement phrase"
             className="rounded border border-gray-600 bg-transparent px-2 py-1 text-sm"
             placeholder={status?.acknowledgement_phrase ?? "acknowledgement phrase"}
@@ -166,9 +227,9 @@ export default function LiveTradingPanel() {
           />
           <button
             className="rounded bg-amber-700 px-3 py-1 text-sm text-white disabled:opacity-50"
-            disabled={busy}
+            disabled={busy || !operatorToken}
             onClick={() => run(async () => {
-              await acknowledgeLiveTrading(phrase);
+              await acknowledgeLiveTrading(operatorToken, phrase);
               setPhrase("");
               return "Live trading acknowledged";
             })}
@@ -177,9 +238,9 @@ export default function LiveTradingPanel() {
           </button>
           <button
             className="rounded border border-gray-600 px-3 py-1 text-sm disabled:opacity-50"
-            disabled={busy}
+            disabled={busy || !operatorToken}
             onClick={() => run(async () => {
-              await revokeLiveTrading();
+              await revokeLiveTrading(operatorToken);
               return "Acknowledgement revoked";
             })}
           >
@@ -187,9 +248,9 @@ export default function LiveTradingPanel() {
           </button>
           <button
             className="rounded bg-red-700 px-3 py-1 text-sm font-semibold text-white disabled:opacity-50"
-            disabled={busy}
+            disabled={busy || !operatorToken}
             onClick={() => run(async () => {
-              await disableLiveTrading("Disabled from the live trading panel");
+              await disableLiveTrading(operatorToken, "Disabled from the live trading panel");
               return "Kill switch engaged; no new live order can be submitted";
             })}
           >
@@ -197,9 +258,9 @@ export default function LiveTradingPanel() {
           </button>
           <button
             className="rounded border border-gray-600 px-3 py-1 text-sm disabled:opacity-50"
-            disabled={busy}
+            disabled={busy || !operatorToken}
             onClick={() => run(async () => {
-              await enableLiveTrading();
+              await enableLiveTrading(operatorToken);
               return "Kill switch cleared";
             })}
           >
@@ -207,19 +268,19 @@ export default function LiveTradingPanel() {
           </button>
           <button
             className="rounded bg-red-800 px-3 py-1 text-sm font-semibold text-white disabled:opacity-50"
-            disabled={busy}
+            disabled={busy || !operatorToken}
             onClick={() => run(async () => {
-              const result = await cancelAllLiveOrders("Cancel-all from the live trading panel");
-              return `Cancel-all: ${result.canceled} canceled, ${result.failed} failed`;
+              const result = await cancelAllLiveOrders(operatorToken, "Cancel-all from the live trading panel");
+              return `Cancel-all: ${result.canceled} cancellation request(s), ${result.failed} failed`;
             })}
           >
             Cancel all orders
           </button>
           <button
             className="rounded border border-gray-600 px-3 py-1 text-sm disabled:opacity-50"
-            disabled={busy}
+            disabled={busy || !operatorToken}
             onClick={() => run(async () => {
-              const result = await reconcileLiveOrders();
+              const result = await reconcileLiveOrders(operatorToken);
               return `Reconciled ${result.checked} order(s); ${result.out_of_sync} corrected, ${result.errors} error(s)`;
             })}
           >
@@ -227,9 +288,9 @@ export default function LiveTradingPanel() {
           </button>
           <button
             className="rounded border border-gray-600 px-3 py-1 text-sm disabled:opacity-50"
-            disabled={busy}
+            disabled={busy || !operatorToken}
             onClick={() => run(async () => {
-              const result = await verifyLiveAudit();
+              const result = await verifyLiveAudit(operatorToken);
               return result.intact
                 ? `Audit chain intact across ${result.entries} entries`
                 : `Audit chain broken at entry ${result.broken_entry_id}`;
@@ -295,10 +356,10 @@ export default function LiveTradingPanel() {
         </div>
         <div className="mt-3 flex gap-2">
           <button className="rounded bg-blue-700 px-3 py-1 text-sm text-white disabled:opacity-50"
-            disabled={busy} onClick={onPreview}>Preview</button>
+            disabled={busy || !operatorToken} onClick={onPreview}>Preview</button>
           <button
             className="rounded bg-red-700 px-3 py-1 text-sm font-semibold text-white disabled:opacity-50"
-            disabled={busy || !preview?.submittable}
+            disabled={busy || !operatorToken || !preview?.submittable}
             onClick={onApprove}
             title={preview?.submittable ? "Submit this order to the broker" : "Preview must pass every gate first"}
           >
@@ -354,10 +415,10 @@ export default function LiveTradingPanel() {
                     {OPEN_STATUSES.includes(order.status) && (
                       <button
                         className="rounded border border-gray-600 px-2 py-0.5 text-xs disabled:opacity-50"
-                        disabled={busy}
+                        disabled={busy || !operatorToken}
                         onClick={() => run(async () => {
-                          await cancelLiveOrder(order.id, "Canceled from the live trading panel");
-                          return `Order ${order.id} canceled`;
+                          await cancelLiveOrder(operatorToken, order.id, "Canceled from the live trading panel");
+                          return `Cancellation requested for order ${order.id}`;
                         })}
                       >
                         Cancel

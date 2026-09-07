@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     LIVE_BROKER: str = "alpaca"
     LIVE_BROKER_BASE_URL: str = "https://paper-api.alpaca.markets"
     LIVE_ACK_PHRASE: str = "ENABLE LIVE TRADING"
+    LIVE_OPERATOR_TOKEN: str = ""
     LIVE_MAX_ORDER_NOTIONAL_USD: float = 1_000.0
     LIVE_MAX_PRICE_AGE_SECONDS: float = 300.0
     ALPACA_API_KEY: str = ""

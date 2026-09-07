@@ -3,7 +3,7 @@ import enum
 
 from sqlalchemy import (
     Column, Integer, String, Float, DateTime, Boolean, Enum as SAEnum, Text, ForeignKey,
-    UniqueConstraint,
+    UniqueConstraint, CheckConstraint,
 )
 from sqlalchemy.sql import func
 
@@ -316,8 +316,9 @@ class LiveTradingControl(Base):
     """
 
     __tablename__ = "live_trading_control"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_live_trading_control_singleton"),)
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, autoincrement=False, default=1)
     acknowledged = Column(Boolean, nullable=False, default=False)
     acknowledged_by = Column(String(120), nullable=True)
     acknowledged_at = Column(DateTime, nullable=True)

@@ -6,15 +6,20 @@ from typing import Optional
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app import live_execution as live
 from app import main
-from app.brokers.base import BrokerAccount, BrokerAsset, BrokerError, BrokerOrder
+from app.brokers.alpaca import AlpacaBroker
+from app.brokers.base import BrokerAccount, BrokerAsset, BrokerError, BrokerOrder, BrokerPosition
 from app.config import settings
 from app.database import Base, _migrate_existing_tables, get_db
+from app.models import LiveExecutionAudit, LiveTradingControl
 
 ACK_PHRASE = settings.LIVE_ACK_PHRASE
+OPERATOR_TOKEN = "test-live-operator-token"
+AUTH_HEADERS = {"X-Live-Operator-Token": OPERATOR_TOKEN}
 
 # A Wednesday inside the US equity session so market-hours gates pass by default.
 OPEN_MOMENT = datetime.datetime(2024, 1, 3, 15, 0, tzinfo=datetime.timezone.utc)
@@ -36,11 +41,16 @@ class FakeBroker:
         self.submissions: list[str] = []
         self.cancels: list[str] = []
         self.fail = False
+        self.account_fail = False
+        self.position_fail = False
+        self.submit_ambiguous: Optional[str] = None
+        self.submit_rejected = False
         self.buying_power: Optional[float] = 100_000.0
         self.trading_blocked = False
         self.tradable = True
         self.shortable = True
         self.halted = False
+        self.position_quantity = 0.0
         self.next_status = "accepted"
         self.next_filled = 0.0
         self.next_price: Optional[float] = None
@@ -50,10 +60,17 @@ class FakeBroker:
 
     def _raise_if_down(self) -> None:
         if self.fail:
-            raise BrokerError("Simulated broker outage", status_code=503, body="down")
+            raise BrokerError(
+                "Simulated broker outage",
+                status_code=503,
+                body={"secret": "must-not-leak"},
+                ambiguous=True,
+            )
 
     async def get_account(self) -> BrokerAccount:
         self._raise_if_down()
+        if self.account_fail:
+            raise BrokerError("Simulated account lookup failure", ambiguous=True)
         return BrokerAccount(
             buying_power=self.buying_power,
             cash=self.buying_power,
@@ -71,6 +88,12 @@ class FakeBroker:
             halted=self.halted,
         )
 
+    async def get_position(self, symbol: str) -> BrokerPosition:
+        self._raise_if_down()
+        if self.position_fail:
+            raise BrokerError("Simulated position lookup failure", ambiguous=True)
+        return BrokerPosition(symbol=symbol, quantity=self.position_quantity)
+
     def _order(self, client_order_id: str) -> BrokerOrder:
         raw = self.orders[client_order_id]
         return BrokerOrder(
@@ -85,6 +108,14 @@ class FakeBroker:
     async def submit_order(self, request: live.OrderRequest, client_order_id: str) -> BrokerOrder:
         self._raise_if_down()
         self.submissions.append(client_order_id)
+        if self.submit_rejected:
+            raise BrokerError(
+                "Broker rejected the order",
+                status_code=422,
+                body={"secret": "must-not-leak", "raw": "provider payload"},
+            )
+        if self.submit_ambiguous == "unknown":
+            raise BrokerError("Submission response was lost", ambiguous=True)
         if client_order_id not in self.orders:
             self.orders[client_order_id] = {
                 "id": f"broker-{len(self.orders) + 1}",
@@ -93,6 +124,8 @@ class FakeBroker:
                 "filled_qty": self.next_filled,
                 "filled_avg_price": self.next_price,
             }
+        if self.submit_ambiguous == "accepted":
+            raise BrokerError("Submission response was lost", ambiguous=True)
         return self._order(client_order_id)
 
     async def get_order_by_client_id(self, client_order_id: str) -> Optional[BrokerOrder]:
@@ -113,7 +146,7 @@ class FakeBroker:
         self.cancels.append(broker_order_id)
         for raw in self.orders.values():
             if raw["id"] == broker_order_id:
-                raw["status"] = "canceled"
+                raw["status"] = "pending_cancel"
 
     async def list_open_orders(self) -> list[BrokerOrder]:
         self._raise_if_down()
@@ -153,18 +186,22 @@ def _service(database_path, monkeypatch, broker: FakeBroker) -> Iterator[TestCli
         return [{"timestamp": "2024-01-03T00:00:00", "close": 100.0, "volume": 1_000_000}]
 
     async def fake_get_json(url: str, params=None) -> dict[str, object]:
-        if "/api/data-quality/" in url:
-            return {"is_eligible": True, "status": "fresh", "age_hours": 0.01, "issues": []}
+        if "/api/quotes/" in url:
+            return {"price": 100.0, "updated_at": OPEN_MOMENT.isoformat()}
         return {}
 
     asyncio.run(prepare())
     monkeypatch.setattr(main, "_fetch_candles", fake_candles)
     monkeypatch.setattr(main, "_get_json", fake_get_json)
     monkeypatch.setattr(main.datetime, "datetime", FrozenDatetime)
+    monkeypatch.setattr(settings, "LIVE_OPERATOR_TOKEN", OPERATOR_TOKEN)
+    monkeypatch.setattr(main, "async_session", session_factory)
     main.app.dependency_overrides[get_db] = override_get_db
     main.app.dependency_overrides[main.get_broker] = lambda: broker
     try:
-        yield TestClient(main.app)
+        with TestClient(main.app) as test_client:
+            test_client.headers.update(AUTH_HEADERS)
+            yield test_client
     finally:
         main.app.dependency_overrides.clear()
         asyncio.run(engine.dispose())
@@ -241,6 +278,7 @@ def _context(**overrides) -> live.GateContext:
         shortable=True,
         held_quantity=0.0,
         buying_power=10_000.0,
+        account_trading_allowed=True,
         breaker_active=False,
         breaker_reasons=(),
         max_order_notional=100_000.0,
@@ -283,6 +321,8 @@ def test_gates_pass_only_when_every_condition_holds():
         ({"tradable": False}, "not_halted"),
         ({"buying_power": 10.0}, "buying_power"),
         ({"buying_power": None}, "buying_power"),
+        ({"account_trading_allowed": False}, "account_trading_allowed"),
+        ({"account_trading_allowed": None}, "account_trading_allowed"),
         ({"breaker_active": True}, "risk_breakers_clear"),
         ({"breaker_active": None}, "risk_breakers_clear"),
         ({"max_order_notional": 10.0}, "notional_cap"),
@@ -404,12 +444,15 @@ def test_retrying_an_idempotency_key_never_duplicates_the_broker_order(armed_cli
 
 def test_stale_data_blocks_the_order_before_the_broker_is_called(armed_client, broker, monkeypatch):
     async def stale(url: str, params=None) -> dict[str, object]:
-        return {"is_eligible": False, "status": "stale", "age_hours": 72.0, "issues": ["Stale data"]}
+        return {
+            "price": 100.0,
+            "updated_at": (OPEN_MOMENT - datetime.timedelta(hours=72)).isoformat(),
+        }
 
     monkeypatch.setattr(main, "_get_json", stale)
     order = _submit(armed_client, "stale-1")
     assert order["status"] == live.REJECTED
-    assert "Stale data" in order["reject_reason"]
+    assert "259,200s old" in order["reject_reason"]
     assert broker.submissions == []
 
 
@@ -495,6 +538,12 @@ def test_cancel_all_reports_broker_failures_without_aborting(armed_client, broke
     assert succeeded["failed"] == 0
     assert sorted(broker.cancels) == ["broker-1", "broker-2"]
     statuses = {order["status"] for order in armed_client.get("/api/live-orders").json()["orders"]}
+    assert statuses == {live.CANCEL_PENDING}
+    for remote in broker.orders.values():
+        remote["status"] = "canceled"
+    reconciled = armed_client.post("/api/live-orders/reconcile").json()
+    assert reconciled["out_of_sync"] == 2
+    statuses = {order["status"] for order in armed_client.get("/api/live-orders").json()["orders"]}
     assert statuses == {live.CANCELED}
 
 
@@ -540,10 +589,6 @@ def test_audit_chain_detects_tampering(armed_client):
 
 async def _tamper(client: TestClient, entry_id: int) -> None:
     """Edit an audit row directly to prove the chain detects it."""
-    from sqlalchemy import select
-
-    from app.models import LiveExecutionAudit
-
     override = main.app.dependency_overrides[get_db]
     async for session in override():
         entry = (
@@ -576,18 +621,274 @@ def test_paper_and_live_storage_stay_separate(armed_client):
     assert armed_client.get("/api/live-trading/status").json()["mode"] == live.LIVE
 
 
-def test_broker_rejection_is_recorded_without_local_fill(armed_client, broker):
-    broker.fail = True
-    monkey_order = None
-    payload = _order_payload()
-    preview = armed_client.post("/api/live-orders/preview", json=payload)
-    body = dict(payload)
-    body["idempotency_key"] = "broker-error-1"
-    body["approval_fingerprint"] = preview.json()["approval_fingerprint"]
-    response = armed_client.post("/api/live-orders", json=body)
-    assert response.status_code == 201
-    monkey_order = response.json()
-    # The account lookup fails too, so the order is blocked before submission.
-    assert monkey_order["status"] == live.REJECTED
-    assert monkey_order["broker_order_id"] is None
-    assert monkey_order["fills"] == []
+async def _stored_audit_records() -> list[str]:
+    override = main.app.dependency_overrides[get_db]
+    async for session in override():
+        entries = (await session.execute(select(LiveExecutionAudit))).scalars().all()
+        return [entry.record_json for entry in entries]
+    return []
+
+
+def test_broker_rejection_is_recorded_without_sensitive_provider_payload(armed_client, broker):
+    broker.submit_rejected = True
+    order = _submit(armed_client, "broker-error-1")
+    assert order["status"] == live.REJECTED
+    assert order["broker_order_id"] is None
+    assert order["fills"] == []
+    serialized = str(order["audit"])
+    assert "must-not-leak" not in serialized
+    assert "provider payload" not in serialized
+    stored = str(asyncio.run(_stored_audit_records()))
+    assert "must-not-leak" not in stored
+    assert "provider payload" not in stored
+    broker_event = order["audit"][-1]
+    assert broker_event["record"]["record"] == {
+        "status_code": 422,
+        "ambiguous": False,
+        "error_type": "broker_rejection",
+    }
+
+
+def test_lifespan_initializes_exactly_one_live_control_row(client):
+    async def controls() -> list[LiveTradingControl]:
+        override = main.app.dependency_overrides[get_db]
+        async for session in override():
+            return (await session.execute(select(LiveTradingControl))).scalars().all()
+        return []
+
+    rows = asyncio.run(controls())
+    assert len(rows) == 1
+    assert rows[0].id == 1
+    assert rows[0].acknowledged is False
+
+
+def test_operator_token_is_required_even_when_application_auth_is_disabled(client, monkeypatch):
+    missing = client.post(
+        "/api/live-trading/disable",
+        json={"reason": "unauthorized"},
+        headers={"X-Live-Operator-Token": ""},
+    )
+    assert missing.status_code == 401
+    invalid = client.get(
+        "/api/live-orders/audit/verify",
+        headers={"X-Live-Operator-Token": "wrong"},
+    )
+    assert invalid.status_code == 401
+    monkeypatch.setattr(settings, "LIVE_OPERATOR_TOKEN", "")
+    unavailable = client.post("/api/live-orders/reconcile")
+    assert unavailable.status_code == 403
+    status = client.get("/api/live-trading/status").json()
+    assert status["operator_auth_configured"] is False
+    assert status["armed"] is False
+
+
+def test_sell_uses_broker_position_and_fails_closed_when_lookup_fails(armed_client, broker):
+    broker.shortable = False
+    broker.position_quantity = 5.0
+    covered = _submit(armed_client, "covered-sell", side="SELL")
+    assert covered["status"] == live.ACCEPTED
+
+    broker.position_fail = True
+    unknown = _submit(armed_client, "unknown-position", side="SELL")
+    assert unknown["status"] == live.REJECTED
+    assert "Broker position quantity could not be confirmed" in unknown["reject_reason"]
+
+
+def test_paper_position_never_authorizes_a_live_sale(armed_client, broker):
+    paper = armed_client.post(
+        "/api/trades/manual",
+        json={
+            "ticker": "AAPL",
+            "direction": "BUY",
+            "entry_price": 100.0,
+            "quantity": 5.0,
+        },
+    )
+    assert paper.status_code == 200, paper.text
+    broker.shortable = False
+    broker.position_quantity = 0.0
+    live_sale = _submit(armed_client, "paper-isolation", side="SELL")
+    assert live_sale["status"] == live.REJECTED
+    assert "Only 0 broker-held units" in live_sale["reject_reason"]
+
+
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_account_lookup_failure_blocks_buys_and_sells(armed_client, broker, side):
+    broker.account_fail = True
+    if side == "SELL":
+        broker.position_quantity = 5.0
+    order = _submit(armed_client, f"account-fail-{side.lower()}", side=side)
+    assert order["status"] == live.REJECTED
+    assert "Broker account state could not be confirmed" in order["reject_reason"]
+    assert broker.submissions == []
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://paper-api.alpaca.markets", True),
+        ("https://broker-api.sandbox.alpaca.markets/v1", True),
+        ("http://localhost:9000", True),
+        ("http://127.0.0.1:9000", True),
+        ("https://paper-api.alpaca.markets.attacker.example", False),
+        ("https://attacker.example/paper-api.alpaca.markets", False),
+        ("https://api.alpaca.markets", False),
+    ],
+)
+def test_sandbox_detection_uses_exact_hostname(url, expected):
+    assert AlpacaBroker("key", "secret", url).sandbox is expected
+
+
+def test_alpaca_account_state_requires_complete_boolean_flags(monkeypatch):
+    broker = AlpacaBroker("key", "secret", "https://paper-api.alpaca.markets")
+
+    async def missing_flag(*args, **kwargs):
+        return {
+            "id": "account",
+            "buying_power": "1000",
+            "trading_blocked": False,
+            "account_blocked": False,
+        }
+
+    monkeypatch.setattr(broker, "_request", missing_flag)
+    with pytest.raises(BrokerError, match="trading-state flags"):
+        asyncio.run(broker.get_account())
+
+    async def usable(*args, **kwargs):
+        return {
+            "id": "account",
+            "buying_power": "1000",
+            "cash": "500",
+            "equity": "1500",
+            "trading_blocked": False,
+            "account_blocked": False,
+            "trade_suspended_by_user": False,
+        }
+
+    monkeypatch.setattr(broker, "_request", usable)
+    assert asyncio.run(broker.get_account()).trading_blocked is False
+
+
+def test_ambiguous_submission_recovers_by_client_order_id(armed_client, broker):
+    broker.submit_ambiguous = "accepted"
+    order = _submit(armed_client, "ambiguous-recovered")
+    assert order["status"] == live.ACCEPTED
+    assert order["broker_order_id"] == "broker-1"
+    assert order["audit"][-1]["event_type"] == "submission_recovered"
+
+
+def test_ambiguous_submission_remains_recoverable_when_broker_cannot_find_it(armed_client, broker):
+    broker.submit_ambiguous = "unknown"
+    order = _submit(armed_client, "ambiguous-unknown")
+    assert order["status"] == live.SUBMISSION_UNKNOWN
+    assert order["reject_reason"] is None
+    assert order["audit"][-1]["event_type"] == "submission_unknown"
+    assert "must-not-leak" not in str(order["audit"])
+
+
+def test_cancel_all_includes_unknown_active_statuses(armed_client, broker):
+    _submit(armed_client, "unknown-active")
+    broker.orders["unknown-active"]["status"] = "vendor_active_state"
+    reconciled = armed_client.post("/api/live-orders/reconcile").json()
+    assert reconciled["out_of_sync"] == 1
+    order = armed_client.get("/api/live-orders").json()["orders"][0]
+    assert order["status"] == live.UNKNOWN
+    canceled = armed_client.post("/api/live-orders/cancel-all", json={"reason": "Emergency"}).json()
+    assert canceled["requested"] == 1
+    assert canceled["canceled"] == 1
+    assert broker.cancels == ["broker-1"]
+
+
+def test_cumulative_fill_snapshots_create_only_incremental_fills(armed_client, broker):
+    order = _submit(armed_client, "partial-deltas")
+    remote = broker.orders["partial-deltas"]
+    remote["status"] = "partially_filled"
+    remote["filled_qty"] = 2.0
+    remote["filled_avg_price"] = 100.0
+    armed_client.post("/api/live-orders/reconcile")
+
+    remote["filled_qty"] = 5.0
+    remote["filled_avg_price"] = 106.0
+    armed_client.post("/api/live-orders/reconcile")
+    detail = armed_client.get(f"/api/live-orders/{order['id']}").json()
+    assert [fill["quantity"] for fill in detail["fills"]] == [2.0, 3.0]
+    assert [fill["price"] for fill in detail["fills"]] == pytest.approx([100.0, 110.0])
+    assert sum(fill["quantity"] for fill in detail["fills"]) == 5.0
+
+    armed_client.post("/api/live-orders/reconcile")
+    repeated = armed_client.get(f"/api/live-orders/{order['id']}").json()
+    assert len(repeated["fills"]) == 2
+
+
+def test_identical_orders_can_use_distinct_preview_intents(armed_client, broker):
+    first = _submit(armed_client, "preview-intent-1")
+    second = _submit(armed_client, "preview-intent-2")
+    assert first["request_fingerprint"] == second["request_fingerprint"]
+    assert first["id"] != second["id"]
+    assert broker.submissions == ["preview-intent-1", "preview-intent-2"]
+
+
+def test_live_quote_timestamp_and_price_drive_the_same_preflight(armed_client, monkeypatch):
+    async def quote(url: str, params=None) -> dict[str, object]:
+        return {
+            "price": 123.45,
+            "updated_at": (OPEN_MOMENT - datetime.timedelta(seconds=30)).isoformat(),
+        }
+
+    monkeypatch.setattr(main, "_get_json", quote)
+    preview = armed_client.post("/api/live-orders/preview", json=_order_payload()).json()
+    assert preview["reference_price"] == 123.45
+    assert _checks(preview)["price_fresh"]["passed"] is True
+    assert "30s old" in _checks(preview)["price_fresh"]["detail"]
+
+
+async def _duplicate_control_cleanup(database_path, monkeypatch) -> list[dict[str, object]]:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    async with engine.begin() as connection:
+        await connection.execute(text("""
+            CREATE TABLE live_trading_control (
+                id INTEGER PRIMARY KEY,
+                acknowledged BOOLEAN NOT NULL,
+                acknowledged_by VARCHAR(120),
+                acknowledged_at DATETIME,
+                acknowledgement_note TEXT,
+                trading_disabled BOOLEAN NOT NULL,
+                disabled_reason TEXT,
+                disabled_by VARCHAR(120),
+                disabled_at DATETIME,
+                updated_at DATETIME NOT NULL
+            )
+        """))
+        await connection.execute(text("""
+            INSERT INTO live_trading_control
+                (id, acknowledged, trading_disabled, updated_at)
+            VALUES (1, 1, 0, CURRENT_TIMESTAMP), (2, 1, 0, CURRENT_TIMESTAMP)
+        """))
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(main, "async_session", session_factory)
+    await main._initialize_live_control()
+    async with session_factory() as session:
+        controls = (await session.execute(select(LiveTradingControl))).scalars().all()
+        result = [
+            {
+                "id": control.id,
+                "acknowledged": control.acknowledged,
+                "trading_disabled": control.trading_disabled,
+                "disabled_reason": control.disabled_reason,
+            }
+            for control in controls
+        ]
+    await engine.dispose()
+    return result
+
+
+def test_duplicate_live_control_rows_are_collapsed_and_disarmed(tmp_path, monkeypatch):
+    controls = asyncio.run(_duplicate_control_cleanup(tmp_path / "legacy-controls.db", monkeypatch))
+    assert controls == [
+        {
+            "id": 1,
+            "acknowledged": False,
+            "trading_disabled": True,
+            "disabled_reason": "Duplicate live-control rows detected; operator review required",
+        }
+    ]
