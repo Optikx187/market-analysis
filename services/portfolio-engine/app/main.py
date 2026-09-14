@@ -2522,25 +2522,31 @@ def _action_user_key(request: Request) -> str:
     return get_current_user(request) or actions.DEFAULT_USER_KEY
 
 
-async def _collect_action_candidates(db: AsyncSession) -> list[actions.ActionCandidate]:
+async def _collect_action_candidates(
+    db: AsyncSession,
+) -> tuple[list[actions.ActionCandidate], set[str]]:
     candidates: list[actions.ActionCandidate] = []
+    evaluated_source_types = {"stop_proximity", "risk_breaker", "order_review", "operational"}
 
     scanner = await _fetch_scanner_status()
     if "error" in scanner:
         candidates.append(actions.operational_candidate("quant-engine scanner", str(scanner["error"])))
     else:
+        evaluated_source_types.add("opportunity")
         candidates.extend(actions.build_opportunity_candidates(scanner))
 
     quality = await _fetch_data_quality()
     if "error" in quality:
         candidates.append(actions.operational_candidate("data-ingestion data quality", str(quality["error"])))
     else:
+        evaluated_source_types.add("data_quality")
         candidates.extend(actions.build_data_quality_candidates(quality))
 
     earnings = await _fetch_upcoming_earnings()
     if "error" in earnings:
         candidates.append(actions.operational_candidate("data-ingestion earnings", str(earnings["error"])))
     else:
+        evaluated_source_types.add("earnings")
         candidates.extend(actions.build_earnings_candidates(earnings, settings.ACTION_EARNINGS_WINDOW_DAYS))
 
     open_result = await db.execute(select(Trade).where(Trade.status == TradeStatus.OPEN))
@@ -2583,7 +2589,7 @@ async def _collect_action_candidates(db: AsyncSession) -> list[actions.ActionCan
         }
         for order in order_result.scalars().all()
     ]))
-    return candidates
+    return candidates, evaluated_source_types
 
 
 async def _expire_action_snoozes(db: AsyncSession, user_key: str) -> None:
@@ -2607,7 +2613,7 @@ async def _expire_action_snoozes(db: AsyncSession, user_key: str) -> None:
 async def _refresh_action_items(db: AsyncSession, user_key: str) -> dict[str, int]:
     """Upsert every active source into the durable inbox without creating duplicates."""
     now = _utc_now()
-    candidates = await _collect_action_candidates(db)
+    candidates, evaluated_source_types = await _collect_action_candidates(db)
     existing_result = await db.execute(select(ActionItem).where(ActionItem.user_key == user_key))
     existing = {item.source_key: item for item in existing_result.scalars().all()}
     created = 0
@@ -2667,7 +2673,11 @@ async def _refresh_action_items(db: AsyncSession, user_key: str) -> dict[str, in
     active_keys = {candidate.source_key for candidate in candidates}
     cleared = 0
     for source_key, item in existing.items():
-        if source_key in active_keys or not item.source_active:
+        if (
+            source_key in active_keys
+            or not item.source_active
+            or item.source_type not in evaluated_source_types
+        ):
             continue
         item.source_active = False
         item.status = actions.STATUS_RESOLVED
@@ -2841,6 +2851,8 @@ class ActionSnoozeRequest(BaseModel):
 async def acknowledge_action_item(item_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     user_key = _action_user_key(request)
     item = await _action_item(db, user_key, item_id)
+    if not item.source_active:
+        raise HTTPException(409, "Inactive action items cannot be acknowledged")
     if item.status != actions.STATUS_ACKNOWLEDGED:
         item.status = actions.STATUS_ACKNOWLEDGED
         item.acknowledged_at = _utc_now()
@@ -2858,6 +2870,8 @@ async def snooze_action_item(
 ):
     user_key = _action_user_key(request)
     item = await _action_item(db, user_key, item_id)
+    if not item.source_active:
+        raise HTTPException(409, "Inactive action items cannot be snoozed")
     now = _utc_now()
     item.status = actions.STATUS_SNOOZED
     item.snoozed_at = now

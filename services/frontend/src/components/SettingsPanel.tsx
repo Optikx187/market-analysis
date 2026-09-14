@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   fetchCredentialStatus,
   revealCredential,
@@ -122,11 +122,15 @@ export default function SettingsPanel({ focus }: { focus?: DeepLinkFocus }) {
   // System health refresh state
   const [healthRefreshing, setHealthRefreshing] = useState(false);
   const [healthLastUpdated, setHealthLastUpdated] = useState<Date | null>(null);
+  const focusedSectionToken = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!focus?.section) return;
-    document.getElementById(`settings-${focus.section}`)?.scrollIntoView({ block: "start" });
-  }, [focus]);
+    if (!focus?.section || focusedSectionToken.current === focus.token) return;
+    const target = document.getElementById(`settings-${focus.section}`);
+    if (!target) return;
+    target.scrollIntoView({ block: "start" });
+    focusedSectionToken.current = focus.token;
+  }, [focus, sysStatus]);
 
   const loadStatus = () => fetchCredentialStatus().then(setStatus).catch(() => {});
   const loadEnvSettings = () => fetchEnvSettings().then(setEnvSettings).catch(() => {});

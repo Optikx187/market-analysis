@@ -237,7 +237,9 @@ function App() {
         {tab === "alerts" && <AlertsPanel />}
         {tab === "orders" && <OrdersPanel focus={focus ?? undefined} />}
         {tab === "live" && <LiveTradingPanel />}
-        {tab === "trades" && <TradesPanel focus={focus ?? undefined} />}
+        {tab === "trades" && (
+          <TradesPanel focus={focus ?? undefined} onClearFocus={() => setFocus(null)} />
+        )}
         {tab === "performance" && <AttributionPanel />}
         {tab === "scanner" && <ScannerPanel focus={focus ?? undefined} />}
         {tab === "price-alerts" && <PriceAlertsPanel />}

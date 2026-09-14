@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   apiErrorMessage,
   deleteDashboardLayout,
@@ -24,13 +24,20 @@ const WIDGET_LABELS: Record<string, string> = {
   top_opportunities: "Top Opportunities",
 };
 
+const DEFAULT_WIDGETS: DashboardWidgetPreference[] = Object.keys(WIDGET_LABELS).map((id) => ({
+  id,
+  enabled: true,
+}));
+
 const money = (value: number) => `$${Number(value ?? 0).toLocaleString()}`;
 
 export default function DashboardWidget() {
   const [data, setData] = useState<DashboardSummary | null>(null);
   const [preferences, setPreferences] = useState<DashboardPreferences | null>(null);
-  const [draft, setDraft] = useState<DashboardWidgetPreference[]>([]);
+  const [draft, setDraft] = useState<DashboardWidgetPreference[]>(DEFAULT_WIDGETS);
   const [mode, setMode] = useState<DashboardMode>("detailed");
+  const persistQueue = useRef<Promise<void>>(Promise.resolve());
+  const persistVersion = useRef(0);
   const [customizing, setCustomizing] = useState(false);
   const [layoutName, setLayoutName] = useState("");
   const [selectedLayout, setSelectedLayout] = useState("");
@@ -61,14 +68,22 @@ export default function DashboardWidget() {
     [draft],
   );
 
-  const persist = async (widgets: DashboardWidgetPreference[], nextMode: DashboardMode) => {
-    try {
-      applyPreferences(await saveDashboardPreferences({ widgets, mode: nextMode }));
-      setNotice("Dashboard layout saved.");
-      setError(null);
-    } catch (err) {
-      setError(apiErrorMessage(err, "Failed to save dashboard layout."));
-    }
+  const persist = (widgets: DashboardWidgetPreference[], nextMode: DashboardMode) => {
+    const version = ++persistVersion.current;
+    persistQueue.current = persistQueue.current.then(async () => {
+      try {
+        const next = await saveDashboardPreferences({ widgets, mode: nextMode });
+        if (version !== persistVersion.current) return;
+        applyPreferences(next);
+        setNotice("Dashboard layout saved.");
+        setError(null);
+      } catch (err) {
+        if (version === persistVersion.current) {
+          setError(apiErrorMessage(err, "Failed to save dashboard layout."));
+        }
+      }
+    });
+    return persistQueue.current;
   };
 
   const move = (index: number, delta: number) => {
