@@ -8,11 +8,28 @@ import hashlib
 import hmac
 import json
 import time
+from contextvars import ContextVar, Token
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Request
 
 from app.config import settings
+
+
+DEFAULT_USER_KEY = "default"
+_current_user_key: ContextVar[str] = ContextVar("portfolio_user_key", default=DEFAULT_USER_KEY)
+
+
+def current_user_key() -> str:
+    return _current_user_key.get()
+
+
+def set_current_user_key(user_key: str) -> Token[str]:
+    return _current_user_key.set(user_key)
+
+
+def reset_current_user_key(token: Token[str]) -> None:
+    _current_user_key.reset(token)
 
 
 def _b64url_encode(data: bytes) -> str:

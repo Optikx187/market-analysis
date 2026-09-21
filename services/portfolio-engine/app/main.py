@@ -16,7 +16,7 @@ from typing import Optional
 import httpx
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,7 +34,15 @@ from app import attribution as attribution_math
 from app import paper_orders as paper
 from app import live_execution as live
 from app.brokers import AlpacaBroker, BrokerAdapter, BrokerError
-from app.auth import create_token, hash_password, verify_password, get_current_user
+from app.auth import (
+    DEFAULT_USER_KEY,
+    create_token,
+    get_current_user,
+    hash_password,
+    reset_current_user_key,
+    set_current_user_key,
+    verify_password,
+)
 from app.risk_engine import (
     ClosedTradeResult,
     PositionInput,
@@ -439,6 +447,33 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
+
+PUBLIC_API_PATHS = {
+    "/api/auth/login",
+    "/api/auth/register",
+    "/api/auth/status",
+}
+
+
+@app.middleware("http")
+async def enforce_authentication_boundary(request: Request, call_next):
+    user_key = DEFAULT_USER_KEY
+    is_protected_api = (
+        request.url.path.startswith("/api/")
+        and request.url.path not in PUBLIC_API_PATHS
+        and request.method != "OPTIONS"
+    )
+    if settings.AUTH_ENABLED and is_protected_api:
+        try:
+            user_key = get_current_user(request) or DEFAULT_USER_KEY
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    token = set_current_user_key(user_key)
+    try:
+        return await call_next(request)
+    finally:
+        reset_current_user_key(token)
 
 
 @app.get("/health")
