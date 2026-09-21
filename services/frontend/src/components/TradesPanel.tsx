@@ -11,7 +11,13 @@ function formatDateTime(dateStr: string | null): string {
   });
 }
 
-export default function TradesPanel({ focus }: { focus?: DeepLinkFocus }) {
+export default function TradesPanel({
+  focus,
+  onClearFocus,
+}: {
+  focus?: DeepLinkFocus;
+  onClearFocus?: () => void;
+}) {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [focusedTicker, setFocusedTicker] = useState<string | null>(null);
   const [focusedTradeId, setFocusedTradeId] = useState<number | null>(null);
@@ -133,7 +139,11 @@ export default function TradesPanel({ focus }: { focus?: DeepLinkFocus }) {
             {focusedTradeId != null ? ` · trade #${focusedTradeId}` : ""}
           </span>
           <button
-            onClick={() => { setFocusedTicker(null); setFocusedTradeId(null); }}
+            onClick={() => {
+              setFocusedTicker(null);
+              setFocusedTradeId(null);
+              onClearFocus?.();
+            }}
             className="rounded bg-[var(--secondary)] px-2 py-0.5"
           >
             Clear focus

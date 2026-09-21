@@ -271,6 +271,13 @@ def test_expired_snooze_helper():
     assert actions.expired_snooze(actions.STATUS_OPEN, None, now) is False
 
 
+def test_sort_key_prioritizes_newest_activity_within_severity():
+    older = {"severity": "warning", "last_seen_at": "2026-01-01T12:00:00"}
+    newer = {"severity": "warning", "last_seen_at": "2026-01-02T12:00:00"}
+
+    assert sorted([older, newer], key=actions.sort_key) == [newer, older]
+
+
 # --- aggregation API ----------------------------------------------------------
 
 
@@ -418,6 +425,25 @@ def test_resolved_source_reopens_when_unchanged_source_returns(client, monkeypat
     assert reopened["id"] == resolved["id"]
 
 
+def test_inactive_sources_cannot_reenter_attention_counts(client, monkeypatch):
+    client.post("/api/action-items/refresh")
+
+    async def quiet_earnings() -> dict[str, object]:
+        return {"upcoming": []}
+
+    monkeypatch.setattr(main, "_fetch_upcoming_earnings", quiet_earnings)
+    client.post("/api/action-items/refresh")
+    resolved = _by_key(client.get("/api/action-items?status=resolved").json())["earnings:AAPL"]
+
+    assert client.post(f"/api/action-items/{resolved['id']}/acknowledge").status_code == 409
+    assert client.post(
+        f"/api/action-items/{resolved['id']}/snooze", json={"minutes": 30}
+    ).status_code == 409
+    payload = client.get("/api/action-items").json()
+    assert payload["counts"]["unresolved"] == 2
+    assert _by_key(client.get("/api/action-items?status=resolved").json())["earnings:AAPL"]["status"] == "resolved"
+
+
 def test_service_failure_creates_operational_item_without_failing(client, monkeypatch):
     async def broken_scanner() -> dict[str, object]:
         return {"error": "Connection refused"}
@@ -429,6 +455,22 @@ def test_service_failure_creates_operational_item_without_failing(client, monkey
     assert operational["category"] == "operations"
     assert operational["deep_link"] == {"tab": "settings", "section": "system-health"}
     assert "opportunity:AAPL:BUY" not in _by_key(payload)
+
+
+def test_service_failure_preserves_existing_source_items(client, monkeypatch):
+    first = _by_key(client.post("/api/action-items/refresh").json())
+    opportunity_id = first["opportunity:AAPL:BUY"]["id"]
+
+    async def broken_scanner() -> dict[str, object]:
+        return {"error": "Connection refused"}
+
+    monkeypatch.setattr(main, "_fetch_scanner_status", broken_scanner)
+    payload = client.post("/api/action-items/refresh").json()
+    items = _by_key(payload)
+
+    assert items["opportunity:AAPL:BUY"]["id"] == opportunity_id
+    assert items["opportunity:AAPL:BUY"]["source_active"] is True
+    assert "operational:quant-engine scanner" in items
 
 
 def test_user_isolation(env, monkeypatch):

@@ -61,6 +61,8 @@ export default function ActionInbox({ onOpenContext }: { onOpenContext: (item: A
   const [statusMessage, setStatusMessage] = useState("Loading Action Required inbox…");
   const [error, setError] = useState<string | null>(null);
   const headingRef = useRef<HTMLDivElement>(null);
+  const requestVersion = useRef(0);
+  const initialRefresh = useRef<Promise<unknown> | null>(null);
 
   const filters = useMemo<ActionItemFilters>(() => {
     const next: ActionItemFilters = {};
@@ -80,34 +82,31 @@ export default function ActionInbox({ onOpenContext }: { onOpenContext: (item: A
     [],
   );
 
+  const ensureInitialRefresh = useCallback(() => {
+    if (!initialRefresh.current) {
+      initialRefresh.current = refreshActionItems({}).catch(() => undefined);
+    }
+    return initialRefresh.current;
+  }, []);
+
   const load = useCallback(async () => {
+    const version = ++requestVersion.current;
     try {
+      await ensureInitialRefresh();
+      if (version !== requestVersion.current) return;
       const response = await fetchActionItems(filters);
+      if (version !== requestVersion.current) return;
       applyResponse(response);
       setStatusMessage(
         `${response.counts.unresolved} item${response.counts.unresolved === 1 ? "" : "s"} need attention, ` +
           `${response.counts.mandatory} mandatory. Showing ${response.items.length}.`,
       );
     } catch (err) {
+      if (version !== requestVersion.current) return;
       setError(apiErrorMessage(err, "Action Required inbox is unavailable."));
       setStatusMessage("Action Required inbox is unavailable.");
     }
-  }, [applyResponse, filters]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const initial = async () => {
-      try {
-        const response = await refreshActionItems(filters);
-        if (!cancelled) applyResponse(response);
-      } catch {
-        if (!cancelled) await load();
-      }
-    };
-    initial();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [applyResponse, ensureInitialRefresh, filters]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -117,9 +116,11 @@ export default function ActionInbox({ onOpenContext }: { onOpenContext: (item: A
   }, [load]);
 
   const refreshNow = async () => {
+    const version = ++requestVersion.current;
     setRefreshing(true);
     try {
       const response = await refreshActionItems(filters);
+      if (version !== requestVersion.current) return;
       applyResponse(response);
       const refreshed = response.refreshed;
       setStatusMessage(
@@ -128,9 +129,12 @@ export default function ActionInbox({ onOpenContext }: { onOpenContext: (item: A
           : "Inbox refreshed.",
       );
     } catch (err) {
-      setError(apiErrorMessage(err, "Failed to refresh Action Required items."));
+      if (version === requestVersion.current) {
+        setError(apiErrorMessage(err, "Failed to refresh Action Required items."));
+      }
+    } finally {
+      setRefreshing(false);
     }
-    setRefreshing(false);
   };
 
   const runTransition = async (item: ActionItem, action: (id: number) => Promise<ActionItem>, label: string) => {

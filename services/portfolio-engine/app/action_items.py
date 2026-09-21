@@ -382,13 +382,19 @@ def operational_candidate(source: str, message: str) -> ActionCandidate:
     )
 
 
-def sort_key(item: dict[str, object]) -> tuple[int, int, str]:
+def sort_key(item: dict[str, object]) -> tuple[int, int, float]:
     """Mandatory first, then severity, then newest activity."""
     severity = str(item.get("severity", SEVERITY_INFO))
+    try:
+        last_seen = datetime.datetime.fromisoformat(
+            str(item.get("last_seen_at") or "").replace("Z", "+00:00")
+        ).timestamp()
+    except ValueError:
+        last_seen = 0.0
     return (
         0 if item.get("is_mandatory") else 1,
         SEVERITY_ORDER.get(severity, len(SEVERITY_ORDER)),
-        str(item.get("last_seen_at") or ""),
+        -last_seen,
     )
 
 
