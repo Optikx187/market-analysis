@@ -178,10 +178,6 @@ class CredentialSaveRequest(BaseModel):
     overwrite: bool = False
 
 
-class CredentialRevealRequest(BaseModel):
-    key: str
-
-
 POSITION_SIZE_PCT = 0.02
 
 PROVIDER_KEYS = {
@@ -3037,14 +3033,29 @@ async def list_alerts(limit: int = 50, db: AsyncSession = Depends(get_db)):
     return result.scalars().all()
 
 
-@app.get("/api/settings/credentials")
+def _require_settings_operator(request: Request) -> None:
+    configured_token = settings.SETTINGS_OPERATOR_TOKEN.strip()
+    presented_token = request.headers.get("X-Settings-Operator-Token", "")
+    if not configured_token:
+        raise HTTPException(403, "Settings operator authentication is not configured")
+    if not presented_token or not hmac.compare_digest(presented_token, configured_token):
+        raise HTTPException(401, "Missing or invalid settings operator token")
+
+
+@app.get(
+    "/api/settings/credentials",
+    dependencies=[Depends(_require_settings_operator)],
+)
 async def credential_status(db: AsyncSession = Depends(get_db)):
     return await credential_status_all(db)
 
 
-@app.get("/api/settings/credentials/all")
+@app.get(
+    "/api/settings/credentials/all",
+    dependencies=[Depends(_require_settings_operator)],
+)
 async def credential_status_all(db: AsyncSession = Depends(get_db)):
-    """Aggregate masked credential status from DB and current env."""
+    """Aggregate masked credential status for an authorized operator."""
     result = await db.execute(select(CredentialSecret))
     rows = result.scalars().all()
     by_key = {r.key: r for r in rows}
@@ -3144,9 +3155,15 @@ def _write_env(path: Path, env: dict[str, str]) -> None:
         pass
 
 
-@app.post("/api/settings/credentials/save")
-async def save_credentials(req: CredentialSaveRequest, db: AsyncSession = Depends(get_db)):
-    """Save credentials to DB and .env without overwriting verified secrets by default."""
+@app.post(
+    "/api/settings/credentials/save",
+    dependencies=[Depends(_require_settings_operator)],
+)
+async def save_credentials(
+    req: CredentialSaveRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Save credentials after explicit operator authentication."""
     allowed_keys = {key for keys in PROVIDER_KEYS.values() for key in keys}
     filtered = {k: v for k, v in req.credentials.items() if k in allowed_keys and v}
     if not filtered:
@@ -3172,18 +3189,6 @@ async def save_credentials(req: CredentialSaveRequest, db: AsyncSession = Depend
         "skipped": skipped,
         "message": "Credentials saved and synced to .env.",
     }
-
-
-@app.post("/api/settings/credentials/reveal")
-async def reveal_credential(req: CredentialRevealRequest, db: AsyncSession = Depends(get_db)):
-    if req.key not in {key for keys in PROVIDER_KEYS.values() for key in keys}:
-        raise HTTPException(400, "Credential key is not allowed")
-    row = await _get_secret(db, req.key)
-    if row:
-        return {"key": req.key, "value": _decode_secret(row.value)}
-    return {"key": req.key, "value": _read_env(_find_env_path()).get(req.key, "")}
-
-
 
 
 @app.get("/api/settings/onboarding")
@@ -3255,9 +3260,12 @@ RISK_PERCENTAGE_SETTINGS = {
     "CRYPTO_SHOCK_PCT",
 }
 
-@app.get("/api/settings/env")
+@app.get(
+    "/api/settings/env",
+    dependencies=[Depends(_require_settings_operator)],
+)
 async def get_env_settings():
-    """Get current environment settings (non-sensitive, viewable/adjustable)."""
+    """Get adjustable settings for an authorized operator."""
     env_path = _find_env_path()
     env = _read_env(env_path)
     
@@ -3283,39 +3291,12 @@ async def get_env_settings():
     return settings
 
 
-@app.get("/api/settings/env-debug")
-async def debug_env_path():
-    """Debug endpoint to check env file path detection."""
-    explicit = os.getenv("HOST_ENV_PATH")
-    project_root = Path(__file__).resolve().parent.parent.parent.parent
-    candidates = [Path(explicit)] if explicit else []
-    candidates.extend([project_root / ".env", Path("/workspace/.env"), Path(".env")])
-    
-    results = []
-    for p in candidates:
-        results.append({
-            "path": str(p),
-            "exists": p.exists(),
-            "is_file": p.is_file() if p.exists() else False,
-        })
-    
-    chosen = _find_env_path()
-    env_data = _read_env(chosen)
-    
-    return {
-        "host_env_path": explicit,
-        "project_root": str(project_root),
-        "candidates": results,
-        "chosen_path": str(chosen),
-        "chosen_exists": chosen.exists(),
-        "env_keys": list(env_data.keys()),
-        "sample_values": {k: env_data.get(k) for k in list(env_data.keys())[:5]},
-    }
-
-
-@app.post("/api/settings/env")
+@app.post(
+    "/api/settings/env",
+    dependencies=[Depends(_require_settings_operator)],
+)
 async def update_env_setting(payload: dict):
-    """Update a single environment setting."""
+    """Update a single environment setting after operator authentication."""
     key = payload.get("key")
     value = payload.get("value")
     

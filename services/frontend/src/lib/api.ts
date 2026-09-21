@@ -367,14 +367,23 @@ export interface CredentialStatus {
   };
 }
 
-export const fetchCredentialStatus = () =>
-  api.get<CredentialStatus>("/settings/credentials/all").then((r) => r.data);
+const settingsOperatorConfig = (operatorToken: string) => ({
+  headers: { "X-Settings-Operator-Token": operatorToken },
+});
 
-export const saveCredentials = (credentials: Record<string, string>) =>
-  api.post<{ saved: string[]; skipped?: string[]; message: string }>("/settings/credentials/save", { credentials }).then((r) => r.data);
+export const fetchCredentialStatus = (operatorToken: string) =>
+  api.get<CredentialStatus>("/settings/credentials/all", settingsOperatorConfig(operatorToken)).then((r) => r.data);
 
-export const revealCredential = (key: string) =>
-  api.post<{ key: string; value: string }>("/settings/credentials/reveal", { key }).then((r) => r.data);
+export const saveCredentials = (
+  operatorToken: string,
+  credentials: Record<string, string>,
+  overwrite = false,
+) =>
+  api.post<{ saved: string[]; skipped?: string[]; message: string }>(
+    "/settings/credentials/save",
+    { credentials, overwrite },
+    settingsOperatorConfig(operatorToken),
+  ).then((r) => r.data);
 
 export interface OnboardingStatus {
   completed: boolean;
@@ -393,11 +402,15 @@ export interface EnvSetting {
   description: string;
 }
 
-export const fetchEnvSettings = () =>
-  api.get<Record<string, EnvSetting>>("/settings/env").then((r) => r.data);
+export const fetchEnvSettings = (operatorToken: string) =>
+  api.get<Record<string, EnvSetting>>("/settings/env", settingsOperatorConfig(operatorToken)).then((r) => r.data);
 
-export const updateEnvSetting = (key: string, value: number) =>
-  api.post<{ key: string; value: number; message: string }>("/settings/env", { key, value }).then((r) => r.data);
+export const updateEnvSetting = (operatorToken: string, key: string, value: number) =>
+  api.post<{ key: string; value: number; message: string }>(
+    "/settings/env",
+    { key, value },
+    settingsOperatorConfig(operatorToken),
+  ).then((r) => r.data);
 
 // Portfolio balance management
 export const updateBalance = (balance: number) =>

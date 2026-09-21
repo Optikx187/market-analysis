@@ -14,6 +14,7 @@ export default function GettingStartedPanel({ onComplete }: Props) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [settingsOperatorToken, setSettingsOperatorToken] = useState("");
 
   // Market data
   const [binKey, setBinKey] = useState("");
@@ -50,11 +51,15 @@ export default function GettingStartedPanel({ onComplete }: Props) {
       setStep(nextStep);
       return;
     }
+    if (!settingsOperatorToken) {
+      setError("Enter the settings operator token before saving credentials.");
+      return;
+    }
     setSaving(true);
     setError("");
     setSuccess("");
     try {
-      const res = await saveCredentials(filtered);
+      const res = await saveCredentials(settingsOperatorToken, filtered);
       setSuccess(`Saved: ${res.saved.join(", ")}`);
       setTimeout(() => {
         setSuccess("");
@@ -116,6 +121,21 @@ export default function GettingStartedPanel({ onComplete }: Props) {
           {success && (
             <div className="mb-4 rounded border border-green-600 bg-green-600/10 p-3 text-sm text-green-400">
               {success}
+            </div>
+          )}
+
+          {(step === "market-data" || step === "notifications") && (
+            <div className="mb-4 rounded border p-3">
+              <CredField
+                label="Settings operator token"
+                value={settingsOperatorToken}
+                onChange={setSettingsOperatorToken}
+                placeholder="SETTINGS_OPERATOR_TOKEN"
+                type="password"
+              />
+              <p className="mt-2 text-xs text-[var(--muted-foreground)]">
+                Required to save credentials. The token stays in memory only and is cleared when this page reloads.
+              </p>
             </div>
           )}
 

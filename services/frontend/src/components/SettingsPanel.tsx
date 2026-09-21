@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   fetchCredentialStatus,
-  revealCredential,
   saveCredentials,
   fetchEnvSettings,
   updateEnvSetting,
@@ -101,6 +100,9 @@ export default function SettingsPanel({ focus }: { focus?: DeepLinkFocus }) {
   const [formData, setFormData] = useState<Record<string, string>>({});
   const [show, setShow] = useState<Record<string, boolean>>({});
   const [saving, setSaving] = useState(false);
+  const [unlocking, setUnlocking] = useState(false);
+  const [operatorTokenInput, setOperatorTokenInput] = useState("");
+  const [operatorToken, setOperatorToken] = useState("");
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   
   // Environment settings state
@@ -132,14 +134,18 @@ export default function SettingsPanel({ focus }: { focus?: DeepLinkFocus }) {
     focusedSectionToken.current = focus.token;
   }, [focus, sysStatus]);
 
-  const loadStatus = () => fetchCredentialStatus().then(setStatus).catch(() => {});
-  const loadEnvSettings = () => fetchEnvSettings().then(setEnvSettings).catch(() => {});
+  const loadStatus = () => operatorToken
+    ? fetchCredentialStatus(operatorToken).then(setStatus)
+    : Promise.resolve();
+  const loadEnvSettings = () => operatorToken
+    ? fetchEnvSettings(operatorToken).then(setEnvSettings)
+    : Promise.resolve();
   const loadChannels = () => fetchChannelStatus().then(setChannels).catch(() => {});
   const loadSysStatus = () => fetchSystemStatus().then((d) => { setSysStatus(d); return true as const; }).catch(() => false as const);
 
 
   useEffect(() => {
-    loadStatus(); loadEnvSettings(); loadChannels();
+    loadChannels();
     loadSysStatus().then((ok) => { if (ok) setHealthLastUpdated(new Date()); });
     const interval = setInterval(() => {
       loadSysStatus().then((ok) => { if (ok) setHealthLastUpdated(new Date()); });
@@ -148,20 +154,35 @@ export default function SettingsPanel({ focus }: { focus?: DeepLinkFocus }) {
   }, []);
 
   const handleEdit = (service: EditingService) => {
-    const providerStatus = status?.[service.provider];
-    const masked = providerStatus?.masked ?? {};
     setEditing(service.name);
-    setFormData(Object.fromEntries(service.fields.map((f) => [f.key, masked[f.key] ?? ""])));
+    setFormData({});
+    setShow({});
     setMessage(null);
   };
 
-  const handleReveal = async (key: string) => {
+  const unlockProtectedSettings = async () => {
+    if (!operatorTokenInput) {
+      setMessage({ type: "error", text: "Enter the settings operator token." });
+      return;
+    }
+    setUnlocking(true);
+    setMessage(null);
     try {
-      const res = await revealCredential(key);
-      setFormData((p) => ({ ...p, [key]: res.value }));
-      setShow((p) => ({ ...p, [key]: true }));
+      const [nextStatus, nextEnvSettings] = await Promise.all([
+        fetchCredentialStatus(operatorTokenInput),
+        fetchEnvSettings(operatorTokenInput),
+      ]);
+      setOperatorToken(operatorTokenInput);
+      setStatus(nextStatus);
+      setEnvSettings(nextEnvSettings);
+      setMessage({ type: "success", text: "Protected settings unlocked for this page session." });
     } catch {
-      setMessage({ type: "error", text: "Unable to reveal this credential." });
+      setOperatorToken("");
+      setStatus(null);
+      setEnvSettings(null);
+      setMessage({ type: "error", text: "Invalid operator token or settings authentication is not configured." });
+    } finally {
+      setUnlocking(false);
     }
   };
 
@@ -172,13 +193,13 @@ export default function SettingsPanel({ focus }: { focus?: DeepLinkFocus }) {
       if (value && !isMasked(value)) creds[f.key] = value;
     }
     if (Object.keys(creds).length === 0) {
-      setMessage({ type: "error", text: "Enter or reveal at least one field before saving." });
+      setMessage({ type: "error", text: "Enter at least one replacement field before saving." });
       return;
     }
     setSaving(true);
     setMessage(null);
     try {
-      const res = await saveCredentials(creds);
+      const res = await saveCredentials(operatorToken, creds, true);
       setMessage({ type: "success", text: `${res.message}${res.skipped?.length ? ` Skipped existing verified: ${res.skipped.join(", ")}` : ""}` });
       setEditing(null);
       loadStatus();
@@ -203,6 +224,46 @@ export default function SettingsPanel({ focus }: { focus?: DeepLinkFocus }) {
         Credentials are stored locally, masked by default, and synced to the local <code>.env</code> after save or verification.
       </p>
 
+      <div className="mb-4 rounded border p-3">
+        <div className="text-sm font-medium">Protected settings access</div>
+        <p className="my-2 text-xs text-[var(--muted-foreground)]">
+          Enter the token configured as <code>SETTINGS_OPERATOR_TOKEN</code>. It remains in memory only and is cleared when this page reloads.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <input
+            aria-label="Settings operator token"
+            autoComplete="off"
+            className="min-w-64 flex-1 rounded border bg-[var(--input)] px-3 py-1.5 text-sm"
+            placeholder="settings operator token"
+            type="password"
+            value={operatorTokenInput}
+            onChange={(event) => setOperatorTokenInput(event.target.value)}
+          />
+          <button
+            className="rounded bg-[var(--primary)] px-4 py-1.5 text-xs font-medium text-[var(--primary-foreground)] disabled:opacity-50"
+            disabled={unlocking}
+            onClick={() => void unlockProtectedSettings()}
+          >
+            {unlocking ? "Unlocking..." : operatorToken ? "Re-authenticate" : "Unlock"}
+          </button>
+          {operatorToken && (
+            <button
+              className="rounded bg-[var(--secondary)] px-3 py-1.5 text-xs"
+              onClick={() => {
+                setOperatorToken("");
+                setOperatorTokenInput("");
+                setStatus(null);
+                setEnvSettings(null);
+                setEditing(null);
+                setMessage(null);
+              }}
+            >
+              Lock
+            </button>
+          )}
+        </div>
+      </div>
+
       {message && (
         <div className={`mb-4 rounded border p-3 text-sm ${
           message.type === "success" ? "border-green-600 bg-green-600/10 text-green-400" : "border-red-600 bg-red-600/10 text-red-400"
@@ -212,7 +273,7 @@ export default function SettingsPanel({ focus }: { focus?: DeepLinkFocus }) {
       )}
 
       {!status ? (
-        <div className="text-sm text-[var(--muted-foreground)]">Loading credential status...</div>
+        <div className="text-sm text-[var(--muted-foreground)]">Unlock protected settings to view credential status.</div>
       ) : (
         <div className="space-y-3">
           {SERVICES.map((service) => {
@@ -253,11 +314,11 @@ export default function SettingsPanel({ focus }: { focus?: DeepLinkFocus }) {
                             type={field.type === "password" && !show[field.key] ? "password" : "text"}
                             value={formData[field.key] ?? ""}
                             onChange={(e) => setFormData({ ...formData, [field.key]: e.target.value })}
-                            placeholder={field.placeholder}
+                            placeholder={providerStatus?.masked?.[field.key] ?? field.placeholder}
                             className="w-full rounded border bg-[var(--input)] px-3 py-1.5 text-sm"
                           />
                           {field.type === "password" && (
-                            <button type="button" onClick={() => isMasked(formData[field.key]) ? handleReveal(field.key) : setShow((p) => ({ ...p, [field.key]: !p[field.key] }))}
+                            <button type="button" onClick={() => setShow((p) => ({ ...p, [field.key]: !p[field.key] }))}
                               className="rounded bg-[var(--secondary)] px-2 text-xs">
                               {show[field.key] ? "Hide" : "Show"}
                             </button>
@@ -373,7 +434,7 @@ export default function SettingsPanel({ focus }: { focus?: DeepLinkFocus }) {
           Adjust risk parameters and simulation settings. These values are synced to your .env file.
         </p>
         {!envSettings ? (
-          <div className="text-sm text-[var(--muted-foreground)]">Loading settings...</div>
+          <div className="text-sm text-[var(--muted-foreground)]">Unlock protected settings to view risk parameters.</div>
         ) : (
           <div className="space-y-2">
             {Object.entries(envSettings).map(([key, setting]) => (
@@ -400,7 +461,7 @@ export default function SettingsPanel({ focus }: { focus?: DeepLinkFocus }) {
                           const val = parseFloat(envFormValues[key] ?? setting.value);
                           if (isNaN(val)) return;
                           try {
-                            await updateEnvSetting(key, val);
+                            await updateEnvSetting(operatorToken, key, val);
                             setMessage({ type: "success", text: `${key} updated successfully` });
                             loadEnvSettings();
                           } catch (e: any) {
