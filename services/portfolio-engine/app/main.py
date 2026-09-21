@@ -37,6 +37,7 @@ from app.brokers import AlpacaBroker, BrokerAdapter, BrokerError
 from app.auth import (
     DEFAULT_USER_KEY,
     create_token,
+    current_user_key,
     get_current_user,
     hash_password,
     reset_current_user_key,
@@ -3524,6 +3525,15 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
 async def auth_status():
     """Return whether multi-user auth is enabled."""
     return {"auth_enabled": settings.AUTH_ENABLED}
+
+
+@app.get("/api/auth/session")
+async def auth_session():
+    """Validate the current JWT and return its isolated portfolio identity."""
+    return {
+        "auth_enabled": settings.AUTH_ENABLED,
+        "user_id": current_user_key(),
+    }
 
 
 # ---------------------------------------------------------------------------

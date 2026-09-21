@@ -107,6 +107,15 @@ def test_portfolios_trades_and_paper_orders_are_isolated(auth_client: TestClient
     alice_headers = _headers(alice_token)
     bob_headers = _headers(bob_token)
 
+    assert auth_client.get("/api/auth/session", headers=alice_headers).json() == {
+        "auth_enabled": True,
+        "user_id": alice_id,
+    }
+    assert auth_client.get("/api/auth/session", headers=bob_headers).json() == {
+        "auth_enabled": True,
+        "user_id": bob_id,
+    }
+
     alice_trade = auth_client.post(
         "/api/trades/manual",
         headers=alice_headers,
@@ -176,6 +185,10 @@ def test_auth_disabled_uses_the_default_single_user_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "AUTH_ENABLED", False)
+    assert auth_client.get("/api/auth/session").json() == {
+        "auth_enabled": False,
+        "user_id": "default",
+    }
     created = auth_client.post("/api/trades/manual", json=_manual_trade("SPY"))
     assert created.status_code == 200, created.text
     assert [trade["ticker"] for trade in auth_client.get("/api/trades").json()] == ["SPY"]
