@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     ALPACA_SECRET_KEY: str = ""
     AUTH_ENABLED: bool = False
     JWT_SECRET: str = "change-me-in-production"
+    SETTINGS_OPERATOR_TOKEN: str = ""
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRY_HOURS: int = 24
 
