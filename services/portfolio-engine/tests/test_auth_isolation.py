@@ -6,11 +6,14 @@ from pathlib import Path
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app import main
+from app.auth import reset_current_user_key, set_current_user_key
 from app.config import settings
 from app.database import Base, _migrate_existing_tables, get_db
+from app.models import Portfolio
 
 
 PUBLIC_PATHS = {
@@ -192,3 +195,35 @@ def test_auth_disabled_uses_the_default_single_user_scope(
     created = auth_client.post("/api/trades/manual", json=_manual_trade("SPY"))
     assert created.status_code == 200, created.text
     assert [trade["ticker"] for trade in auth_client.get("/api/trades").json()] == ["SPY"]
+
+
+def test_concurrent_portfolio_creation_keeps_one_row_per_user(tmp_path: Path) -> None:
+    async def exercise() -> tuple[set[int], int]:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'portfolio-race.db'}")
+        session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(_migrate_existing_tables)
+
+        async def load_portfolio() -> int:
+            token = set_current_user_key("alice")
+            try:
+                async with session_factory() as session:
+                    portfolio = await main.get_or_create_portfolio(session)
+                    return portfolio.id
+            finally:
+                reset_current_user_key(token)
+
+        portfolio_ids = set(await asyncio.gather(*(load_portfolio() for _ in range(8))))
+        token = set_current_user_key("alice")
+        try:
+            async with session_factory() as session:
+                row_count = int((await session.execute(select(func.count(Portfolio.id)))).scalar_one())
+        finally:
+            reset_current_user_key(token)
+            await engine.dispose()
+        return portfolio_ids, row_count
+
+    portfolio_ids, row_count = asyncio.run(exercise())
+    assert len(portfolio_ids) == 1
+    assert row_count == 1

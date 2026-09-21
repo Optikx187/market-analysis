@@ -227,7 +227,7 @@ def test_legacy_user_owned_rows_receive_default_scope_and_indexes(tmp_path) -> N
         portfolio_indexes = {index["name"] for index in inspector.get_indexes("portfolio")}
         execution_indexes = {index["name"] for index in inspector.get_indexes("trade_executions")}
 
-    assert portfolio_rows == [(10000, "default"), (20000, "default")]
+    assert portfolio_rows == [(10000, "default")]
     assert execution_row == (1, "default")
-    assert "ix_portfolio_user_key" in portfolio_indexes
+    assert "uq_portfolio_user_key" in portfolio_indexes
     assert "ix_trade_executions_user_key" in execution_indexes

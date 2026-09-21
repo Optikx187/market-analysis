@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -250,16 +251,23 @@ async def _save_secret(
 async def get_or_create_portfolio(db: AsyncSession) -> Portfolio:
     result = await db.execute(select(Portfolio).limit(1))
     portfolio = result.scalar_one_or_none()
-    if portfolio is None:
-        portfolio = Portfolio(
-            balance=settings.INITIAL_BALANCE,
-            equity=settings.INITIAL_BALANCE,
-            peak_equity=settings.INITIAL_BALANCE,
-        )
-        db.add(portfolio)
+    if portfolio is not None:
+        return portfolio
+
+    portfolio = Portfolio(
+        balance=settings.INITIAL_BALANCE,
+        equity=settings.INITIAL_BALANCE,
+        peak_equity=settings.INITIAL_BALANCE,
+    )
+    db.add(portfolio)
+    try:
         await db.commit()
         await db.refresh(portfolio)
-    return portfolio
+        return portfolio
+    except IntegrityError:
+        await db.rollback()
+        result = await db.execute(select(Portfolio).limit(1))
+        return result.scalar_one()
 
 
 def _risk_limits() -> RiskLimits:

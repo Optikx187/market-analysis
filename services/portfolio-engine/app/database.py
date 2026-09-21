@@ -43,8 +43,18 @@ def _migrate_existing_tables(conn: Connection) -> None:
                 f"ALTER TABLE {table} ADD COLUMN user_key "
                 "VARCHAR(120) NOT NULL DEFAULT 'default'"
             ))
+        if table != "portfolio":
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS ix_{table}_user_key ON {table} (user_key)"
+            ))
+    if "portfolio" in tables:
         conn.execute(text(
-            f"CREATE INDEX IF NOT EXISTS ix_{table}_user_key ON {table} (user_key)"
+            "DELETE FROM portfolio WHERE id NOT IN ("
+            "SELECT MIN(id) FROM portfolio GROUP BY user_key)"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_portfolio_user_key "
+            "ON portfolio (user_key)"
         ))
     if "trades" in tables:
         columns = {column["name"] for column in inspector.get_columns("trades")}

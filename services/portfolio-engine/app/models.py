@@ -3,7 +3,7 @@ import enum
 
 from sqlalchemy import (
     Boolean, CheckConstraint, Column, DateTime, Enum as SAEnum, Float, ForeignKey,
-    Integer, String, Text, UniqueConstraint, event,
+    Index, Integer, String, Text, UniqueConstraint, event,
 )
 from sqlalchemy.orm import Session, with_loader_criteria
 from sqlalchemy.sql import func
@@ -210,9 +210,10 @@ class PaperOrderEvent(Base):
 
 class Portfolio(Base):
     __tablename__ = "portfolio"
+    __table_args__ = (Index("uq_portfolio_user_key", "user_key", unique=True),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_key = Column(String(120), nullable=False, default=current_user_key, index=True)
+    user_key = Column(String(120), nullable=False, default=current_user_key)
     balance = Column(Float, nullable=False)
     equity = Column(Float, nullable=False)
     total_pnl = Column(Float, default=0.0)
