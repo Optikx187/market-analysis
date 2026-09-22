@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app import main
-from app.auth import reset_current_user_key, set_current_user_key
+from app.auth import decode_token, reset_current_user_key, set_current_user_key
 from app.config import settings
 from app.database import Base, _migrate_existing_tables, get_db
 from app.models import Portfolio
@@ -40,7 +40,7 @@ def auth_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Tes
 
     asyncio.run(create_tables())
     monkeypatch.setattr(settings, "AUTH_ENABLED", True)
-    monkeypatch.setattr(settings, "JWT_SECRET", "auth-isolation-test-secret")
+    monkeypatch.setattr(settings, "JWT_SECRET", "auth-isolation-test-secret-32-bytes-long")
     monkeypatch.setattr(settings, "SETTINGS_OPERATOR_TOKEN", "settings-operator-test-token")
     main.app.dependency_overrides[get_db] = override_get_db
     yield TestClient(main.app)
@@ -95,13 +95,14 @@ def test_public_auth_routes_remain_available(auth_client: TestClient) -> None:
     assert auth_client.get("/health").status_code == 200
     assert auth_client.get("/api/auth/status").json() == {"auth_enabled": True}
 
-    _, token = _register(auth_client, "public-route-user")
+    user_id, token = _register(auth_client, "public-route-user")
     login = auth_client.post(
         "/api/auth/login",
         json={"username": "public-route-user", "password": "public-route-user-password"},
     )
     assert login.status_code == 200
-    assert login.json()["token"] == token
+    assert decode_token(token)["sub"] == user_id
+    assert decode_token(login.json()["token"])["sub"] == user_id
 
 
 def test_portfolios_trades_and_paper_orders_are_isolated(auth_client: TestClient) -> None:

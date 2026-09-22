@@ -37,12 +37,15 @@ from app import live_execution as live
 from app.brokers import AlpacaBroker, BrokerAdapter, BrokerError
 from app.auth import (
     DEFAULT_USER_KEY,
+    DUMMY_PASSWORD_HASH,
     create_token,
     current_user_key,
     get_current_user,
     hash_password,
+    password_needs_rehash,
     reset_current_user_key,
     set_current_user_key,
+    validate_auth_configuration,
     verify_password,
 )
 from app.risk_engine import (
@@ -445,6 +448,7 @@ async def _initialize_live_control() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_auth_configuration()
     await init_db()
     await _initialize_live_control()
     yield
@@ -3521,10 +3525,14 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(400, "Auth is not enabled. Set AUTH_ENABLED=true to use multi-user mode.")
     result = await db.execute(select(User).where(User.username == req.username))
     user = result.scalars().first()
-    if not user or not verify_password(req.password, user.password_hash):
+    password_hash = user.password_hash if user else DUMMY_PASSWORD_HASH
+    if not verify_password(req.password, password_hash) or not user:
         raise HTTPException(401, "Invalid credentials")
     if not user.is_active:
         raise HTTPException(403, "Account deactivated")
+    if password_needs_rehash(user.password_hash):
+        user.password_hash = hash_password(req.password)
+        await db.commit()
     token = create_token(str(user.id), user.username)
     return {"token": token, "user_id": user.id, "username": user.username}
 
