@@ -21,6 +21,41 @@ async def get_db():
 def _migrate_existing_tables(conn: Connection) -> None:
     inspector = inspect(conn)
     tables = set(inspector.get_table_names())
+    user_scoped_tables = (
+        "trades",
+        "trade_executions",
+        "trade_journals",
+        "paper_orders",
+        "paper_order_fills",
+        "paper_order_events",
+        "portfolio",
+        "equity_snapshots",
+        "alert_logs",
+        "live_order_fills",
+        "live_execution_audit",
+    )
+    for table in user_scoped_tables:
+        if table not in tables:
+            continue
+        columns = {column["name"] for column in inspector.get_columns(table)}
+        if "user_key" not in columns:
+            conn.execute(text(
+                f"ALTER TABLE {table} ADD COLUMN user_key "
+                "VARCHAR(120) NOT NULL DEFAULT 'default'"
+            ))
+        if table != "portfolio":
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS ix_{table}_user_key ON {table} (user_key)"
+            ))
+    if "portfolio" in tables:
+        conn.execute(text(
+            "DELETE FROM portfolio WHERE id NOT IN ("
+            "SELECT MIN(id) FROM portfolio GROUP BY user_key)"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_portfolio_user_key "
+            "ON portfolio (user_key)"
+        ))
     if "trades" in tables:
         columns = {column["name"] for column in inspector.get_columns("trades")}
         if "asset_type" not in columns:

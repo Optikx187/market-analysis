@@ -14,7 +14,17 @@ import AttributionPanel from "@/components/AttributionPanel";
 import OrdersPanel from "@/components/OrdersPanel";
 import LiveTradingPanel from "@/components/LiveTradingPanel";
 import ActionInbox from "@/components/ActionInbox";
-import { fetchOnboardingStatus, type ActionItem } from "@/lib/api";
+import AuthPanel from "@/components/AuthPanel";
+import {
+  clearAuthSession,
+  fetchAuthSession,
+  fetchAuthStatus,
+  fetchOnboardingStatus,
+  getStoredAuthToken,
+  getStoredAuthUsername,
+  type ActionItem,
+  type AuthResponse,
+} from "@/lib/api";
 import { deepLinkFocus, deepLinkTab, type DeepLinkFocus } from "@/lib/deepLink";
 
 const APP_VERSION = "3.0.0";
@@ -58,6 +68,11 @@ function App() {
   const [selectedChartTicker, setSelectedChartTicker] = useState<string | null>(null);
   const [focus, setFocus] = useState<DeepLinkFocus | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [authReady, setAuthReady] = useState(false);
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [authUsername, setAuthUsername] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   const openContext = (item: ActionItem) => {
     const nextTab = deepLinkTab(item.deep_link);
@@ -103,34 +118,88 @@ function App() {
     console.log("Quant signals · Half-Kelly sizing · Capital preservation");
   }, []);
 
-  useEffect(() => {
+  const loadApplication = async () => {
     const dismissed = localStorage.getItem("onboarding_complete");
-    fetchOnboardingStatus()
-      .then((s) => {
-        // Skip onboarding if: (a) localStorage flag OR (b) market data APIs configured
-        if (!dismissed && !s.has_credentials) {
-          setShowOnboarding(true);
+    try {
+      const status = await fetchOnboardingStatus();
+      if (!dismissed && !status.has_credentials) setShowOnboarding(true);
+    } catch {
+      if (!dismissed) setShowOnboarding(true);
+    } finally {
+      setLoaded(true);
+    }
+  };
+
+  useEffect(() => {
+    const initialize = async () => {
+      try {
+        const status = await fetchAuthStatus();
+        setAuthEnabled(status.auth_enabled);
+        if (status.auth_enabled) {
+          if (!getStoredAuthToken()) {
+            setAuthReady(true);
+            return;
+          }
+          try {
+            await fetchAuthSession();
+          } catch {
+            clearAuthSession();
+            setAuthReady(true);
+            return;
+          }
+          setAuthUsername(getStoredAuthUsername());
         }
-        setLoaded(true);
-      })
-      .catch(() => {
-        // On error, only show onboarding if not dismissed
-        if (!dismissed) setShowOnboarding(true);
-        setLoaded(true);
-      });
+        setAuthenticated(true);
+        setAuthReady(true);
+        await loadApplication();
+      } catch {
+        setAuthError("Unable to determine the authentication mode. Check portfolio-engine connectivity.");
+        setAuthReady(true);
+      }
+    };
+    void initialize();
   }, []);
+
+  const handleAuthenticated = (session: AuthResponse) => {
+    setAuthUsername(session.username);
+    setAuthenticated(true);
+    setLoaded(false);
+    void loadApplication();
+  };
+
+  const logout = () => {
+    clearAuthSession();
+    setAuthenticated(false);
+    setAuthUsername(null);
+    setLoaded(false);
+    setShowOnboarding(false);
+  };
 
   const completeOnboarding = () => {
     localStorage.setItem("onboarding_complete", "1");
     setShowOnboarding(false);
   };
 
-  if (!loaded) {
+  if (!authReady || (authenticated && !loaded)) {
     return (
       <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)] flex items-center justify-center">
         <div className="text-sm text-[var(--muted-foreground)]">Loading...</div>
       </div>
     );
+  }
+
+  if (authError) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[var(--background)] px-4 text-[var(--foreground)]">
+        <div className="max-w-md rounded border border-red-500/50 bg-red-500/10 p-4 text-sm text-red-300" role="alert">
+          {authError}
+        </div>
+      </main>
+    );
+  }
+
+  if (authEnabled && !authenticated) {
+    return <AuthPanel onAuthenticated={handleAuthenticated} />;
   }
 
   if (showOnboarding) {
@@ -179,6 +248,18 @@ function App() {
             >
               Setup Wizard
             </button>
+            {authEnabled && (
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-[var(--muted-foreground)]">{authUsername ?? "Authenticated user"}</span>
+                <button
+                  className="rounded border border-[var(--border)] px-2 py-1 hover:bg-[var(--muted)]"
+                  onClick={logout}
+                  type="button"
+                >
+                  Sign out
+                </button>
+              </div>
+            )}
             <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
               <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
               System Active

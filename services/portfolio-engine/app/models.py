@@ -2,11 +2,13 @@ import datetime
 import enum
 
 from sqlalchemy import (
-    Column, Integer, String, Float, DateTime, Boolean, Enum as SAEnum, Text, ForeignKey,
-    UniqueConstraint, CheckConstraint,
+    Boolean, CheckConstraint, Column, DateTime, Enum as SAEnum, Float, ForeignKey,
+    Index, Integer, String, Text, UniqueConstraint, event,
 )
+from sqlalchemy.orm import Session, with_loader_criteria
 from sqlalchemy.sql import func
 
+from app.auth import DEFAULT_USER_KEY, current_user_key
 from app.database import Base
 
 
@@ -35,6 +37,7 @@ class Trade(Base):
     __tablename__ = "trades"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_key = Column(String(120), nullable=False, default=current_user_key, index=True)
     ticker = Column(String(20), nullable=False, index=True)
     direction = Column(SAEnum(SignalDirection), nullable=False)
     entry_price = Column(Float, nullable=False)
@@ -90,6 +93,7 @@ class TradeExecution(Base):
     __tablename__ = "trade_executions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_key = Column(String(120), nullable=False, default=current_user_key, index=True)
     trade_id = Column(Integer, ForeignKey("trades.id"), nullable=False, index=True)
     kind = Column(SAEnum(ExecutionKind), nullable=False)
     price = Column(Float, nullable=False)
@@ -109,6 +113,7 @@ class TradeJournal(Base):
     __tablename__ = "trade_journals"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_key = Column(String(120), nullable=False, default=current_user_key, index=True)
     trade_id = Column(Integer, ForeignKey("trades.id"), nullable=False, unique=True, index=True)
     ticker = Column(String(20), nullable=False, index=True)
     strategy_name = Column(String(100), nullable=True)
@@ -125,6 +130,7 @@ class PaperOrder(Base):
     __tablename__ = "paper_orders"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_key = Column(String(120), nullable=False, default=current_user_key, index=True)
     idempotency_key = Column(String(120), nullable=False, unique=True, index=True)
     ticker = Column(String(20), nullable=False, index=True)
     asset_type = Column(String(20), nullable=False, default="stock")
@@ -175,6 +181,7 @@ class PaperOrderFill(Base):
     __tablename__ = "paper_order_fills"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_key = Column(String(120), nullable=False, default=current_user_key, index=True)
     order_id = Column(Integer, ForeignKey("paper_orders.id"), nullable=False, index=True)
     quantity = Column(Float, nullable=False)
     price = Column(Float, nullable=False)
@@ -191,6 +198,7 @@ class PaperOrderEvent(Base):
     __tablename__ = "paper_order_events"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_key = Column(String(120), nullable=False, default=current_user_key, index=True)
     order_id = Column(Integer, ForeignKey("paper_orders.id"), nullable=False, index=True)
     event_type = Column(String(40), nullable=False)
     from_status = Column(String(20), nullable=True)
@@ -202,8 +210,10 @@ class PaperOrderEvent(Base):
 
 class Portfolio(Base):
     __tablename__ = "portfolio"
+    __table_args__ = (Index("uq_portfolio_user_key", "user_key", unique=True),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_key = Column(String(120), nullable=False, default=current_user_key)
     balance = Column(Float, nullable=False)
     equity = Column(Float, nullable=False)
     total_pnl = Column(Float, default=0.0)
@@ -218,6 +228,7 @@ class EquitySnapshot(Base):
     __tablename__ = "equity_snapshots"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_key = Column(String(120), nullable=False, default=current_user_key, index=True)
     equity = Column(Float, nullable=False)
     balance = Column(Float, nullable=False)
     timestamp = Column(DateTime, server_default=func.now())
@@ -227,6 +238,7 @@ class AlertLog(Base):
     __tablename__ = "alert_logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_key = Column(String(120), nullable=False, default=current_user_key, index=True)
     ticker = Column(String(20), nullable=False, index=True)
     direction = Column(String(20), nullable=False)
     status = Column(String(50), nullable=False)
@@ -380,6 +392,7 @@ class LiveOrderFill(Base):
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_key = Column(String(120), nullable=False, default=current_user_key, index=True)
     order_id = Column(Integer, ForeignKey("live_orders.id"), nullable=False, index=True)
     broker_fill_id = Column(String(120), nullable=False)
     quantity = Column(Float, nullable=False)
@@ -398,6 +411,7 @@ class LiveExecutionAudit(Base):
     __tablename__ = "live_execution_audit"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_key = Column(String(120), nullable=False, default=current_user_key, index=True)
     order_id = Column(Integer, ForeignKey("live_orders.id"), nullable=True, index=True)
     event_type = Column(String(40), nullable=False, index=True)
     actor = Column(String(120), nullable=False, default="default")
@@ -417,3 +431,31 @@ class User(Base):
     display_name = Column(String(200), nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, server_default=func.now())
+
+
+USER_SCOPED_MODELS = (
+    Trade,
+    TradeExecution,
+    TradeJournal,
+    PaperOrder,
+    PaperOrderFill,
+    PaperOrderEvent,
+    Portfolio,
+    EquitySnapshot,
+    AlertLog,
+    LiveOrderFill,
+    LiveExecutionAudit,
+)
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _scope_user_owned_queries(execute_state) -> None:
+    if not execute_state.is_select:
+        return
+    user_key = current_user_key() or DEFAULT_USER_KEY
+    statement = execute_state.statement
+    for model in USER_SCOPED_MODELS:
+        statement = statement.options(
+            with_loader_criteria(model, model.user_key == user_key, include_aliases=True)
+        )
+    execute_state.statement = statement

@@ -16,9 +16,10 @@ from typing import Optional
 import httpx
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -34,7 +35,16 @@ from app import attribution as attribution_math
 from app import paper_orders as paper
 from app import live_execution as live
 from app.brokers import AlpacaBroker, BrokerAdapter, BrokerError
-from app.auth import create_token, hash_password, verify_password, get_current_user
+from app.auth import (
+    DEFAULT_USER_KEY,
+    create_token,
+    current_user_key,
+    get_current_user,
+    hash_password,
+    reset_current_user_key,
+    set_current_user_key,
+    verify_password,
+)
 from app.risk_engine import (
     ClosedTradeResult,
     PositionInput,
@@ -241,16 +251,23 @@ async def _save_secret(
 async def get_or_create_portfolio(db: AsyncSession) -> Portfolio:
     result = await db.execute(select(Portfolio).limit(1))
     portfolio = result.scalar_one_or_none()
-    if portfolio is None:
-        portfolio = Portfolio(
-            balance=settings.INITIAL_BALANCE,
-            equity=settings.INITIAL_BALANCE,
-            peak_equity=settings.INITIAL_BALANCE,
-        )
-        db.add(portfolio)
+    if portfolio is not None:
+        return portfolio
+
+    portfolio = Portfolio(
+        balance=settings.INITIAL_BALANCE,
+        equity=settings.INITIAL_BALANCE,
+        peak_equity=settings.INITIAL_BALANCE,
+    )
+    db.add(portfolio)
+    try:
         await db.commit()
         await db.refresh(portfolio)
-    return portfolio
+        return portfolio
+    except IntegrityError:
+        await db.rollback()
+        result = await db.execute(select(Portfolio).limit(1))
+        return result.scalar_one()
 
 
 def _risk_limits() -> RiskLimits:
@@ -439,6 +456,33 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
+
+PUBLIC_API_PATHS = {
+    "/api/auth/login",
+    "/api/auth/register",
+    "/api/auth/status",
+}
+
+
+@app.middleware("http")
+async def enforce_authentication_boundary(request: Request, call_next):
+    user_key = DEFAULT_USER_KEY
+    is_protected_api = (
+        request.url.path.startswith("/api/")
+        and request.url.path not in PUBLIC_API_PATHS
+        and request.method != "OPTIONS"
+    )
+    if settings.AUTH_ENABLED and is_protected_api:
+        try:
+            user_key = get_current_user(request) or DEFAULT_USER_KEY
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    token = set_current_user_key(user_key)
+    try:
+        return await call_next(request)
+    finally:
+        reset_current_user_key(token)
 
 
 @app.get("/health")
@@ -3489,6 +3533,15 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
 async def auth_status():
     """Return whether multi-user auth is enabled."""
     return {"auth_enabled": settings.AUTH_ENABLED}
+
+
+@app.get("/api/auth/session")
+async def auth_session():
+    """Validate the current JWT and return its isolated portfolio identity."""
+    return {
+        "auth_enabled": settings.AUTH_ENABLED,
+        "user_id": current_user_key(),
+    }
 
 
 # ---------------------------------------------------------------------------

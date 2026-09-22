@@ -20,10 +20,10 @@ def test_existing_trade_and_alert_tables_receive_risk_columns(tmp_path) -> None:
         trade_columns = {column["name"] for column in inspector.get_columns("trades")}
         alert_columns = {column["name"] for column in inspector.get_columns("alert_logs")}
         trade_row = connection.execute(text(
-            "SELECT asset_type, sector, market_regime, regime_label FROM trades"
+            "SELECT user_key, asset_type, sector, market_regime, regime_label FROM trades"
         )).one()
         alert_row = connection.execute(text(
-            "SELECT approved, risk_decision_json, market_regime, regime_label FROM alert_logs"
+            "SELECT user_key, approved, risk_decision_json, market_regime, regime_label FROM alert_logs"
         )).one()
 
     regime_columns = {
@@ -34,10 +34,10 @@ def test_existing_trade_and_alert_tables_receive_risk_columns(tmp_path) -> None:
         "regime_label",
         "timeframe_agreement",
     }
-    assert {"asset_type", "sector", *regime_columns}.issubset(trade_columns)
-    assert {"approved", "risk_decision_json", *regime_columns}.issubset(alert_columns)
-    assert trade_row == ("stock", "Unclassified", "unknown", "Unknown")
-    assert alert_row == (1, None, "unknown", "Unknown")
+    assert {"user_key", "asset_type", "sector", *regime_columns}.issubset(trade_columns)
+    assert {"user_key", "approved", "risk_decision_json", *regime_columns}.issubset(alert_columns)
+    assert trade_row == ("default", "stock", "Unclassified", "unknown", "Unknown")
+    assert alert_row == ("default", 1, None, "unknown", "Unknown")
 
 
 def test_legacy_closed_trades_backfill_attribution_columns(tmp_path) -> None:
@@ -197,3 +197,37 @@ def test_legacy_paper_order_table_receives_lifecycle_columns(tmp_path) -> None:
         "updated_at",
     }.issubset(columns)
     assert row == ("AAPL", "stock", "standalone", 0, 0, "gtc", 0, 0)
+
+
+def test_legacy_user_owned_rows_receive_default_scope_and_indexes(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-user-scope.db'}")
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE portfolio (id INTEGER PRIMARY KEY, balance FLOAT NOT NULL)"
+        ))
+        connection.execute(text(
+            "CREATE TABLE trade_executions (id INTEGER PRIMARY KEY, trade_id INTEGER NOT NULL)"
+        ))
+        connection.execute(text(
+            "INSERT INTO portfolio (balance) VALUES (10000), (20000)"
+        ))
+        connection.execute(text(
+            "INSERT INTO trade_executions (trade_id) VALUES (1)"
+        ))
+
+        _migrate_existing_tables(connection)
+
+        portfolio_rows = connection.execute(text(
+            "SELECT balance, user_key FROM portfolio ORDER BY id"
+        )).all()
+        execution_row = connection.execute(text(
+            "SELECT trade_id, user_key FROM trade_executions"
+        )).one()
+        inspector = inspect(connection)
+        portfolio_indexes = {index["name"] for index in inspector.get_indexes("portfolio")}
+        execution_indexes = {index["name"] for index in inspector.get_indexes("trade_executions")}
+
+    assert portfolio_rows == [(10000, "default")]
+    assert execution_row == (1, "default")
+    assert "uq_portfolio_user_key" in portfolio_indexes
+    assert "ix_trade_executions_user_key" in execution_indexes

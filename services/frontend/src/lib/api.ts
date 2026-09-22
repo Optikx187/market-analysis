@@ -1,6 +1,58 @@
 import axios from "axios";
 
 const api = axios.create({ baseURL: "/api" });
+const AUTH_TOKEN_KEY = "market_analysis_auth_token";
+const AUTH_USERNAME_KEY = "market_analysis_auth_username";
+
+const browserStorage = (): Storage | null => (
+  typeof window === "undefined" ? null : window.sessionStorage
+);
+
+api.interceptors.request.use((config) => {
+  const token = browserStorage()?.getItem(AUTH_TOKEN_KEY);
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+export interface AuthStatus {
+  auth_enabled: boolean;
+}
+
+export interface AuthSession {
+  auth_enabled: boolean;
+  user_id: string;
+}
+
+export interface AuthResponse {
+  token: string;
+  user_id: number;
+  username: string;
+}
+
+export const getStoredAuthToken = (): string | null => browserStorage()?.getItem(AUTH_TOKEN_KEY) ?? null;
+export const getStoredAuthUsername = (): string | null => browserStorage()?.getItem(AUTH_USERNAME_KEY) ?? null;
+
+export const storeAuthSession = (response: AuthResponse): void => {
+  browserStorage()?.setItem(AUTH_TOKEN_KEY, response.token);
+  browserStorage()?.setItem(AUTH_USERNAME_KEY, response.username);
+};
+
+export const clearAuthSession = (): void => {
+  browserStorage()?.removeItem(AUTH_TOKEN_KEY);
+  browserStorage()?.removeItem(AUTH_USERNAME_KEY);
+};
+
+export const fetchAuthStatus = async (): Promise<AuthStatus> =>
+  (await api.get<AuthStatus>("/auth/status")).data;
+
+export const fetchAuthSession = async (): Promise<AuthSession> =>
+  (await api.get<AuthSession>("/auth/session")).data;
+
+export const loginUser = async (username: string, password: string): Promise<AuthResponse> =>
+  (await api.post<AuthResponse>("/auth/login", { username, password })).data;
+
+export const registerUser = async (username: string, password: string): Promise<AuthResponse> =>
+  (await api.post<AuthResponse>("/auth/register", { username, password })).data;
 
 export const apiErrorMessage = (error: unknown, fallback: string): string => {
   if (axios.isAxiosError(error)) {
