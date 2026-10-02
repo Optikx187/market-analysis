@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Interactive setup script for Market Analysis platform.
 
-Prompts for API credentials and writes them to a local .env file.
-Credentials are stored locally and never committed to version control.
+Provider credentials are staged in .env for first-start migration into the
+encrypted database store. The portfolio service removes those plaintext values
+after migration; encryption and service-authentication keys remain external.
 """
 
+import base64
 import os
+import secrets
 import sys
 from getpass import getpass
 from pathlib import Path
@@ -18,7 +21,7 @@ CREDENTIAL_GROUPS = [
         "name": "Binance (Crypto Market Data)",
         "description": "Used for real-time crypto price streaming (BTC, ETH, etc).",
         "keys": [
-            ("BINANCE_API_KEY", "Binance API key", False),
+            ("BINANCE_API_KEY", "Binance API key", True),
             ("BINANCE_API_SECRET", "Binance API secret", True),
         ],
     },
@@ -26,7 +29,7 @@ CREDENTIAL_GROUPS = [
         "name": "Alpaca (Stock Market Data)",
         "description": "Used for real-time stock price data (SPY, AAPL, etc).",
         "keys": [
-            ("ALPACA_API_KEY", "Alpaca API key", False),
+            ("ALPACA_API_KEY", "Alpaca API key", True),
             ("ALPACA_API_SECRET", "Alpaca API secret", True),
         ],
     },
@@ -42,10 +45,41 @@ CREDENTIAL_GROUPS = [
         "name": "Discord (Notifications)",
         "description": "Send trading signal alerts to a Discord channel.",
         "keys": [
-            ("DISCORD_WEBHOOK_URL", "Discord webhook URL", False),
+            ("DISCORD_WEBHOOK_URL", "Discord webhook URL", True),
+        ],
+    },
+    {
+        "name": "Slack (Notifications)",
+        "description": "Send trading signal alerts to a Slack channel.",
+        "keys": [("SLACK_WEBHOOK_URL", "Slack webhook URL", True)],
+    },
+    {
+        "name": "Email (Notifications)",
+        "description": "Send alerts through an SMTP account.",
+        "keys": [
+            ("SMTP_HOST", "SMTP host", False),
+            ("SMTP_USER", "SMTP username", False),
+            ("SMTP_PASSWORD", "SMTP password", True),
+            ("EMAIL_TO", "Recipient address", False),
+            ("EMAIL_FROM", "Sender address", False),
+        ],
+    },
+    {
+        "name": "Twilio SMS (Notifications)",
+        "description": "Send alerts through Twilio SMS.",
+        "keys": [
+            ("TWILIO_ACCOUNT_SID", "Twilio account SID", False),
+            ("TWILIO_AUTH_TOKEN", "Twilio auth token", True),
+            ("TWILIO_FROM_NUMBER", "Twilio sender number", False),
+            ("SMS_TO_NUMBER", "Recipient phone number", False),
         ],
     },
 ]
+
+GENERATED_SECRETS = {
+    "CREDENTIAL_ENCRYPTION_KEYS": base64.urlsafe_b64encode(os.urandom(32)).decode(),
+    "INTERNAL_SERVICE_TOKEN": secrets.token_urlsafe(32),
+}
 
 DEFAULTS = {
     "RISK_REWARD_RATIO": "3.0",
@@ -110,12 +144,12 @@ def main() -> None:
     print("  Market Analysis — Credential Setup")
     print("=" * 60)
     print()
-    print(f"This script writes credentials to: {ENV_FILE}")
-    print("This file is gitignored and never committed.")
+    print(f"This script stages credentials in: {ENV_FILE}")
+    print("On first start they migrate to encrypted storage and are removed from this file.")
     print()
 
     existing = load_existing_env()
-    values = {**DEFAULTS, **existing}
+    values = {**GENERATED_SECRETS, **DEFAULTS, **existing}
 
     for group in CREDENTIAL_GROUPS:
         print(f"\n{'─' * 50}")
@@ -169,8 +203,8 @@ def main() -> None:
 
     print()
     print("=" * 60)
-    print(f"  Credentials saved to {ENV_FILE}")
-    print("  File permissions set to 600 (owner read/write only)")
+    print(f"  Credentials staged in {ENV_FILE}")
+    print("  File permissions set to 600; first start removes provider plaintext")
     print()
     print("  Next steps:")
     print("    docker-compose up --build")

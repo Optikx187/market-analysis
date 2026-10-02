@@ -66,8 +66,11 @@ Run the interactive setup script to configure all API keys and credentials:
 python3 scripts/setup.py
 ```
 
-This will prompt for Binance, Alpaca, Telegram, and Discord credentials
-and securely store them in a local `.env` file (gitignored, never committed).
+This prompts for Binance, Alpaca, Telegram, and Discord credentials and stages
+them in a mode-`0600` local `.env` file. On first start, Portfolio Engine
+migrates them into authenticated encrypted database storage and removes the
+plaintext provider values from `.env`. Subsequent changes use **Settings →
+Credentials**; the encrypted database is the authoritative credential store.
 
 Alternatively, copy and edit manually:
 
@@ -193,29 +196,58 @@ When the bot is active (requires `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`), use
 
 ## Boot Order
 
-1. **Data Ingestion** starts first (health check: `/health`)
-2. **Quant Engine** waits for Data Ingestion healthy
-3. **Portfolio Engine** waits for Data Ingestion healthy
-4. **Notification Gateway** waits for Data Ingestion healthy
+1. **Portfolio Engine** starts first and unlocks encrypted credentials
+2. **Data Ingestion** waits for Portfolio Engine healthy
+3. **Notification Gateway** waits for Portfolio Engine and Data Ingestion
+4. **Quant Engine** waits for the dependent services
 5. **Frontend** waits for all backend services
 
 ## Configuration Reference
 
 | Variable | Service | Description |
 |----------|---------|-------------|
-| `BINANCE_API_KEY` | A | Binance API key for crypto data |
-| `BINANCE_API_SECRET` | A | Binance API secret |
-| `ALPACA_API_KEY` | A | Alpaca API key for stock data |
-| `ALPACA_API_SECRET` | A | Alpaca API secret |
-| `TELEGRAM_BOT_TOKEN` | Gateway | Telegram bot token |
-| `TELEGRAM_CHAT_ID` | Gateway | Telegram chat ID |
-| `DISCORD_WEBHOOK_URL` | Gateway | Discord webhook URL |
+| `CREDENTIAL_ENCRYPTION_KEYS` | C | Comma-separated Fernet keys, newest first; supply through a deployment secret manager |
+| `INTERNAL_SERVICE_TOKEN` | A, C, Gateway | Shared token used only to retrieve credentials from Portfolio Engine |
+| `BINANCE_API_KEY` | migration only | One-time plaintext input; removed from `.env` after encrypted migration |
+| `BINANCE_API_SECRET` | migration only | One-time plaintext input; removed from `.env` after encrypted migration |
+| `ALPACA_API_KEY` | migration only | One-time plaintext input; removed from `.env` after encrypted migration |
+| `ALPACA_API_SECRET` | migration only | One-time plaintext input; removed from `.env` after encrypted migration |
+| `TELEGRAM_BOT_TOKEN` | migration only | One-time plaintext input; removed from `.env` after encrypted migration |
+| `TELEGRAM_CHAT_ID` | migration only | One-time plaintext input; removed from `.env` after encrypted migration |
+| `DISCORD_WEBHOOK_URL` | migration only | One-time plaintext input; removed from `.env` after encrypted migration |
+| `SLACK_WEBHOOK_URL` | migration only | One-time plaintext input; removed from `.env` after encrypted migration |
+| `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL_TO`, `EMAIL_FROM` | migration only | Email provider values; removed from `.env` after encrypted migration |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`, `SMS_TO_NUMBER` | migration only | SMS provider values; removed from `.env` after encrypted migration |
+| `SMTP_PORT` | Gateway | Non-secret SMTP transport port (default: 587) |
 | `RISK_REWARD_RATIO` | B, C | Min risk:reward (default: 3.0) |
 | `ATR_STOP_MULTIPLIER` | B, C | ATR multiplier for stop distance (default: 1.5) |
 | `ATR_VOLATILITY_THRESHOLD` | B | ATR suppression multiplier (default: 2.0) |
 | `TRAILING_STOP_PCT` | B, C | Base stop distance as decimal (default: 0.02 = 2%) |
 | `INITIAL_BALANCE` | C | Paper trading starting capital (default: 10000) |
 | `LOSS_TOLERANCE_PCT` | C | Max loss per trade as % of balance (default: 0.02 = 2%) |
+
+Docker Compose mounts `.env` only as Portfolio Engine's local configuration and
+migration source; it does not copy provider credentials or encryption keys into
+the container environment. Migration commits ciphertext first, then removes the
+provider values from the mounted file. Other services receive credentials only
+through the authenticated internal endpoint.
+
+### Credential key rotation
+
+Keep encryption keys outside the database and its backups. To rotate without
+downtime:
+
+1. Generate a new Fernet key: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+2. Set `CREDENTIAL_ENCRYPTION_KEYS=new_key,old_key` in the deployment secret manager.
+3. Restart Portfolio Engine. Startup decrypts legacy/Base64 or old-key rows and re-encrypts every row with `new_key`.
+4. Rotate replicas and create a new backup while retaining `old_key` for any older backup that may still require it.
+5. Verify masked credential status and dependent-service health, then set `CREDENTIAL_ENCRYPTION_KEYS=new_key` and restart again.
+
+Never remove the old key until every active row and replica has rotated and all
+retained backups that depend on it have expired. A database backup contains only
+`fernet$...` ciphertext and is not recoverable without an external key. Rotate
+`INTERNAL_SERVICE_TOKEN` by updating Portfolio Engine, Data Ingestion, and
+Notification Gateway together.
 
 ## Risk Model — Position Sizing
 

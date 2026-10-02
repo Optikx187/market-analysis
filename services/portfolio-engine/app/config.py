@@ -1,5 +1,7 @@
-from pydantic_settings import BaseSettings
+import os
 from typing import Optional
+
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
@@ -43,15 +45,15 @@ class Settings(BaseSettings):
     LIVE_OPERATOR_TOKEN: str = ""
     LIVE_MAX_ORDER_NOTIONAL_USD: float = 1_000.0
     LIVE_MAX_PRICE_AGE_SECONDS: float = 300.0
-    ALPACA_API_KEY: str = ""
-    ALPACA_SECRET_KEY: str = ""
     AUTH_ENABLED: bool = False
     JWT_SECRET: str = "change-me-in-production"
     SETTINGS_OPERATOR_TOKEN: str = ""
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRY_HOURS: int = 24
+    CREDENTIAL_ENCRYPTION_KEYS: str = ""
+    INTERNAL_SERVICE_TOKEN: str = ""
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
-settings = Settings()
+settings = Settings(_env_file=os.getenv("HOST_ENV_PATH", ".env"))

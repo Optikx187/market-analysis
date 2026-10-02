@@ -10,7 +10,7 @@ import yfinance as yf
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+from app.credentials import get_provider_credentials
 from app.database import async_session
 from app.models import Asset, AssetType, Candle
 
@@ -99,14 +99,17 @@ async def fetch_historical_alpaca(
     ticker: str, days: int = 1095,
 ) -> pd.DataFrame:
     """Fetch daily bars from Alpaca Markets for stock tickers."""
-    if not settings.ALPACA_API_KEY or not settings.ALPACA_API_SECRET:
+    credentials = await get_provider_credentials("alpaca")
+    api_key = credentials.get("ALPACA_API_KEY")
+    api_secret = credentials.get("ALPACA_API_SECRET")
+    if not api_key or not api_secret:
         return pd.DataFrame()
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
     url = f"{ALPACA_DATA_URL}/stocks/{ticker}/bars"
     headers = {
-        "APCA-API-KEY-ID": settings.ALPACA_API_KEY,
-        "APCA-API-SECRET-KEY": settings.ALPACA_API_SECRET,
+        "APCA-API-KEY-ID": api_key,
+        "APCA-API-SECRET-KEY": api_secret,
     }
     params = {
         "timeframe": "1Day",

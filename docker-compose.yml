@@ -7,8 +7,8 @@ services:
     container_name: data-ingestion
     ports:
       - "8000:8000"
-    env_file:
-      - .env
+    environment:
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-}
     volumes:
       - data-ingestion-db:/app
     networks:
@@ -19,6 +19,9 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+    depends_on:
+      portfolio-engine:
+        condition: service_healthy
 
   # SERVICE B: Quantitative Analytics & Risk Engine
   quant-engine:
@@ -26,9 +29,14 @@ services:
     container_name: quant-engine
     ports:
       - "8001:8001"
-    env_file:
-      - .env
     environment:
+      - RISK_REWARD_RATIO=${RISK_REWARD_RATIO:-3.0}
+      - ATR_STOP_MULTIPLIER=${ATR_STOP_MULTIPLIER:-1.5}
+      - TRAILING_STOP_PCT=${TRAILING_STOP_PCT:-0.02}
+      - ATR_VOLATILITY_THRESHOLD=${ATR_VOLATILITY_THRESHOLD:-2.0}
+      - SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-15}
+      - SCAN_ENABLED=${SCAN_ENABLED:-true}
+      - MARKET_HOURS_ONLY=${MARKET_HOURS_ONLY:-true}
       - DATA_INGESTION_URL=http://data-ingestion:8000
       - PORTFOLIO_ENGINE_URL=http://portfolio-engine:8002
       - NOTIFICATION_GATEWAY_URL=http://notification-gateway:8003
@@ -51,20 +59,22 @@ services:
     container_name: portfolio-engine
     ports:
       - "8002:8002"
-    env_file:
-      - .env
     environment:
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/portfolio.db
       - QUANT_ENGINE_URL=http://quant-engine:8001
       - DATA_INGESTION_URL=http://data-ingestion:8000
       - HOST_ENV_PATH=/workspace/.env
     volumes:
-      - portfolio-db:/app
+      - portfolio-db:/app/data
       - ./.env:/workspace/.env
     networks:
       - trading_network
-    depends_on:
-      data-ingestion:
-        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8002/health').raise_for_status()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   # NOTIFICATION GATEWAY (part of Service D)
   notification-gateway:
@@ -72,9 +82,14 @@ services:
     container_name: notification-gateway
     ports:
       - "8003:8003"
-    env_file:
-      - .env
     environment:
+      - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - NOTIFY_TELEGRAM_ENABLED=${NOTIFY_TELEGRAM_ENABLED:-true}
+      - NOTIFY_DISCORD_ENABLED=${NOTIFY_DISCORD_ENABLED:-true}
+      - NOTIFY_SLACK_ENABLED=${NOTIFY_SLACK_ENABLED:-true}
+      - NOTIFY_EMAIL_ENABLED=${NOTIFY_EMAIL_ENABLED:-true}
+      - NOTIFY_SMS_ENABLED=${NOTIFY_SMS_ENABLED:-true}
       - PORTFOLIO_ENGINE_URL=http://portfolio-engine:8002
     networks:
       - trading_network

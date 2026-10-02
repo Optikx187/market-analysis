@@ -1,7 +1,6 @@
 """Service C — Portfolio & Integration Engine."""
 
 import asyncio
-import base64
 import datetime
 import hmac
 import json
@@ -9,6 +8,7 @@ import logging
 import math
 import os
 import stat
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -23,6 +23,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.credential_store import (
+    CredentialCipher,
+    CredentialConfigurationError,
+    CredentialDecryptionError,
+)
 from app.database import get_db, init_db, async_session
 from app.models import (
     Trade, TradeStatus, SignalDirection, Portfolio, EquitySnapshot, AlertLog, CredentialSecret, User,
@@ -198,6 +203,14 @@ PROVIDER_KEYS = {
     "alpaca": ["ALPACA_API_KEY", "ALPACA_API_SECRET"],
     "telegram": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
     "discord": ["DISCORD_WEBHOOK_URL"],
+    "slack": ["SLACK_WEBHOOK_URL"],
+    "email": ["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "EMAIL_TO", "EMAIL_FROM"],
+    "sms": [
+        "TWILIO_ACCOUNT_SID",
+        "TWILIO_AUTH_TOKEN",
+        "TWILIO_FROM_NUMBER",
+        "SMS_TO_NUMBER",
+    ],
 }
 
 LOSS_TOLERANCE_KEY = "LOSS_TOLERANCE_PCT"
@@ -218,15 +231,16 @@ def _mask(value: str) -> str:
     return f"{value[:3]}{'•' * 6}{value[-3:]}"
 
 
-def _encode_secret(value: str) -> str:
-    return base64.urlsafe_b64encode(value.encode()).decode()
+def _credential_cipher() -> CredentialCipher:
+    return CredentialCipher(settings.CREDENTIAL_ENCRYPTION_KEYS)
 
 
-def _decode_secret(value: str) -> str:
-    try:
-        return base64.urlsafe_b64decode(value.encode()).decode()
-    except Exception:
-        return value
+def _credential_store_ready() -> None:
+    if not settings.INTERNAL_SERVICE_TOKEN.strip():
+        raise CredentialConfigurationError(
+            "INTERNAL_SERVICE_TOKEN is required for encrypted credential distribution"
+        )
+    _credential_cipher()
 
 
 async def _get_secret(db: AsyncSession, key: str) -> Optional[CredentialSecret]:
@@ -241,11 +255,12 @@ async def _save_secret(
     existing = await _get_secret(db, key)
     if existing and existing.verified and not overwrite:
         return False
+    cipher = _credential_cipher()
     if existing is None:
-        existing = CredentialSecret(provider=_provider_for_key(key), key=key, value=_encode_secret(value))
+        existing = CredentialSecret(provider=_provider_for_key(key), key=key, value=cipher.encrypt(value))
         db.add(existing)
     else:
-        existing.value = _encode_secret(value)
+        existing.value = cipher.encrypt(value)
     existing.verified = verified
     existing.last_error = last_error
     return True
@@ -419,6 +434,53 @@ async def execute_paper_trade(
     return trade
 
 
+async def _initialize_credential_store() -> None:
+    env_path = _find_env_path()
+    file_env = _read_env(env_path)
+    allowed_keys = {key for keys in PROVIDER_KEYS.values() for key in keys}
+    source_values = {
+        key: os.getenv(key) or file_env.get(key, "")
+        for key in allowed_keys
+        if os.getenv(key) or file_env.get(key, "")
+    }
+
+    async with async_session() as db:
+        rows = (await db.execute(select(CredentialSecret))).scalars().all()
+        if not rows and not source_values:
+            return
+        _credential_store_ready()
+        cipher = _credential_cipher()
+        by_key = {row.key: row for row in rows}
+
+        for row in rows:
+            decrypted = cipher.decrypt(row.value)
+            if decrypted.needs_rotation:
+                row.value = cipher.encrypt(decrypted.value)
+            row.last_error = None
+
+        for key, value in source_values.items():
+            row = by_key.get(key)
+            if row is None:
+                row = CredentialSecret(
+                    provider=_provider_for_key(key),
+                    key=key,
+                    value=cipher.encrypt(value),
+                    verified=True,
+                )
+                db.add(row)
+                by_key[key] = row
+        await db.commit()
+
+    file_keys = allowed_keys.intersection(file_env)
+    if file_keys:
+        for key in file_keys:
+            file_env.pop(key, None)
+        _write_env(env_path, file_env)
+        logger.info("Migrated provider credentials from .env to encrypted database storage")
+    for key in allowed_keys:
+        os.environ.pop(key, None)
+
+
 async def _initialize_live_control() -> None:
     """Create exactly one fail-closed control row before requests can race."""
     async with async_session() as db:
@@ -450,6 +512,7 @@ async def _initialize_live_control() -> None:
 async def lifespan(app: FastAPI):
     validate_auth_configuration()
     await init_db()
+    await _initialize_credential_store()
     await _initialize_live_control()
     yield
 
@@ -3098,16 +3161,49 @@ async def credential_status(db: AsyncSession = Depends(get_db)):
     return await credential_status_all(db)
 
 
+async def _decrypted_credentials(
+    db: AsyncSession,
+    provider: Optional[str] = None,
+) -> dict[str, str]:
+    query = select(CredentialSecret)
+    if provider is not None:
+        if provider not in PROVIDER_KEYS:
+            raise HTTPException(404, "Unknown credential provider")
+        query = query.where(CredentialSecret.provider == provider)
+    rows = (await db.execute(query)).scalars().all()
+    if not rows:
+        return {}
+    try:
+        cipher = _credential_cipher()
+    except CredentialConfigurationError as exc:
+        raise HTTPException(503, "Encrypted credential storage is not configured") from exc
+    values: dict[str, str] = {}
+    rotated = False
+    for row in rows:
+        try:
+            decrypted = cipher.decrypt(row.value)
+        except CredentialDecryptionError as exc:
+            logger.error("Unable to decrypt stored credential key %s", row.key)
+            raise HTTPException(500, "Stored credential cannot be decrypted") from exc
+        values[row.key] = decrypted.value
+        if decrypted.needs_rotation:
+            row.value = cipher.encrypt(decrypted.value)
+            rotated = True
+    if rotated:
+        await db.commit()
+    return values
+
+
 @app.get(
     "/api/settings/credentials/all",
     dependencies=[Depends(_require_settings_operator)],
 )
 async def credential_status_all(db: AsyncSession = Depends(get_db)):
     """Aggregate masked credential status for an authorized operator."""
+    values = await _decrypted_credentials(db)
     result = await db.execute(select(CredentialSecret))
     rows = result.scalars().all()
-    by_key = {r.key: r for r in rows}
-    env = _read_env(_find_env_path())
+    by_key = {row.key: row for row in rows}
     providers = {}
     for provider, keys in PROVIDER_KEYS.items():
         configured = []
@@ -3116,14 +3212,14 @@ async def credential_status_all(db: AsyncSession = Depends(get_db)):
         errors = {}
         for key in keys:
             row = by_key.get(key)
-            raw = _decode_secret(row.value) if row else env.get(key, "")
+            raw = values.get(key, "")
             if raw:
                 configured.append(key)
                 masked[key] = _mask(raw)
             if row and row.verified:
                 verified.append(key)
             if row and row.last_error:
-                errors[key] = row.last_error
+                errors[key] = "Credential verification failed"
         providers[provider] = {
             "configured": len(configured) > 0,
             "verified": bool(verified) or (len(configured) == len(keys)),
@@ -3196,11 +3292,32 @@ def _write_env(path: Path, env: dict[str, str]) -> None:
         if k not in written_keys:
             lines.append(f"{k}={v}")
 
-    path.write_text("\n".join(lines) + "\n")
+    payload = "\n".join(lines) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Optional[Path] = None
     try:
-        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
+        with tempfile.NamedTemporaryFile(
+            "w",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as temporary:
+            temporary.write(payload)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = Path(temporary.name)
+        os.chmod(temporary_path, stat.S_IRUSR | stat.S_IWUSR)
+        try:
+            os.replace(temporary_path, path)
+        except OSError:
+            with path.open("w") as destination:
+                destination.write(payload)
+                destination.flush()
+                os.fsync(destination.fileno())
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
 
 @app.post(
@@ -3211,46 +3328,67 @@ async def save_credentials(
     req: CredentialSaveRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Save credentials after explicit operator authentication."""
+    """Save credentials in the authoritative encrypted database store."""
+    try:
+        _credential_store_ready()
+    except CredentialConfigurationError as exc:
+        raise HTTPException(503, str(exc)) from exc
     allowed_keys = {key for keys in PROVIDER_KEYS.values() for key in keys}
     filtered = {k: v for k, v in req.credentials.items() if k in allowed_keys and v}
     if not filtered:
         raise HTTPException(400, "No valid credentials provided")
 
-    env_path = _find_env_path()
-    existing = _read_env(env_path)
     saved = []
     skipped = []
     for key, value in filtered.items():
         changed = await _save_secret(db, key, value, verified=True, overwrite=req.overwrite)
         if changed:
-            existing[key] = value
             saved.append(key)
         else:
             skipped.append(key)
     await db.commit()
-    _write_env(env_path, existing)
 
-    logger.info(f"Credentials saved via UI: {saved}")
+    logger.info("Encrypted credentials saved via UI: %s", saved)
     return {
         "saved": saved,
         "skipped": skipped,
-        "message": "Credentials saved and synced to .env.",
+        "message": "Credentials saved to encrypted storage.",
     }
 
 
+def _require_internal_service(request: Request) -> None:
+    configured_token = settings.INTERNAL_SERVICE_TOKEN.strip()
+    presented_token = request.headers.get("X-Internal-Service-Token", "")
+    if not configured_token:
+        raise HTTPException(403, "Internal service authentication is not configured")
+    if not presented_token or not hmac.compare_digest(presented_token, configured_token):
+        raise HTTPException(401, "Missing or invalid internal service token")
+
+
+@app.get(
+    "/internal/credentials/{provider}",
+    dependencies=[Depends(_require_internal_service)],
+)
+async def internal_provider_credentials(
+    provider: str,
+    db: AsyncSession = Depends(get_db),
+):
+    values = await _decrypted_credentials(db, provider.strip().lower())
+    allowed = PROVIDER_KEYS[provider.strip().lower()]
+    return {key: values[key] for key in allowed if key in values}
+
+
 @app.get("/api/settings/onboarding")
-async def onboarding_status():
+async def onboarding_status(db: AsyncSession = Depends(get_db)):
     """Check if the user has completed onboarding (has market data API credentials)."""
-    env_path = _find_env_path()
-    env = _read_env(env_path)
-    # Only require market data APIs to skip onboarding
-    has_market_data_cred = any(
-        env.get(k)
-        for k in [
-            "BINANCE_API_KEY",
-            "ALPACA_API_KEY",
-        ]
+    has_market_data_cred = bool(
+        (
+            await db.execute(
+                select(CredentialSecret.id)
+                .where(CredentialSecret.key.in_(["BINANCE_API_KEY", "ALPACA_API_KEY"]))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
     )
     has_any_asset = False
     try:
@@ -3593,21 +3731,16 @@ class LiveCancelBody(BaseModel):
     reason: Optional[str] = None
 
 
-def get_broker() -> Optional[BrokerAdapter]:
-    """Resolve the configured broker adapter.
-
-    Returns ``None`` when no adapter is configured; tests override this
-    dependency with a fake adapter so no sandbox or production account is
-    required for the guard logic.
-    """
+async def get_broker(db: AsyncSession = Depends(get_db)) -> Optional[BrokerAdapter]:
+    """Resolve the configured broker adapter from encrypted credentials."""
     if settings.LIVE_BROKER.strip().lower() != "alpaca":
         return None
-    broker = AlpacaBroker(
-        api_key=settings.ALPACA_API_KEY,
-        api_secret=settings.ALPACA_SECRET_KEY,
+    credentials = await _decrypted_credentials(db, "alpaca")
+    return AlpacaBroker(
+        api_key=credentials.get("ALPACA_API_KEY", ""),
+        api_secret=credentials.get("ALPACA_API_SECRET", ""),
         base_url=settings.LIVE_BROKER_BASE_URL,
     )
-    return broker
 
 
 def _live_user_key(request: Request) -> str:
