@@ -71,7 +71,7 @@ export default function PriceAlertsPanel() {
   const triggered = alerts.filter((a) => a.triggered);
 
   return (
-    <div className="rounded-lg border bg-[var(--card)] p-4">
+    <div className="surface-card p-4 sm:p-5">
       <div className="flex items-center justify-between mb-3">
         <div>
           <h3 className="text-sm font-semibold">Price Alerts</h3>

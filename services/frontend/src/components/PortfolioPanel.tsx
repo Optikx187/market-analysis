@@ -1,4 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Plus, ShieldCheck, WalletCards } from "lucide-react";
+import TermTooltip from "@/components/TermTooltip";
+import type { FinancialTerm } from "@/lib/financialTerms";
 import {
   fetchPortfolio,
   fetchPortfolioRisk,
@@ -145,29 +148,38 @@ export default function PortfolioPanel() {
     }
   };
 
-  if (!portfolio) return <div className="rounded-lg border bg-[var(--card)] p-4">Loading portfolio...</div>;
+  if (!portfolio) return <div className="surface-card p-4">Loading portfolio...</div>;
 
   const totalPnlColor = portfolio.total_pnl >= 0 ? "text-green-400" : "text-red-400";
 
   return (
-    <div className="rounded-lg border bg-[var(--card)] p-4 space-y-4">
+    <div className="surface-card space-y-4 p-4 sm:p-5">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Portfolio</h2>
+        <div className="flex items-center gap-2">
+          <span className="brand-mark h-8 w-8 rounded-lg">
+            <WalletCards className="h-4 w-4" aria-hidden="true" />
+          </span>
+          <div>
+            <h2 className="section-title text-lg font-semibold">Portfolio</h2>
+            <p className="text-[11px] text-[var(--muted-foreground)]">Positions, capital, and portfolio-wide risk</p>
+          </div>
+        </div>
         <button
           onClick={() => setShowTradeForm(!showTradeForm)}
-          className="rounded bg-blue-600 text-white px-3 py-1.5 text-xs hover:bg-blue-700"
+          className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-semibold text-[var(--primary-foreground)] hover:bg-[var(--primary-hover)]"
         >
+          {!showTradeForm && <Plus className="h-3.5 w-3.5" aria-hidden="true" />}
           {showTradeForm ? "Cancel" : "Log Trade"}
         </button>
       </div>
 
       {/* Balance Section */}
-      <div className="p-3 rounded border border-[var(--border)] bg-[var(--background)]">
+      <div className="metric-card p-3">
         <div className="flex items-center justify-between">
           <div>
             <span className="text-xs text-[var(--muted-foreground)]">Available Balance</span>
-            <div className="text-xl font-semibold">${portfolio.balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+            <div className="financial-value text-xl font-semibold">${portfolio.balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
           </div>
           {!editingBalance ? (
             <button
@@ -202,17 +214,20 @@ export default function PortfolioPanel() {
 
       {/* Summary Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard label="Total P&L" value={`$${portfolio.total_pnl.toLocaleString(undefined, { minimumFractionDigits: 2 })}`} className={totalPnlColor} />
-        <StatCard label="Win Rate" value={portfolio.win_count + portfolio.loss_count > 0 ? `${portfolio.win_rate}%` : "—"} />
+        <StatCard label={<TermTooltip term="pnl">Total P&amp;L</TermTooltip>} value={`$${portfolio.total_pnl.toLocaleString(undefined, { minimumFractionDigits: 2 })}`} className={totalPnlColor} />
+        <StatCard label={<TermTooltip term="winRate">Win Rate</TermTooltip>} value={portfolio.win_count + portfolio.loss_count > 0 ? `${portfolio.win_rate}%` : "—"} />
         <StatCard label="Wins / Losses" value={`${portfolio.win_count} / ${portfolio.loss_count}`} />
         <StatCard label="Open Positions" value={`${openTrades.length}`} />
       </div>
 
       {risk && (
-        <div className={`p-3 rounded border space-y-3 ${risk.breaker.active ? "border-red-600/70 bg-red-600/5" : "border-[var(--border)] bg-[var(--background)]"}`}>
+        <div className={`space-y-3 rounded-xl border p-3 ${risk.breaker.active ? "border-red-600/70 bg-red-600/5" : "border-[var(--border-subtle)] bg-[var(--background-elevated)]/60"}`}>
           <div className="flex items-center justify-between">
             <div>
-              <h3 className="text-sm font-medium">Portfolio Risk Controls</h3>
+              <h3 className="flex items-center gap-1.5 text-sm font-semibold">
+                <ShieldCheck className="h-4 w-4 text-[var(--primary)]" aria-hidden="true" />
+                Portfolio Risk Controls
+              </h3>
               <p className="text-xs text-[var(--muted-foreground)]">Risk-to-stop, concentration, correlation, and loss breakers.</p>
             </div>
             <span className={`rounded px-2 py-1 text-xs font-medium ${risk.breaker.active ? "bg-red-600/20 text-red-400" : "bg-green-600/20 text-green-400"}`}>
@@ -222,22 +237,26 @@ export default function PortfolioPanel() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
             <RiskMetric
               label="Effective Heat"
+              term="portfolioHeat"
               value={`${risk.heat.effective_pct}% / ${risk.heat.limit_pct}%`}
               detail={`${risk.heat.utilization_pct}% utilized`}
               warning={risk.heat.utilization_pct >= 80}
             />
             <RiskMetric
               label="Correlation Penalty"
+              term="correlationPenalty"
               value={`$${risk.heat.correlation_penalty_usd.toLocaleString()}`}
               detail={risk.correlation.data_available ? `${risk.correlation.largest_cluster_pct}% largest cluster` : "Awaiting aligned history"}
             />
             <RiskMetric
               label="Largest Concentration"
+              term="exposure"
               value={`${risk.exposure.largest_concentration.name} ${risk.exposure.largest_concentration.pct}%`}
               detail={risk.exposure.largest_concentration.category.replace("_", " ")}
             />
             <RiskMetric
               label="Current Drawdown"
+              term="drawdown"
               value={`${risk.breaker.current_drawdown_pct}% / ${risk.breaker.drawdown_limit_pct}%`}
               detail={`Daily ${risk.breaker.daily_loss_pct}% · Weekly ${risk.breaker.weekly_loss_pct}%`}
               warning={risk.breaker.active}
@@ -257,7 +276,7 @@ export default function PortfolioPanel() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
             {risk.stress_tests.map((scenario) => (
               <div key={scenario.name} className="rounded border border-[var(--border)] p-2 text-xs">
-                <div className="text-[var(--muted-foreground)]">{scenario.name}</div>
+                <TermTooltip term="stressTest" className="text-[var(--muted-foreground)]">{scenario.name}</TermTooltip>
                 <div className={`font-medium ${scenario.estimated_pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
                   {scenario.estimated_pnl >= 0 ? "+" : ""}${scenario.estimated_pnl.toLocaleString()}
                 </div>
@@ -485,7 +504,7 @@ export default function PortfolioPanel() {
           </p>
           {replyTrades && replyTrades.trades.length > 0 ? (
             <div className="overflow-x-auto">
-              <table className="w-full text-xs">
+              <table className="data-table w-full text-xs">
                 <thead>
                   <tr className="text-[var(--muted-foreground)]">
                     <th className="text-left py-1">Time</th>
@@ -519,11 +538,11 @@ export default function PortfolioPanel() {
   );
 }
 
-function StatCard({ label, value, className = "" }: { label: string; value: string; className?: string }) {
+function StatCard({ label, value, className = "" }: { label: ReactNode; value: string; className?: string }) {
   return (
-    <div className="p-2 rounded border border-[var(--border)] bg-[var(--background)]">
-      <div className="text-xs text-[var(--muted-foreground)]">{label}</div>
-      <div className={`text-lg font-semibold ${className}`}>{value}</div>
+    <div className="metric-card p-3">
+      <div className="metric-label normal-case tracking-normal">{label}</div>
+      <div className={`financial-value mt-1 text-lg font-semibold ${className}`}>{value}</div>
     </div>
   );
 }
@@ -533,16 +552,18 @@ function RiskMetric({
   value,
   detail,
   warning = false,
+  term,
 }: {
   label: string;
   value: string;
   detail: string;
   warning?: boolean;
+  term?: FinancialTerm;
 }) {
   return (
-    <div className="rounded border border-[var(--border)] p-2">
-      <div className="text-[10px] uppercase tracking-wide text-[var(--muted-foreground)]">{label}</div>
-      <div className={`text-sm font-semibold ${warning ? "text-red-400" : ""}`}>{value}</div>
+    <div className="metric-card p-2.5">
+      <div className="metric-label">{term ? <TermTooltip term={term}>{label}</TermTooltip> : label}</div>
+      <div className={`financial-value mt-1 text-sm font-semibold ${warning ? "text-red-400" : ""}`}>{value}</div>
       <div className="text-[10px] text-[var(--muted-foreground)]">{detail}</div>
     </div>
   );

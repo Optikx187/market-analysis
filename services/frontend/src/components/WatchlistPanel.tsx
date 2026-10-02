@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { Download, Eye, Plus, RefreshCw, Upload } from "lucide-react";
+import TermTooltip from "@/components/TermTooltip";
+import type { FinancialTerm } from "@/lib/financialTerms";
 import {
   fetchAssets,
   addAsset,
@@ -294,11 +297,19 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
   };
 
   return (
-    <div className="rounded-lg border bg-[var(--card)] p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-lg font-semibold">Watchlist</h2>
-        <div className="flex items-center gap-2 text-xs">
-          <label className="flex items-center gap-1 cursor-pointer">
+    <div className="surface-card p-4 sm:p-5">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <span className="brand-mark h-8 w-8 rounded-lg">
+            <Eye className="h-4 w-4" aria-hidden="true" />
+          </span>
+          <div>
+            <h2 className="section-title text-lg font-semibold">Watchlist</h2>
+            <p className="text-[11px] text-[var(--muted-foreground)]">Quotes, data quality, and research actions</p>
+          </div>
+        </div>
+        <div className="status-chip text-xs">
+          <label className="flex cursor-pointer items-center gap-1.5">
             <input
               type="checkbox"
               checked={pollingEnabled}
@@ -324,21 +335,24 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
 
       {/* Action bar: Refresh All, Export, Import */}
       {assets.length > 0 && (
-        <div className="flex gap-2 mb-3">
+        <div className="mb-3 flex flex-wrap gap-2">
           <button
             onClick={handleRefreshAll}
             disabled={refreshingAll}
-            className="rounded bg-[var(--secondary)] px-2 py-1 text-xs hover:bg-[var(--accent)] disabled:opacity-50"
+            className="status-chip hover:text-[var(--foreground)] disabled:opacity-50"
           >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshingAll ? "animate-spin" : ""}`} aria-hidden="true" />
             {refreshingAll ? "Refreshing..." : "Refresh All"}
           </button>
           <button
             onClick={handleExport}
-            className="rounded bg-[var(--secondary)] px-2 py-1 text-xs hover:bg-[var(--accent)]"
+            className="status-chip hover:text-[var(--foreground)]"
           >
+            <Download className="h-3.5 w-3.5" aria-hidden="true" />
             Export
           </button>
-          <label className="rounded bg-[var(--secondary)] px-2 py-1 text-xs hover:bg-[var(--accent)] cursor-pointer">
+          <label className="status-chip cursor-pointer hover:text-[var(--foreground)]">
+            <Upload className="h-3.5 w-3.5" aria-hidden="true" />
             Import
             <input
               ref={fileInputRef}
@@ -354,7 +368,7 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
       {feedback && <div className="mb-3 rounded border border-yellow-600 bg-yellow-600/10 p-2 text-xs text-yellow-300">{feedback}</div>}
       {lookupError && <div className="mb-3 rounded border border-red-600 bg-red-600/10 p-2 text-xs text-red-300">{lookupError}</div>}
 
-      <div className="flex flex-wrap gap-2 mb-4">
+      <div className="mb-4 flex flex-wrap gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--background-elevated)]/55 p-2.5">
         <select
           className="rounded border bg-[var(--input)] px-2 py-1 text-sm"
           value={assetType} onChange={(e) => { setAssetType(e.target.value); setName(""); setLookupError(""); }}
@@ -379,9 +393,10 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
         <button
           onClick={handleAdd}
           disabled={!ticker || !name}
-          className="rounded bg-[var(--primary)] text-[var(--primary-foreground)] px-3 py-1 text-sm font-medium disabled:opacity-50 whitespace-nowrap"
+          className="inline-flex items-center gap-1 rounded-lg bg-[var(--primary)] px-3 py-1 text-sm font-semibold whitespace-nowrap text-[var(--primary-foreground)] disabled:opacity-50"
         >
-          + Add
+          <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+          Add
         </button>
       </div>
 
@@ -517,7 +532,7 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
         <div className={`mt-4 rounded border p-3 text-sm ${lastDecision.approved ? "border-green-600" : "border-red-600"}`}>
           <div className="font-semibold">{lastDecision.ticker}  {lastDecision.direction} ({lastDecision.status})</div>
           <div>Approved: {lastDecision.approved ? "Yes" : "No"}</div>
-          <div>Kelly: {lastDecision.kelly_pct}% | Size: ${lastDecision.optimal_size_usd}</div>
+          <div><TermTooltip term="halfKelly">Half-Kelly size</TermTooltip>: {lastDecision.kelly_pct}% | ${lastDecision.optimal_size_usd}</div>
           {lastDecision.capital_overspend && <div className="text-red-400 font-bold mt-1">CAPITAL OVERSPEND WARNING</div>}
           <div className="text-xs text-[var(--muted-foreground)] mt-1">{lastDecision.reason}</div>
         </div>
@@ -556,18 +571,18 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
             ))}
           </div>
 
-          <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 text-center text-[10px] mb-3">
-            {[
-              ["Sharpe", backtestResult.aggregate.out_of_sample.sharpe],
-              ["Sortino", backtestResult.aggregate.out_of_sample.sortino],
-              ["Profit Factor", backtestResult.aggregate.out_of_sample.profit_factor],
-              ["Max DD", `${backtestResult.aggregate.out_of_sample.max_drawdown_pct}%`],
-              ["Exposure", `${backtestResult.aggregate.out_of_sample.exposure_pct}%`],
-              ["Expectancy", `${backtestResult.aggregate.out_of_sample.expectancy_pct}%`],
-            ].map(([label, value]) => (
-              <div key={label} className="rounded bg-[var(--background)] p-1.5">
-                <div className="text-[var(--muted-foreground)]">{label}</div>
-                <div className="font-medium">{value}</div>
+          <div className="mb-3 grid grid-cols-3 gap-1 text-center text-[10px] sm:grid-cols-6">
+            {([
+              { label: "Sharpe", value: backtestResult.aggregate.out_of_sample.sharpe, term: "sharpe" },
+              { label: "Sortino", value: backtestResult.aggregate.out_of_sample.sortino, term: "sortino" },
+              { label: "Profit Factor", value: backtestResult.aggregate.out_of_sample.profit_factor, term: "profitFactor" },
+              { label: "Max DD", value: `${backtestResult.aggregate.out_of_sample.max_drawdown_pct}%`, term: "maxDrawdown" },
+              { label: "Exposure", value: `${backtestResult.aggregate.out_of_sample.exposure_pct}%`, term: "exposure" },
+              { label: "Expectancy", value: `${backtestResult.aggregate.out_of_sample.expectancy_pct}%`, term: "expectancy" },
+            ] as Array<{ label: string; value: string | number; term: FinancialTerm }>).map((metric) => (
+              <div key={metric.label} className="metric-card p-1.5">
+                <TermTooltip term={metric.term} className="justify-center text-[var(--muted-foreground)]">{metric.label}</TermTooltip>
+                <div className="financial-value font-medium">{metric.value}</div>
               </div>
             ))}
           </div>
@@ -597,7 +612,7 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
             </div>
           )}
           <div className="text-[10px] text-[var(--muted-foreground)] mb-2">
-            Alert eligibility uses out-of-sample results only. Run ID: {backtestResult.run_id.slice(0, 8)}
+            Alert eligibility uses <TermTooltip term="oos">out-of-sample results</TermTooltip> only. Run ID: {backtestResult.run_id.slice(0, 8)}
           </div>
 
           {backtestResult.parameter_sensitivity.length > 0 && (
@@ -606,7 +621,7 @@ export default function WatchlistPanel({ onSignalProcessed, onViewChart }: Props
               <div className="grid grid-cols-2 gap-1">
                 {backtestResult.parameter_sensitivity.map((item) => (
                   <div key={item.parameter_index} className="rounded bg-[var(--background)] p-1.5 text-[10px] text-[var(--muted-foreground)]">
-                    RR {item.parameters.risk_reward_ratio} · ATR {item.parameters.atr_stop_multiplier} · mean {item.mean_validation_return_pct}% · selected {item.selected_windows}/{item.validation_windows}
+                    <TermTooltip term="rewardRisk">RR</TermTooltip> {item.parameters.risk_reward_ratio} · <TermTooltip term="atr">ATR</TermTooltip> {item.parameters.atr_stop_multiplier} · mean {item.mean_validation_return_pct}% · selected {item.selected_windows}/{item.validation_windows}
                   </div>
                 ))}
               </div>

@@ -1,4 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { LayoutDashboard, SlidersHorizontal } from "lucide-react";
+import TermTooltip from "@/components/TermTooltip";
+import type { FinancialTerm } from "@/lib/financialTerms";
 import {
   apiErrorMessage,
   deleteDashboardLayout,
@@ -22,6 +25,14 @@ const WIDGET_LABELS: Record<string, string> = {
   regime: "Market Regime",
   provider_health: "Provider Health",
   top_opportunities: "Top Opportunities",
+};
+
+const WIDGET_TERMS: Partial<Record<string, FinancialTerm>> = {
+  pnl: "pnl",
+  exposure: "exposure",
+  heat: "portfolioHeat",
+  drawdown: "drawdown",
+  regime: "marketRegime",
 };
 
 const DEFAULT_WIDGETS: DashboardWidgetPreference[] = Object.keys(WIDGET_LABELS).map((id) => ({
@@ -161,15 +172,22 @@ export default function DashboardWidget() {
   return (
     <section aria-labelledby="dashboard-heading" className="space-y-3">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <h2 id="dashboard-heading" className="text-sm font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
-          Dashboard ({mode})
-        </h2>
+        <div className="flex items-center gap-2">
+          <span className="brand-mark h-8 w-8 rounded-lg">
+            <LayoutDashboard className="h-4 w-4" aria-hidden="true" />
+          </span>
+          <div>
+            <h2 id="dashboard-heading" className="section-title text-base font-semibold">Risk &amp; performance snapshot</h2>
+            <p className="text-[11px] text-[var(--muted-foreground)]">Live portfolio context in {mode} view</p>
+          </div>
+        </div>
         <button
           onClick={() => setCustomizing((current) => !current)}
           aria-expanded={customizing}
           aria-controls="dashboard-customize"
-          className="self-start rounded bg-[var(--secondary)] px-3 py-1 text-xs hover:bg-[var(--accent)] focus-visible:ring-2 focus-visible:ring-blue-400"
+          className="status-chip self-start hover:border-[var(--primary)] hover:text-[var(--foreground)]"
         >
+          <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
           {customizing ? "Close customize" : "Customize dashboard"}
         </button>
       </div>
@@ -182,7 +200,7 @@ export default function DashboardWidget() {
       )}
 
       {customizing && (
-        <div id="dashboard-customize" className="rounded-lg border bg-[var(--card)] p-3 space-y-3">
+        <div id="dashboard-customize" className="surface-card space-y-3 p-4">
           <fieldset>
             <legend className="text-xs font-medium">Widgets and order</legend>
             <ul className="mt-2 space-y-1">
@@ -293,16 +311,18 @@ export default function DashboardWidget() {
         <p className="text-xs text-[var(--muted-foreground)]">Dashboard metrics unavailable right now.</p>
       ) : (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             {visibleWidgets.map((id) => (
               <WidgetCard key={id} id={id} data={data} detailed={detailed} />
             ))}
           </div>
           {detailed && (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-[10px]">
+            <div className="grid grid-cols-1 gap-2 text-[10px] md:grid-cols-3">
               {data.risk.stress_tests.map((scenario) => (
-                <div key={scenario.name} className="flex items-center justify-between rounded border border-[var(--border)] bg-[var(--card)] px-2 py-1">
-                  <span className="text-[var(--muted-foreground)]">{scenario.name}</span>
+                <div key={scenario.name} className="metric-card flex items-center justify-between px-3 py-2">
+                  <TermTooltip term="stressTest" className="text-[var(--muted-foreground)]">
+                    {scenario.name}
+                  </TermTooltip>
                   <span className={scenario.estimated_pnl >= 0 ? "text-green-400" : "text-red-400"}>
                     {scenario.estimated_pnl >= 0 ? "+" : ""}{money(scenario.estimated_pnl)}
                   </span>
@@ -318,13 +338,15 @@ export default function DashboardWidget() {
 
 function WidgetCard({ id, data, detailed }: { id: string; data: DashboardSummary; detailed: boolean }) {
   const label = WIDGET_LABELS[id] ?? id;
+  const term = WIDGET_TERMS[id];
+  const labelContent = term ? <TermTooltip term={term}>{label}</TermTooltip> : label;
 
   if (id === "pnl") {
     const positive = data.total_pnl >= 0;
     const sign = positive ? "+" : "";
     return (
       <DashboardCard
-        label={label}
+        label={labelContent}
         value={`${sign}${money(data.total_pnl)} (${sign}${data.total_pnl_pct}%)`}
         detail={detailed ? `Equity ${money(data.equity)} · ${data.open_positions} open · ${data.todays_approved}/${data.todays_signals} signals` : undefined}
         color={positive ? "text-green-400" : "text-red-400"}
@@ -335,10 +357,10 @@ function WidgetCard({ id, data, detailed }: { id: string; data: DashboardSummary
 
   if (id === "cash") {
     const cash = data.cash;
-    if (!cash?.available) return <UnavailableCard label={label} reason="Cash inputs unavailable" />;
+    if (!cash?.available) return <UnavailableCard label={labelContent} reason="Cash inputs unavailable" />;
     return (
       <DashboardCard
-        label={label}
+        label={labelContent}
         value={money(cash.free)}
         detail={detailed ? `${money(cash.balance)} balance · ${money(cash.reserved)} reserved` : undefined}
       />
@@ -349,7 +371,7 @@ function WidgetCard({ id, data, detailed }: { id: string; data: DashboardSummary
     const concentration = data.risk.exposure.largest_concentration;
     return (
       <DashboardCard
-        label={label}
+        label={labelContent}
         value={`${concentration.pct}%`}
         detail={detailed ? `${concentration.category}: ${concentration.name}` : undefined}
         color="text-yellow-400"
@@ -363,7 +385,7 @@ function WidgetCard({ id, data, detailed }: { id: string; data: DashboardSummary
     const hot = heat.utilization_pct >= 80;
     return (
       <DashboardCard
-        label={label}
+        label={labelContent}
         value={`${heat.effective_pct}%`}
         detail={detailed ? `${heat.utilization_pct}% of ${heat.limit_pct}% limit · ${money(heat.effective_risk_usd)} risk` : `${heat.utilization_pct}% used`}
         color={hot ? "text-red-400" : "text-orange-400"}
@@ -376,7 +398,7 @@ function WidgetCard({ id, data, detailed }: { id: string; data: DashboardSummary
     const breaker = data.risk.breaker;
     return (
       <DashboardCard
-        label={label}
+        label={labelContent}
         value={breaker.active ? "New Risk Blocked" : "Clear"}
         detail={
           breaker.active
@@ -392,11 +414,11 @@ function WidgetCard({ id, data, detailed }: { id: string; data: DashboardSummary
   if (id === "regime") {
     const regime = data.regime;
     if (!regime?.available) {
-      return <UnavailableCard label={label} reason={regime?.reason || "No completed scan yet"} />;
+      return <UnavailableCard label={labelContent} reason={regime?.reason || "No completed scan yet"} />;
     }
     return (
       <DashboardCard
-        label={label}
+        label={labelContent}
         value={regime.label || "—"}
         detail={detailed ? `Trend ${regime.trend} · vol ${regime.volatility} · breadth ${regime.breadth}` : undefined}
       />
@@ -406,14 +428,14 @@ function WidgetCard({ id, data, detailed }: { id: string; data: DashboardSummary
   if (id === "provider_health") {
     const health = data.provider_health;
     if (!health?.available) {
-      return <UnavailableCard label={label} reason={health?.reason || "Provider status unavailable"} />;
+      return <UnavailableCard label={labelContent} reason={health?.reason || "Provider status unavailable"} />;
     }
     const quality = health.data_quality;
     const connectivity = Object.entries(health.connectivity ?? {});
     const down = connectivity.filter(([, value]) => !value.online).map(([name]) => name);
     return (
       <DashboardCard
-        label={label}
+        label={labelContent}
         value={down.length === 0 ? "All providers OK" : `${down.length} degraded`}
         detail={
           detailed
@@ -429,14 +451,14 @@ function WidgetCard({ id, data, detailed }: { id: string; data: DashboardSummary
   if (id === "top_opportunities") {
     const top = data.top_opportunities;
     if (!top?.available) {
-      return <UnavailableCard label={label} reason={top?.reason || "Scanner results unavailable"} />;
+      return <UnavailableCard label={labelContent} reason={top?.reason || "Scanner results unavailable"} />;
     }
     if (top.items.length === 0) {
-      return <UnavailableCard label={label} reason="No eligible opportunities" />;
+      return <UnavailableCard label={labelContent} reason="No eligible opportunities" />;
     }
     return (
-      <div className="rounded-lg border bg-[var(--card)] p-3">
-        <div className="text-[10px] uppercase tracking-wide text-[var(--muted-foreground)]">{label}</div>
+      <div className="metric-card p-3">
+        <div className="metric-label">{labelContent}</div>
         <ul className="mt-1 space-y-0.5 text-xs">
           {top.items.slice(0, detailed ? 5 : 3).map((item) => (
             <li key={item.id} className="flex items-center justify-between gap-2">
@@ -452,10 +474,10 @@ function WidgetCard({ id, data, detailed }: { id: string; data: DashboardSummary
   return null;
 }
 
-function UnavailableCard({ label, reason }: { label: string; reason: string }) {
+function UnavailableCard({ label, reason }: { label: ReactNode; reason: string }) {
   return (
-    <div className="rounded-lg border border-dashed bg-[var(--card)] p-3">
-      <div className="text-[10px] uppercase tracking-wide text-[var(--muted-foreground)]">{label}</div>
+    <div className="metric-card border-dashed p-3">
+      <div className="metric-label">{label}</div>
       <div className="text-sm font-semibold text-[var(--muted-foreground)]">
         <span aria-hidden="true">◻ </span>Unavailable
       </div>
@@ -471,16 +493,16 @@ function DashboardCard({
   color = "",
   marker,
 }: {
-  label: string;
+  label: ReactNode;
   value: string;
   detail?: string;
   color?: string;
   marker?: string;
 }) {
   return (
-    <div className="rounded-lg border bg-[var(--card)] p-3">
-      <div className="text-[10px] uppercase tracking-wide text-[var(--muted-foreground)]">{label}</div>
-      <div className={`text-lg font-bold break-words ${color}`}>
+    <div className="metric-card p-3">
+      <div className="metric-label">{label}</div>
+      <div className={`financial-value mt-1 break-words text-xl font-bold ${color}`}>
         {marker && <span aria-hidden="true">{marker} </span>}
         {value}
       </div>

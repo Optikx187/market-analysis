@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { FileClock, Play, Plus } from "lucide-react";
+import TermTooltip from "@/components/TermTooltip";
 import {
   PAPER_ORDER_STATUSES,
   PAPER_ORDER_TYPES,
@@ -174,7 +176,7 @@ function OrderDetail({ order }: { order: PaperOrder }) {
       {order.children && order.children.length > 0 && (
         <div>
           <div className="mb-1 font-medium text-[var(--muted-foreground)]">Child orders (OCO siblings)</div>
-          <table className="w-full">
+          <table className="data-table w-full">
             <thead>
               <tr className="text-left text-[var(--muted-foreground)]">
                 <th className="pb-1">ID</th><th className="pb-1">Role</th><th className="pb-1">Type</th>
@@ -200,7 +202,7 @@ function OrderDetail({ order }: { order: PaperOrder }) {
       <div>
         <div className="mb-1 font-medium text-[var(--muted-foreground)]">Fills</div>
         {order.fills && order.fills.length > 0 ? (
-          <table className="w-full">
+          <table className="data-table w-full">
             <thead>
               <tr className="text-left text-[var(--muted-foreground)]">
                 <th className="pb-1">Qty</th><th className="pb-1">Price</th><th className="pb-1">Notional</th>
@@ -432,25 +434,33 @@ export default function OrdersPanel({ focus }: { focus?: DeepLinkFocus }) {
   );
 
   return (
-    <div className="rounded-lg border bg-[var(--card)] p-4">
+    <div className="surface-card p-4 sm:p-5">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <h2 className="text-lg font-semibold">Orders</h2>
-          <span className="rounded bg-amber-500 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-black">
+          <span className="brand-mark h-8 w-8 rounded-lg">
+            <FileClock className="h-4 w-4" aria-hidden="true" />
+          </span>
+          <div>
+          <h2 className="section-title text-lg font-semibold">Order Management</h2>
+          <p className="text-[11px] text-[var(--muted-foreground)]">Create and reconcile deterministic simulated orders</p>
+          </div>
+          <span className="status-chip border-amber-500/60 bg-amber-500/10 text-amber-300">
             Paper
           </span>
         </div>
         <div className="flex gap-2">
           <button
             onClick={() => { setShowOrderForm(!showOrderForm); setMessage(null); }}
-            className="rounded bg-[var(--secondary)] px-3 py-1.5 text-xs hover:bg-[var(--accent)]"
+            className="status-chip hover:text-[var(--foreground)]"
           >
+            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
             {showOrderForm ? "Close" : "New Paper Order"}
           </button>
           <button
             onClick={() => { setShowProcessForm(!showProcessForm); setMessage(null); }}
-            className="rounded bg-[var(--secondary)] px-3 py-1.5 text-xs hover:bg-[var(--accent)]"
+            className="status-chip hover:text-[var(--foreground)]"
           >
+            <Play className="h-3.5 w-3.5" aria-hidden="true" />
             {showProcessForm ? "Close" : "Process Candles"}
           </button>
           <button
@@ -634,13 +644,13 @@ export default function OrdersPanel({ focus }: { focus?: DeepLinkFocus }) {
       {reconciliation && (
         <div className="mb-4 grid grid-cols-2 gap-2 rounded border border-[var(--border)] bg-[var(--background)] p-3 text-xs md:grid-cols-4">
           <div><div className="text-[var(--muted-foreground)]">Balance</div>{money(reconciliation.balance)}</div>
-          <div><div className="text-[var(--muted-foreground)]">Reserved cash</div>{money(reconciliation.reserved_cash)}</div>
+          <div><TermTooltip term="reservedCash" className="text-[var(--muted-foreground)]">Reserved cash</TermTooltip>{money(reconciliation.reserved_cash)}</div>
           <div><div className="text-[var(--muted-foreground)]">Position capital</div>{money(reconciliation.position_capital)}</div>
-          <div><div className="text-[var(--muted-foreground)]">Equity</div>{money(reconciliation.equity)}</div>
+          <div><TermTooltip term="equity" className="text-[var(--muted-foreground)]">Equity</TermTooltip>{money(reconciliation.equity)}</div>
           <div><div className="text-[var(--muted-foreground)]">Fills</div>{reconciliation.fills}</div>
           <div><div className="text-[var(--muted-foreground)]">Filled quantity</div>{quantity(reconciliation.filled_quantity)}</div>
           <div>
-            <div className="text-[var(--muted-foreground)]">Fills match orders</div>
+            <TermTooltip term="reconciliation" className="text-[var(--muted-foreground)]">Fills match orders</TermTooltip>
             {reconciliation.fills_match_orders ? "Yes" : "No"}
           </div>
           <div>
@@ -701,7 +711,7 @@ export default function OrdersPanel({ focus }: { focus?: DeepLinkFocus }) {
         <p className="text-sm text-[var(--muted-foreground)]">No paper orders match these filters.</p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="data-table w-full text-sm">
             <thead>
               <tr className="border-b text-left text-xs text-[var(--muted-foreground)]">
                 <th className="pb-2">ID</th>
