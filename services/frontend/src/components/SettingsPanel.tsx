@@ -221,7 +221,8 @@ export default function SettingsPanel({ focus }: { focus?: DeepLinkFocus }) {
         </div>
       )}
       <p className="text-xs text-[var(--muted-foreground)] mb-4">
-        Credentials are stored locally, masked by default, and synced to the local <code>.env</code> after save or verification.
+        Provider credentials are encrypted in Portfolio Engine, masked by default,
+        and removed from <code>.env</code> after migration.
       </p>
 
       <div className="mb-4 rounded border p-3">

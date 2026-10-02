@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.credentials import get_provider_credentials
 from app.database import get_db, init_db, async_session
 from app.models import Asset, AssetType, Candle, PriceAlert
 from app.data_quality import DataQualityReport, assess_data_quality
@@ -222,7 +223,8 @@ async def _health_check_loop():
 
             # Alpaca health check (only if configured)
             alpaca_ok = False
-            if settings.ALPACA_API_KEY and settings.ALPACA_API_SECRET:
+            alpaca_credentials = await get_provider_credentials("alpaca")
+            if alpaca_credentials.get("ALPACA_API_KEY") and alpaca_credentials.get("ALPACA_API_SECRET"):
                 alpaca_ok = await _check_provider_health(
                     "alpaca",
                     "https://paper-api.alpaca.markets/v2/clock",
@@ -504,11 +506,14 @@ async def lookup_symbol(ticker: str, asset_type: str = "stock"):
 
 async def _alpaca_stock_quote(ticker: str) -> QuoteResponse | None:
     """Try to get a stock quote from Alpaca. Returns None if unconfigured or fails."""
-    if not settings.ALPACA_API_KEY or not settings.ALPACA_API_SECRET:
+    credentials = await get_provider_credentials("alpaca")
+    api_key = credentials.get("ALPACA_API_KEY")
+    api_secret = credentials.get("ALPACA_API_SECRET")
+    if not api_key or not api_secret:
         return None
     headers = {
-        "APCA-API-KEY-ID": settings.ALPACA_API_KEY,
-        "APCA-API-SECRET-KEY": settings.ALPACA_API_SECRET,
+        "APCA-API-KEY-ID": api_key,
+        "APCA-API-SECRET-KEY": api_secret,
     }
     now = datetime.now(timezone.utc).isoformat()
     try:
@@ -671,9 +676,11 @@ async def system_status(db: AsyncSession = Depends(get_db)):
 @app.get("/api/settings/credentials")
 async def credential_status():
     """Return which credential groups are configured (without exposing values)."""
+    binance = await get_provider_credentials("binance")
+    alpaca = await get_provider_credentials("alpaca")
     return {
-        "binance": bool(settings.BINANCE_API_KEY and settings.BINANCE_API_SECRET),
-        "alpaca": bool(settings.ALPACA_API_KEY and settings.ALPACA_API_SECRET),
+        "binance": bool(binance.get("BINANCE_API_KEY") and binance.get("BINANCE_API_SECRET")),
+        "alpaca": bool(alpaca.get("ALPACA_API_KEY") and alpaca.get("ALPACA_API_SECRET")),
     }
 
 

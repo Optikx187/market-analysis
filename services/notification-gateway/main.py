@@ -16,25 +16,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 
+from credentials import get_provider_credentials
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
-    TELEGRAM_BOT_TOKEN: Optional[str] = None
-    TELEGRAM_CHAT_ID: Optional[str] = None
-    DISCORD_WEBHOOK_URL: Optional[str] = None
-    SLACK_WEBHOOK_URL: Optional[str] = None
-    SMTP_HOST: Optional[str] = None
+    PORTFOLIO_ENGINE_URL: str = "http://portfolio-engine:8002"
+    INTERNAL_SERVICE_TOKEN: str = ""
     SMTP_PORT: int = 587
-    SMTP_USER: Optional[str] = None
-    SMTP_PASSWORD: Optional[str] = None
-    EMAIL_TO: Optional[str] = None
-    EMAIL_FROM: Optional[str] = None
-    TWILIO_ACCOUNT_SID: Optional[str] = None
-    TWILIO_AUTH_TOKEN: Optional[str] = None
-    TWILIO_FROM_NUMBER: Optional[str] = None
-    SMS_TO_NUMBER: Optional[str] = None
     NOTIFY_TELEGRAM_ENABLED: bool = True
     NOTIFY_DISCORD_ENABLED: bool = True
     NOTIFY_SLACK_ENABLED: bool = True
@@ -49,14 +40,23 @@ settings = Settings()
 _bot_task: Optional[asyncio.Task] = None
 
 
+async def _credentials(provider: str) -> dict[str, str]:
+    return await get_provider_credentials(
+        provider,
+        portfolio_engine_url=settings.PORTFOLIO_ENGINE_URL,
+        internal_service_token=settings.INTERNAL_SERVICE_TOKEN,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _bot_task
-    if settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID:
+    telegram = await _credentials("telegram")
+    bot_token = telegram.get("TELEGRAM_BOT_TOKEN")
+    chat_id = telegram.get("TELEGRAM_CHAT_ID")
+    if bot_token and chat_id:
         from bot import start_telegram_bot
-        _bot_task = asyncio.create_task(
-            start_telegram_bot(settings.TELEGRAM_BOT_TOKEN, settings.TELEGRAM_CHAT_ID)
-        )
+        _bot_task = asyncio.create_task(start_telegram_bot(bot_token, chat_id))
         logger.info("Telegram bot listener scheduled")
     yield
     if _bot_task and not _bot_task.done():
@@ -111,27 +111,32 @@ def format_alert(p: NotificationPayload) -> str:
 
 
 async def send_telegram(message: str, force: bool = False) -> bool:
-    if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_CHAT_ID:
+    credentials = await _credentials("telegram")
+    bot_token = credentials.get("TELEGRAM_BOT_TOKEN")
+    chat_id = credentials.get("TELEGRAM_CHAT_ID")
+    if not bot_token or not chat_id:
         logger.debug("Telegram not configured")
         return False
     if not force and not settings.NOTIFY_TELEGRAM_ENABLED:
         logger.info("Telegram disabled via NOTIFY_TELEGRAM_ENABLED")
         return False
-    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": settings.TELEGRAM_CHAT_ID, "text": message}
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message}
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(url, json=payload, timeout=10)
             resp.raise_for_status()
         logger.info("Telegram notification sent")
         return True
-    except Exception as e:
-        logger.error(f"Telegram failed: {e}")
+    except Exception as exc:
+        logger.error("Telegram notification failed: %s", type(exc).__name__)
         return False
 
 
 async def send_discord(message: str, force: bool = False) -> bool:
-    if not settings.DISCORD_WEBHOOK_URL:
+    credentials = await _credentials("discord")
+    webhook_url = credentials.get("DISCORD_WEBHOOK_URL")
+    if not webhook_url:
         logger.debug("Discord not configured")
         return False
     if not force and not settings.NOTIFY_DISCORD_ENABLED:
@@ -139,14 +144,12 @@ async def send_discord(message: str, force: bool = False) -> bool:
         return False
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                settings.DISCORD_WEBHOOK_URL, json={"content": message}, timeout=10,
-            )
+            resp = await client.post(webhook_url, json={"content": message}, timeout=10)
             resp.raise_for_status()
         logger.info("Discord notification sent")
         return True
-    except Exception as e:
-        logger.error(f"Discord failed: {e}")
+    except Exception as exc:
+        logger.error("Discord notification failed: %s", type(exc).__name__)
         return False
 
 
@@ -158,12 +161,15 @@ async def health():
 @app.get("/api/settings/credentials")
 async def credential_status():
     """Return which credential groups are configured (without exposing values)."""
+    telegram, discord, slack, email, sms = await asyncio.gather(
+        *(_credentials(provider) for provider in ("telegram", "discord", "slack", "email", "sms"))
+    )
     return {
-        "telegram": bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID),
-        "discord": bool(settings.DISCORD_WEBHOOK_URL),
-        "slack": bool(settings.SLACK_WEBHOOK_URL),
-        "email": bool(settings.SMTP_HOST and settings.EMAIL_TO),
-        "sms": bool(settings.TWILIO_ACCOUNT_SID and settings.SMS_TO_NUMBER),
+        "telegram": bool(telegram.get("TELEGRAM_BOT_TOKEN") and telegram.get("TELEGRAM_CHAT_ID")),
+        "discord": bool(discord.get("DISCORD_WEBHOOK_URL")),
+        "slack": bool(slack.get("SLACK_WEBHOOK_URL")),
+        "email": bool(email.get("SMTP_HOST") and email.get("EMAIL_TO")),
+        "sms": bool(sms.get("TWILIO_ACCOUNT_SID") and sms.get("TWILIO_AUTH_TOKEN") and sms.get("SMS_TO_NUMBER")),
     }
 
 
@@ -195,25 +201,28 @@ async def test_notification(payload: TestNotificationPayload = TestNotificationP
     sl_ok = await send_slack(message, force=True)
     em_ok = await send_email("[TEST] Market Analysis", message, force=True)
     sm_ok = await send_sms(message, force=True)
+    telegram, discord, slack, email, sms = await asyncio.gather(
+        *(_credentials(provider) for provider in ("telegram", "discord", "slack", "email", "sms"))
+    )
     results = {
         "telegram": {
-            "configured": bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID),
+            "configured": bool(telegram.get("TELEGRAM_BOT_TOKEN") and telegram.get("TELEGRAM_CHAT_ID")),
             "sent": tg_ok,
         },
         "discord": {
-            "configured": bool(settings.DISCORD_WEBHOOK_URL),
+            "configured": bool(discord.get("DISCORD_WEBHOOK_URL")),
             "sent": dc_ok,
         },
         "slack": {
-            "configured": bool(settings.SLACK_WEBHOOK_URL),
+            "configured": bool(slack.get("SLACK_WEBHOOK_URL")),
             "sent": sl_ok,
         },
         "email": {
-            "configured": bool(settings.SMTP_HOST and settings.EMAIL_TO),
+            "configured": bool(email.get("SMTP_HOST") and email.get("EMAIL_TO")),
             "sent": em_ok,
         },
         "sms": {
-            "configured": bool(settings.TWILIO_ACCOUNT_SID and settings.SMS_TO_NUMBER),
+            "configured": bool(sms.get("TWILIO_ACCOUNT_SID") and sms.get("TWILIO_AUTH_TOKEN") and sms.get("SMS_TO_NUMBER")),
             "sent": sm_ok,
         },
     }
@@ -238,25 +247,28 @@ class ChannelToggle(BaseModel):
 @app.get("/api/notify/channels")
 async def get_channel_status():
     """Return notification channel configuration and toggle status."""
+    telegram, discord, slack, email, sms = await asyncio.gather(
+        *(_credentials(provider) for provider in ("telegram", "discord", "slack", "email", "sms"))
+    )
     return {
         "telegram": {
-            "configured": bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID),
+            "configured": bool(telegram.get("TELEGRAM_BOT_TOKEN") and telegram.get("TELEGRAM_CHAT_ID")),
             "enabled": settings.NOTIFY_TELEGRAM_ENABLED,
         },
         "discord": {
-            "configured": bool(settings.DISCORD_WEBHOOK_URL),
+            "configured": bool(discord.get("DISCORD_WEBHOOK_URL")),
             "enabled": settings.NOTIFY_DISCORD_ENABLED,
         },
         "slack": {
-            "configured": bool(settings.SLACK_WEBHOOK_URL),
+            "configured": bool(slack.get("SLACK_WEBHOOK_URL")),
             "enabled": settings.NOTIFY_SLACK_ENABLED,
         },
         "email": {
-            "configured": bool(settings.SMTP_HOST and settings.EMAIL_TO),
+            "configured": bool(email.get("SMTP_HOST") and email.get("EMAIL_TO")),
             "enabled": settings.NOTIFY_EMAIL_ENABLED,
         },
         "sms": {
-            "configured": bool(settings.TWILIO_ACCOUNT_SID and settings.SMS_TO_NUMBER),
+            "configured": bool(sms.get("TWILIO_ACCOUNT_SID") and sms.get("TWILIO_AUTH_TOKEN") and sms.get("SMS_TO_NUMBER")),
             "enabled": settings.NOTIFY_SMS_ENABLED,
         },
     }
@@ -298,70 +310,78 @@ async def get_reply_trades():
 # --- Phase 9: Additional Notification Channels ---
 
 async def send_slack(message: str, force: bool = False) -> bool:
-    if not settings.SLACK_WEBHOOK_URL:
+    credentials = await _credentials("slack")
+    webhook_url = credentials.get("SLACK_WEBHOOK_URL")
+    if not webhook_url:
         return False
     if not force and not settings.NOTIFY_SLACK_ENABLED:
         return False
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                settings.SLACK_WEBHOOK_URL, json={"text": message}, timeout=10,
-            )
+            resp = await client.post(webhook_url, json={"text": message}, timeout=10)
             resp.raise_for_status()
         logger.info("Slack notification sent")
         return True
-    except Exception as e:
-        logger.error(f"Slack failed: {e}")
+    except Exception as exc:
+        logger.error("Slack notification failed: %s", type(exc).__name__)
         return False
 
 
 async def send_email(subject: str, body: str, force: bool = False) -> bool:
-    if not settings.SMTP_HOST or not settings.EMAIL_TO:
+    credentials = await _credentials("email")
+    smtp_host = credentials.get("SMTP_HOST")
+    email_to = credentials.get("EMAIL_TO")
+    if not smtp_host or not email_to:
         return False
     if not force and not settings.NOTIFY_EMAIL_ENABLED:
         return False
     try:
         import smtplib
         from email.mime.text import MIMEText
+        smtp_user = credentials.get("SMTP_USER")
         msg = MIMEText(body)
         msg["Subject"] = subject
-        msg["From"] = settings.EMAIL_FROM or settings.SMTP_USER or "market-analysis@localhost"
-        msg["To"] = settings.EMAIL_TO
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
+        msg["From"] = credentials.get("EMAIL_FROM") or smtp_user or "market-analysis@localhost"
+        msg["To"] = email_to
+        with smtplib.SMTP(smtp_host, settings.SMTP_PORT) as server:
             server.starttls()
-            if settings.SMTP_USER and settings.SMTP_PASSWORD:
-                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+            if smtp_user and credentials.get("SMTP_PASSWORD"):
+                server.login(smtp_user, credentials["SMTP_PASSWORD"])
             server.send_message(msg)
         logger.info("Email notification sent")
         return True
-    except Exception as e:
-        logger.error(f"Email failed: {e}")
+    except Exception as exc:
+        logger.error("Email notification failed: %s", type(exc).__name__)
         return False
 
 
 async def send_sms(message: str, force: bool = False) -> bool:
-    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN or not settings.SMS_TO_NUMBER:
+    credentials = await _credentials("sms")
+    account_sid = credentials.get("TWILIO_ACCOUNT_SID")
+    auth_token = credentials.get("TWILIO_AUTH_TOKEN")
+    to_number = credentials.get("SMS_TO_NUMBER")
+    if not account_sid or not auth_token or not to_number:
         return False
     if not force and not settings.NOTIFY_SMS_ENABLED:
         return False
     try:
-        url = f"https://api.twilio.com/2010-04-01/Accounts/{settings.TWILIO_ACCOUNT_SID}/Messages.json"
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 url,
                 data={
-                    "To": settings.SMS_TO_NUMBER,
-                    "From": settings.TWILIO_FROM_NUMBER,
+                    "To": to_number,
+                    "From": credentials.get("TWILIO_FROM_NUMBER", ""),
                     "Body": message[:1600],
                 },
-                auth=(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN),
+                auth=(account_sid, auth_token),
                 timeout=15,
             )
             resp.raise_for_status()
         logger.info("SMS notification sent")
         return True
-    except Exception as e:
-        logger.error(f"SMS failed: {e}")
+    except Exception as exc:
+        logger.error("SMS notification failed: %s", type(exc).__name__)
         return False
 
 
