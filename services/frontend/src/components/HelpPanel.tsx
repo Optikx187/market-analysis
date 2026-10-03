@@ -17,7 +17,7 @@ export default function HelpPanel() {
   const [active, setActive] = useState<Section>("overview");
 
   return (
-    <div className="rounded-lg border bg-[var(--card)] p-4">
+    <div className="surface-card p-4 sm:p-5">
       <h2 className="text-lg font-semibold mb-3">Help & Documentation</h2>
 
       <div className="flex flex-wrap gap-1.5 mb-4">

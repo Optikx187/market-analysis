@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { ShieldAlert } from "lucide-react";
 import {
   acknowledgeLiveTrading,
   apiErrorMessage,
@@ -160,12 +161,20 @@ export default function LiveTradingPanel() {
   return (
     <div className="space-y-4">
       <section
-        className={`rounded border p-4 ${
-          status?.armed ? "border-red-600 bg-red-950/40" : "border-gray-700 bg-gray-900/40"
+        className={`surface-card p-4 sm:p-5 ${
+          status?.armed ? "border-red-600 bg-red-950/40" : ""
         }`}
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-lg font-semibold">Live broker execution</h2>
+          <div className="flex items-center gap-2.5">
+            <span className={`grid h-9 w-9 place-items-center rounded-lg border ${status?.armed ? "border-red-500/60 bg-red-500/15 text-red-300" : "border-[var(--border)] bg-[var(--secondary)] text-[var(--muted-foreground)]"}`}>
+              <ShieldAlert className="h-4 w-4" aria-hidden="true" />
+            </span>
+            <div>
+              <div className="section-kicker">Protected execution</div>
+              <h2 className="section-title text-lg font-semibold">Live Broker Execution</h2>
+            </div>
+          </div>
           {liveBadge}
         </div>
         <p className="mt-2 text-sm text-[var(--muted-foreground)]">{status?.notice}</p>
@@ -389,7 +398,7 @@ export default function LiveTradingPanel() {
         {orders.length === 0 ? (
           <p className="mt-2 text-sm text-[var(--muted-foreground)]">No live orders have been created.</p>
         ) : (
-          <table className="mt-3 w-full text-left text-sm">
+          <table className="data-table mt-3 w-full text-left text-sm">
             <thead className="text-[var(--muted-foreground)]">
               <tr><th>ID</th><th>Ticker</th><th>Side</th><th>Type</th><th>Qty</th><th>Filled</th><th>Status</th><th>Broker order</th><th /></tr>
             </thead>

@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { ScanSearch } from "lucide-react";
+import TermTooltip from "@/components/TermTooltip";
 import {
   fetchScannerStatus,
   triggerScan,
@@ -204,11 +206,16 @@ export default function ScannerPanel({ focus }: { focus?: DeepLinkFocus }) {
   };
 
   return (
-    <div className="rounded-lg border bg-[var(--card)] p-4">
+    <div className="surface-card p-4 sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
-        <div>
-          <h3 className="text-sm font-semibold">Ranked Opportunity Scanner</h3>
+        <div className="flex items-start gap-2.5">
+          <span className="brand-mark h-8 w-8 rounded-lg">
+            <ScanSearch className="h-4 w-4" aria-hidden="true" />
+          </span>
+          <div>
+          <h3 className="section-title text-lg font-semibold">Ranked Opportunity Scanner</h3>
           <p className="text-xs text-[var(--muted-foreground)]">Transparent scores, risk-controlled sizing, and complete trade plans</p>
+          </div>
         </div>
         <button onClick={handleScanNow} disabled={scanning} className="rounded bg-[var(--primary)] text-[var(--primary-foreground)] px-3 py-1.5 text-xs font-medium disabled:opacity-50">
           {scanning ? "Scanning..." : "Scan Now"}
@@ -271,7 +278,7 @@ export default function ScannerPanel({ focus }: { focus?: DeepLinkFocus }) {
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <span className="text-lg font-semibold tabular-nums">{opportunity.score.toFixed(1)}</span>
-                    <div><div className="text-sm font-medium">{signal.ticker} <span className={signal.direction === "BUY" ? "text-green-400" : signal.direction === "SELL" ? "text-red-400" : "text-amber-400"}>{signal.direction}</span></div><div className="text-[10px] text-[var(--muted-foreground)]">{opportunity.status} · {opportunity.regime?.trend ?? "unknown"} regime · {opportunity.timeframe_agreement?.available ? `${opportunity.timeframe_agreement.score.toFixed(0)}% TF` : "TF incomplete"} · {opportunity.user_decision}</div></div>
+                    <div><div className="text-sm font-medium">{signal.ticker} <span className={signal.direction === "BUY" ? "text-green-400" : signal.direction === "SELL" ? "text-red-400" : "text-amber-400"}>{signal.direction}</span></div><div className="flex flex-wrap items-center gap-1 text-[10px] text-[var(--muted-foreground)]"><span>{opportunity.status}</span><span>·</span><TermTooltip term="regime">{opportunity.regime?.trend ?? "unknown"} regime</TermTooltip><span>·</span><TermTooltip term="timeframeAgreement">{opportunity.timeframe_agreement?.available ? `${opportunity.timeframe_agreement.score.toFixed(0)}% TF` : "TF incomplete"}</TermTooltip><span>· {opportunity.user_decision}</span></div></div>
                   </div>
                   <div className="text-right"><div className={opportunity.eligible ? "text-green-400 text-xs" : "text-amber-400 text-xs"}>{opportunity.eligible ? "Eligible" : "Ineligible"}</div><div className="text-[10px] text-[var(--muted-foreground)]">{expanded ? "Hide details" : "Explain score and plan"}</div></div>
                 </div>
@@ -283,7 +290,7 @@ export default function ScannerPanel({ focus }: { focus?: DeepLinkFocus }) {
                 <div className="mt-3 space-y-3 border-t border-[var(--border)] pt-3">
                   <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{opportunity.components.map((component) => <div key={component.name} className="rounded bg-[var(--card)] p-2"><div className="flex justify-between text-[10px]"><span>{component.label}</span><span className={component.available ? "" : "text-amber-400"}>{component.available ? component.score.toFixed(0) : "Missing"}</span></div><div className="mt-1 text-[10px] text-[var(--muted-foreground)]">{component.explanation}</div><div className="mt-1 text-[9px] text-[var(--muted-foreground)]">Weight {component.weight_pct}% · Contribution {component.contribution.toFixed(1)}</div></div>)}</div>
 
-                  {opportunity.regime && <div className="rounded border border-[var(--border)] bg-[var(--card)] p-2 text-xs"><div className="font-medium">Market regime and timeframe agreement</div><div className="mt-1 text-[var(--muted-foreground)]">{opportunity.regime.label} · {opportunity.regime.session_profile}</div><div className="mt-1 flex flex-wrap gap-3">{opportunity.timeframe_agreement && Object.entries(opportunity.timeframe_agreement.details).map(([timeframe, detail]) => <span key={timeframe}>{timeframe}: {detail.trend}{detail.agrees ? " (agrees)" : ""}</span>)}</div><div className="mt-1">Fit {opportunity.regime_controls?.fit_score.toFixed(0) ?? 0}/100 · Size {opportunity.regime_controls?.size_multiplier.toFixed(2) ?? "0.00"}x</div></div>}
+                  {opportunity.regime && <div className="rounded border border-[var(--border)] bg-[var(--card)] p-2 text-xs"><TermTooltip term="marketRegime" className="font-medium">Market regime and timeframe agreement</TermTooltip><div className="mt-1 text-[var(--muted-foreground)]">{opportunity.regime.label} · {opportunity.regime.session_profile}</div><div className="mt-1 flex flex-wrap gap-3">{opportunity.timeframe_agreement && Object.entries(opportunity.timeframe_agreement.details).map(([timeframe, detail]) => <span key={timeframe}>{timeframe}: {detail.trend}{detail.agrees ? " (agrees)" : ""}</span>)}</div><div className="mt-1">Fit {opportunity.regime_controls?.fit_score.toFixed(0) ?? 0}/100 · Size {opportunity.regime_controls?.size_multiplier.toFixed(2) ?? "0.00"}x</div></div>}
 
                   {opportunity.eligibility_reasons.length > 0 && <div className="rounded border border-amber-600/40 bg-amber-600/10 p-2 text-xs text-amber-300"><div className="font-medium">Eligibility blockers</div>{opportunity.eligibility_reasons.map((reason) => <div key={reason}>• {reason}</div>)}</div>}
                   {opportunity.event_warnings.length > 0 && <div className="rounded border border-amber-600/30 p-2 text-xs"><div className="font-medium">Event warnings</div>{opportunity.event_warnings.map((warning) => <div key={warning} className="text-[var(--muted-foreground)]">• {warning}</div>)}</div>}
@@ -297,9 +304,9 @@ export default function ScannerPanel({ focus }: { focus?: DeepLinkFocus }) {
                         <div><span className="text-[var(--muted-foreground)]">Quantity / size</span><div>{price(plan.quantity)} / {money(plan.position_size_usd)}</div></div>
                         <div><span className="text-[var(--muted-foreground)]">Maximum loss</span><div className="text-red-400">{money(plan.maximum_planned_loss_usd)}</div></div>
                         <div><span className="text-[var(--muted-foreground)]">Targets</span><div>{plan.targets.map((target) => `${target.label}: ${price(target.price)}`).join(" · ")}</div></div>
-                        <div><span className="text-[var(--muted-foreground)]">Costs</span><div>{money(plan.estimated_costs_usd)} ({plan.estimated_cost_bps} bps)</div></div>
-                        <div><span className="text-[var(--muted-foreground)]">Net reward/risk</span><div>{plan.net_reward_risk.toFixed(2)}</div></div>
-                        <div><span className="text-[var(--muted-foreground)]">Time stop</span><div>{plan.time_stop}</div></div>
+                        <div><TermTooltip term="bps" className="text-[var(--muted-foreground)]">Costs</TermTooltip><div>{money(plan.estimated_costs_usd)} ({plan.estimated_cost_bps} bps)</div></div>
+                        <div><TermTooltip term="rewardRisk" className="text-[var(--muted-foreground)]">Net reward/risk</TermTooltip><div>{plan.net_reward_risk.toFixed(2)}</div></div>
+                        <div><TermTooltip term="timeStop" className="text-[var(--muted-foreground)]">Time stop</TermTooltip><div>{plan.time_stop}</div></div>
                       </div>
                       <div className="mt-2 grid gap-1 text-[var(--muted-foreground)] sm:grid-cols-2">
                         <div><span className="font-medium text-[var(--foreground)]">Scale in: </span>{plan.scale_in.map((step) => `${step.entry_pct}% ${step.instruction}`).join(" · ")}</div>

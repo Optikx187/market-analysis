@@ -29,7 +29,7 @@ export default function AlertsPanel() {
   useEffect(() => { fetchAlerts().then(setAlerts).catch(() => {}); }, []);
 
   return (
-    <div className="rounded-lg border bg-[var(--card)] p-4">
+    <div className="surface-card p-4 sm:p-5">
       <h2 className="text-lg font-semibold mb-3">Alert History</h2>
       {alerts.length === 0 ? (
         <p className="text-sm text-[var(--muted-foreground)]">No alerts yet.</p>

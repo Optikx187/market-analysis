@@ -57,7 +57,7 @@ export default function HistoricalChart({ ticker }: Props) {
 
   if (!ticker) {
     return (
-      <div className="rounded-lg border bg-[var(--card)] p-4 text-center text-sm text-[var(--muted-foreground)]">
+      <div className="surface-card p-4 text-center text-sm text-[var(--muted-foreground)]">
         Select a ticker from the watchlist to view its chart
       </div>
     );
@@ -65,7 +65,7 @@ export default function HistoricalChart({ ticker }: Props) {
 
   if (loading) {
     return (
-      <div className="rounded-lg border bg-[var(--card)] p-4 text-center text-sm text-[var(--muted-foreground)]">
+      <div className="surface-card p-4 text-center text-sm text-[var(--muted-foreground)]">
         Loading chart for {ticker}...
       </div>
     );
@@ -81,7 +81,7 @@ export default function HistoricalChart({ ticker }: Props) {
   const signalDates = new Set(signals.map((s) => s.date));
 
   return (
-    <div className="rounded-lg border bg-[var(--card)] p-4">
+    <div className="surface-card p-4 sm:p-5">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold">{ticker} Price Chart</h3>
         <div className="flex gap-1">

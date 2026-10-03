@@ -78,7 +78,7 @@ export default function TradesPanel({
   };
 
   return (
-    <div className="rounded-lg border bg-[var(--card)] p-4">
+    <div className="surface-card p-4 sm:p-5">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-lg font-semibold">Trades</h2>
         <button
@@ -155,7 +155,7 @@ export default function TradesPanel({
         <p className="text-sm text-[var(--muted-foreground)]">No trades yet.</p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="data-table w-full text-sm">
             <thead>
               <tr className="text-left text-xs text-[var(--muted-foreground)] border-b">
                 <th className="pb-2">Ticker</th>

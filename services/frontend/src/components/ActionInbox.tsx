@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Inbox, RefreshCw } from "lucide-react";
 import {
   acknowledgeActionItem,
   apiErrorMessage,
@@ -162,7 +163,7 @@ export default function ActionInbox({ onOpenContext }: { onOpenContext: (item: A
   return (
     <section
       aria-labelledby="action-inbox-heading"
-      className="rounded-lg border-2 border-[var(--border)] bg-[var(--card)] p-4"
+      className="surface-card p-4 sm:p-5"
     >
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div
@@ -171,32 +172,41 @@ export default function ActionInbox({ onOpenContext }: { onOpenContext: (item: A
           tabIndex={-1}
           className="focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
         >
-          <h2 id="action-inbox-heading" className="text-lg font-semibold">
-            Action Required
-          </h2>
-          <p className="text-xs text-[var(--muted-foreground)]">
-            Decisions waiting on you — acknowledge, snooze, resolve, or open the context.
-          </p>
+          <div className="flex items-center gap-2.5">
+            <span className="brand-mark h-8 w-8 rounded-lg">
+              <Inbox className="h-4 w-4" aria-hidden="true" />
+            </span>
+            <div>
+              <div className="section-kicker">Decision inbox</div>
+              <h2 id="action-inbox-heading" className="section-title text-lg font-semibold">
+                Action Required
+              </h2>
+              <p className="text-xs text-[var(--muted-foreground)]">
+                Review, defer, or resolve the items that need your attention.
+              </p>
+            </div>
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {counts && (
             <ul className="flex flex-wrap items-center gap-1 text-[10px]" aria-label="Action Required counts">
-              <li className="rounded border px-1.5 py-0.5">Needs attention: {counts.unresolved}</li>
-              <li className="rounded border px-1.5 py-0.5">Open: {counts.open}</li>
-              <li className="rounded border border-red-500 px-1.5 py-0.5">
+              <li className="status-chip">Needs attention: {counts.unresolved}</li>
+              <li className="status-chip">Open: {counts.open}</li>
+              <li className="status-chip border-red-500/60 text-red-300">
                 ▲ Critical: {counts.by_severity.critical}
               </li>
-              <li className="rounded border border-amber-500 px-1.5 py-0.5">
+              <li className="status-chip border-amber-500/60 text-amber-300">
                 ◆ Warning: {counts.by_severity.warning}
               </li>
-              <li className="rounded border px-1.5 py-0.5">Mandatory: {counts.mandatory}</li>
+              <li className="status-chip">Mandatory: {counts.mandatory}</li>
             </ul>
           )}
           <button
             onClick={refreshNow}
             disabled={refreshing}
-            className="rounded bg-[var(--secondary)] px-3 py-1 text-xs hover:bg-[var(--accent)] focus-visible:ring-2 focus-visible:ring-blue-400 disabled:opacity-50"
+            className="status-chip hover:border-[var(--primary)] hover:text-[var(--foreground)] disabled:opacity-50"
           >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} aria-hidden="true" />
             {refreshing ? "Refreshing…" : "Refresh"}
           </button>
         </div>
@@ -263,14 +273,14 @@ export default function ActionInbox({ onOpenContext }: { onOpenContext: (item: A
           Nothing needs a decision in this view.
         </p>
       ) : (
-        <ul className="mt-3 space-y-2">
+        <ul className="mt-3 grid gap-2 xl:grid-cols-2">
           {items.map((item) => {
             const style = SEVERITY_STYLE[item.severity] ?? SEVERITY_STYLE.info;
             const busy = busyId === item.id;
             return (
               <li
                 key={item.id}
-                className={`rounded border bg-[var(--background)] p-3 ${style.border}`}
+                className={`rounded-xl border border-[var(--border-subtle)] bg-[var(--background-elevated)]/75 p-3.5 ${style.border}`}
               >
                 <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
                   <div className="min-w-0">
@@ -289,8 +299,8 @@ export default function ActionInbox({ onOpenContext }: { onOpenContext: (item: A
                       )}
                       {item.ticker && <span className="rounded border px-1.5 py-0.5">{item.ticker}</span>}
                     </div>
-                    <div className="mt-1 text-sm font-medium">{item.title}</div>
-                    <p className="text-xs text-[var(--muted-foreground)] break-words">{item.message}</p>
+                    <div className="mt-2 text-sm font-semibold">{item.title}</div>
+                    <p className="mt-0.5 break-words text-xs leading-relaxed text-[var(--muted-foreground)]">{item.message}</p>
                     <div className="mt-1 text-[10px] text-[var(--muted-foreground)]">
                       First seen {formatTime(item.first_seen_at)} · updated {formatTime(item.updated_at)}
                       {item.snoozed_until ? ` · snoozed until ${formatTime(item.snoozed_until)}` : ""}

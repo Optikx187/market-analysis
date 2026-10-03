@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { BarChart3, LockKeyhole } from "lucide-react";
 import {
   apiErrorMessage,
   loginUser,
@@ -53,11 +54,14 @@ export default function AuthPanel({ onAuthenticated }: AuthPanelProps) {
   };
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[var(--background)] px-4 text-[var(--foreground)]">
-      <section className="w-full max-w-md rounded-lg border border-[var(--border)] bg-[var(--card)] p-6 shadow-lg" aria-labelledby="auth-heading">
+    <main className="app-shell flex min-h-screen items-center justify-center px-4">
+      <section className="surface-card w-full max-w-md p-6 sm:p-8" aria-labelledby="auth-heading">
         <div className="mb-6">
-          <p className="text-xs font-semibold uppercase tracking-wider text-amber-500">Capital Preservation First</p>
-          <h1 id="auth-heading" className="mt-1 text-2xl font-bold">Market Analysis</h1>
+          <div className="brand-mark mb-4 h-11 w-11">
+            <BarChart3 className="h-5 w-5" aria-hidden="true" />
+          </div>
+          <p className="section-kicker">Portfolio intelligence</p>
+          <h1 id="auth-heading" className="section-title mt-1 text-3xl font-bold">Market Analysis</h1>
           <p className="mt-2 text-sm text-[var(--muted-foreground)]">
             {mode === "login" ? "Sign in to your private portfolio." : "Create a private portfolio account."}
           </p>
@@ -120,7 +124,8 @@ export default function AuthPanel({ onAuthenticated }: AuthPanelProps) {
           </button>
         </form>
 
-        <p className="mt-5 text-xs text-[var(--muted-foreground)]">
+        <p className="mt-5 flex items-start gap-2 text-xs leading-relaxed text-[var(--muted-foreground)]">
+          <LockKeyhole className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--primary)]" aria-hidden="true" />
           Your session token is kept in this browser tab and cleared when the tab closes or you sign out.
         </p>
       </section>

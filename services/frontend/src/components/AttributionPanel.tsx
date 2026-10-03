@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { ChartNoAxesCombined } from "lucide-react";
+import TermTooltip from "@/components/TermTooltip";
 import {
   ATTRIBUTION_DIMENSIONS,
   attributionExportUrl,
@@ -82,10 +84,10 @@ export default function AttributionPanel() {
   }, [load]);
 
   if (loading && !data) {
-    return <div className="rounded-lg border bg-[var(--card)] p-4 text-sm">Loading attribution...</div>;
+    return <div className="surface-card p-4 text-sm">Loading attribution...</div>;
   }
   if (error && !data) {
-    return <div className="rounded-lg border bg-[var(--card)] p-4 text-sm text-red-400">{error}</div>;
+    return <div className="surface-card p-4 text-sm text-red-400">{error}</div>;
   }
   if (!data) return null;
 
@@ -95,15 +97,20 @@ export default function AttributionPanel() {
   const activeFilters = Object.entries(filters).filter(([, value]) => Boolean(value));
 
   return (
-    <div className="rounded-lg border bg-[var(--card)] p-4 space-y-4">
+    <div className="surface-card space-y-5 p-4 sm:p-5">
       <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div>
-          <h2 className="text-lg font-semibold">Performance Attribution</h2>
-          <p className="text-xs text-[var(--muted-foreground)]">
+        <div className="flex items-start gap-2.5">
+          <span className="brand-mark h-8 w-8 rounded-lg">
+            <ChartNoAxesCombined className="h-4 w-4" aria-hidden="true" />
+          </span>
+          <div>
+          <h2 className="section-title text-lg font-semibold">Performance Attribution</h2>
+          <p className="mt-1 max-w-3xl text-xs leading-relaxed text-[var(--muted-foreground)]">
             Net realized P&amp;L after fees and slippage, attributed across every trade with realized
             fills &mdash; including positions still open after a partial exit. Missing metadata is
             grouped as Unknown, never inferred.
           </p>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <a
@@ -162,13 +169,13 @@ export default function AttributionPanel() {
           detail={`${summary.closed_sample_size} closed · ${summary.partially_realized_sample_size} partially realized`}
         />
         <Stat
-          label="Net P&L (filtered)"
+          label={<TermTooltip term="pnl">Net P&amp;L (filtered)</TermTooltip>}
           value={money(summary.net_pnl)}
           className={summary.net_pnl >= 0 ? "text-green-400" : "text-red-400"}
         />
-        <Stat label="Costs" value={money(summary.costs)} detail={`Gross ${money(summary.gross_pnl)}`} />
+        <Stat label={<TermTooltip term="slippage">Execution Costs</TermTooltip>} value={money(summary.costs)} detail={`Gross ${money(summary.gross_pnl)}`} />
         <Stat
-          label="Win Rate"
+          label={<TermTooltip term="winRate">Win Rate</TermTooltip>}
           value={summary.sample_size > 0 ? `${summary.win_rate}%` : "—"}
           detail={`${summary.wins}W / ${summary.losses}L`}
         />
@@ -182,7 +189,7 @@ export default function AttributionPanel() {
         }`}
       >
         <div className="flex items-center justify-between">
-          <span className="font-medium">Reconciliation</span>
+          <TermTooltip term="reconciliation" className="font-medium">Reconciliation</TermTooltip>
           <span className={reconciliation.reconciles ? "text-green-400" : "text-red-400"}>
             {reconciliation.reconciles ? "Exact match" : `Delta ${money(reconciliation.delta)}`}
           </span>
@@ -227,14 +234,14 @@ export default function AttributionPanel() {
           </p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-xs">
+            <table className="data-table w-full text-xs">
               <thead className="text-[var(--muted-foreground)]">
                 <tr className="border-b border-[var(--border)]">
                   <th className="text-left py-1">{DIMENSION_LABELS[dimension]}</th>
                   <th className="text-right py-1">Sample</th>
-                  <th className="text-right py-1">Net P&amp;L</th>
+                  <th className="text-right py-1"><TermTooltip term="pnl">Net P&amp;L</TermTooltip></th>
                   <th className="text-right py-1">Costs</th>
-                  <th className="text-right py-1">Win Rate</th>
+                  <th className="text-right py-1"><TermTooltip term="winRate">Win Rate</TermTooltip></th>
                   <th className="text-right py-1">Avg / Trade</th>
                   <th className="text-left py-1 pl-3">Guidance</th>
                 </tr>
@@ -250,7 +257,7 @@ export default function AttributionPanel() {
       </div>
 
       <div className="space-y-2">
-        <div className="text-sm font-medium">Confidence Calibration</div>
+        <TermTooltip term="calibration" className="text-sm font-medium">Confidence Calibration</TermTooltip>
         {data.confidence_calibration.length === 0 ? (
           <p className="text-xs text-[var(--muted-foreground)]">No realized trades to calibrate.</p>
         ) : (
@@ -373,11 +380,11 @@ function TradeDetail({ trade, summary }: { trade: AttributedTrade; summary: stri
           value={`${optional(trade.average_exit_price)} (${optional(trade.planned_exit_price)})`}
         />
         <Detail label="Size (planned)" value={`${trade.quantity} (${optional(trade.planned_quantity)})`} />
-        <Detail label="Confidence" value={optional(trade.signal_confidence, "%")} />
-        <Detail label="Gross P&L" value={money(trade.gross_pnl ?? 0)} />
+        <Detail label={<TermTooltip term="confidence">Confidence</TermTooltip>} value={optional(trade.signal_confidence, "%")} />
+        <Detail label={<TermTooltip term="pnl">Gross P&amp;L</TermTooltip>} value={money(trade.gross_pnl ?? 0)} />
         <Detail label="Costs" value={money(trade.costs)} />
-        <Detail label="MFE ($ / %)" value={excursion(trade.excursion_status, trade.mfe_usd, trade.mfe_pct)} />
-        <Detail label="MAE ($ / %)" value={excursion(trade.excursion_status, trade.mae_usd, trade.mae_pct)} />
+        <Detail label={<TermTooltip term="mfe">MFE ($ / %)</TermTooltip>} value={excursion(trade.excursion_status, trade.mfe_usd, trade.mfe_pct)} />
+        <Detail label={<TermTooltip term="mae">MAE ($ / %)</TermTooltip>} value={excursion(trade.excursion_status, trade.mae_usd, trade.mae_pct)} />
         <Detail label="Sector / Asset" value={`${trade.sector ?? "Unknown"} · ${trade.asset_type ?? "Unknown"}`} />
       </div>
       <div className="space-y-1">
@@ -408,21 +415,21 @@ function Stat({
   detail,
   className = "",
 }: {
-  label: string;
+  label: ReactNode;
   value: string;
   detail?: string;
   className?: string;
 }) {
   return (
-    <div className="rounded border border-[var(--border)] bg-[var(--background)] p-2">
-      <div className="text-[10px] text-[var(--muted-foreground)]">{label}</div>
-      <div className={`text-sm font-medium ${className}`}>{value}</div>
+    <div className="metric-card p-2.5">
+      <div className="metric-label normal-case tracking-normal">{label}</div>
+      <div className={`financial-value mt-1 text-sm font-medium ${className}`}>{value}</div>
       {detail && <div className="text-[10px] text-[var(--muted-foreground)]">{detail}</div>}
     </div>
   );
 }
 
-function Detail({ label, value }: { label: string; value: string }) {
+function Detail({ label, value }: { label: ReactNode; value: string }) {
   return (
     <div>
       <div className="text-[10px] text-[var(--muted-foreground)]">{label}</div>

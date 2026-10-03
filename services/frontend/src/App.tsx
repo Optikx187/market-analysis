@@ -1,4 +1,24 @@
 import { useEffect, useState } from "react";
+import {
+  Bell,
+  BookOpen,
+  CandlestickChart,
+  ChartNoAxesCombined,
+  CircleDollarSign,
+  Gauge,
+  Keyboard,
+  LineChart,
+  ListOrdered,
+  LogOut,
+  Radar,
+  ScanSearch,
+  Settings,
+  ShieldCheck,
+  Sparkles,
+  User,
+  WandSparkles,
+  type LucideIcon,
+} from "lucide-react";
 import WatchlistPanel from "@/components/WatchlistPanel";
 import PortfolioPanel from "@/components/PortfolioPanel";
 import TradesPanel from "@/components/TradesPanel";
@@ -53,6 +73,19 @@ const TAB_ORDER: Tab[] = [
   "settings",
   "help",
 ];
+
+const TAB_ICONS: Record<Tab, LucideIcon> = {
+  alerts: Bell,
+  orders: ListOrdered,
+  live: CircleDollarSign,
+  trades: CandlestickChart,
+  performance: ChartNoAxesCombined,
+  scanner: ScanSearch,
+  "price-alerts": Radar,
+  chart: LineChart,
+  settings: Settings,
+  help: BookOpen,
+};
 
 /** Shortcuts must never fire while the user is typing. */
 const isTypingTarget = (target: EventTarget | null): boolean => {
@@ -182,8 +215,11 @@ function App() {
 
   if (!authReady || (authenticated && !loaded)) {
     return (
-      <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)] flex items-center justify-center">
-        <div className="text-sm text-[var(--muted-foreground)]">Loading...</div>
+      <div className="app-shell flex items-center justify-center">
+        <div className="surface-card flex items-center gap-3 px-5 py-4 text-sm text-[var(--muted-foreground)]">
+          <Gauge className="h-5 w-5 animate-pulse text-[var(--primary)]" aria-hidden="true" />
+          Loading your market workspace…
+        </div>
       </div>
     );
   }
@@ -220,68 +256,93 @@ function App() {
   };
 
   return (
-    <div className={`min-h-screen bg-[var(--background)] text-[var(--foreground)] border-t-4 ${tab === "live" ? "border-red-600" : "border-amber-500"}`}>
+    <div className="app-shell">
       {tab === "live" ? (
-        <div className="bg-red-700 px-4 py-1 text-center text-xs font-bold uppercase tracking-wide text-white">
-          Live trading controls &middot; real broker orders possible when armed &middot; real money at risk
+        <div className="mode-banner mode-banner-live px-4 py-2 text-center">
+          Live execution workspace &middot; broker orders are possible when armed &middot; real capital at risk
         </div>
       ) : (
-        <div className="bg-amber-500 px-4 py-1 text-center text-xs font-bold uppercase tracking-wide text-black">
-          Paper trading mode &middot; simulated fills only &middot; no broker order is ever submitted
+        <div className="mode-banner mode-banner-paper px-4 py-2 text-center">
+          Paper workspace &middot; simulated fills only &middot; no broker order submitted
         </div>
       )}
-      <header className="border-b border-[var(--border)] bg-[var(--card)]">
-        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-bold tracking-tight">
-              Market Analysis — Microservices
-            </h1>
-            <p className="text-xs text-[var(--muted-foreground)]">
-              Quant signals &middot; Half-Kelly sizing &middot; Capital preservation
-            </p>
+      <header className="app-header">
+        <div className="mx-auto flex max-w-[1600px] flex-col gap-3 px-4 py-3 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="brand-mark" aria-hidden="true">
+              <Sparkles className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="section-kicker">Portfolio intelligence</div>
+              <h1 className="truncate text-lg font-bold tracking-tight sm:text-xl">
+                Market Analysis
+              </h1>
+              <p className="hidden text-xs text-[var(--muted-foreground)] sm:block">
+                Research, risk controls, and execution oversight in one workspace
+              </p>
+            </div>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
             <button
               onClick={() => { setShowOnboarding(true); }}
-              className="text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+              className="status-chip hover:border-[var(--primary)] hover:text-[var(--foreground)]"
               title="Re-run the Getting Started wizard"
             >
+              <WandSparkles className="h-3.5 w-3.5" aria-hidden="true" />
               Setup Wizard
             </button>
             {authEnabled && (
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-[var(--muted-foreground)]">{authUsername ?? "Authenticated user"}</span>
+              <div className="status-chip">
+                <User className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>{authUsername ?? "Authenticated user"}</span>
                 <button
-                  className="rounded border border-[var(--border)] px-2 py-1 hover:bg-[var(--muted)]"
+                  className="ml-1 rounded-full p-1 text-[var(--muted-foreground)] hover:bg-[var(--muted)] hover:text-[var(--foreground)]"
                   onClick={logout}
                   type="button"
+                  aria-label="Sign out"
+                  title="Sign out"
                 >
-                  Sign out
+                  <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
                 </button>
               </div>
             )}
-            <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
-              <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+            <div className="status-chip">
+              <div className="status-dot" aria-hidden="true" />
               System Active
             </div>
           </div>
         </div>
       </header>
 
-      <main className="container mx-auto max-w-full overflow-x-hidden px-4 py-6 space-y-6">
+      <main className="mx-auto max-w-[1600px] space-y-6 overflow-x-hidden px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+        <div className="flex flex-col gap-2 border-b border-[var(--border-subtle)] pb-5 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <div className="section-kicker">Daily command center</div>
+            <h2 className="section-title mt-1 text-2xl font-bold sm:text-3xl">Portfolio overview</h2>
+            <p className="mt-1 max-w-2xl text-sm text-[var(--muted-foreground)]">
+              Prioritize decisions, monitor portfolio risk, and move from research to action with clear context.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
+            <ShieldCheck className="h-4 w-4 text-[var(--primary)]" aria-hidden="true" />
+            Capital-preservation controls enabled
+          </div>
+        </div>
+
         <ActionInbox onOpenContext={openContext} />
 
-        <div className="flex flex-col gap-1 text-[10px] text-[var(--muted-foreground)] sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-2 text-[11px] text-[var(--muted-foreground)] sm:flex-row sm:items-center sm:justify-between">
           <button
             onClick={() => setShowShortcuts((current) => !current)}
             aria-expanded={showShortcuts}
             aria-controls="keyboard-shortcuts"
-            className="self-start rounded border px-2 py-0.5 focus-visible:ring-2 focus-visible:ring-blue-400"
+            className="status-chip self-start"
           >
-            Keyboard shortcuts (press ?)
+            <Keyboard className="h-3.5 w-3.5" aria-hidden="true" />
+            Keyboard shortcuts
           </button>
           {showShortcuts && (
-            <ul id="keyboard-shortcuts" className="flex flex-wrap gap-3">
+            <ul id="keyboard-shortcuts" className="surface-card flex flex-wrap gap-3 px-3 py-2">
               <li><kbd className="rounded border px-1">a</kbd> focus Action Required</li>
               <li><kbd className="rounded border px-1">d</kbd> jump to dashboard</li>
               <li><kbd className="rounded border px-1">[</kbd> / <kbd className="rounded border px-1">]</kbd> previous / next tab</li>
@@ -292,47 +353,64 @@ function App() {
 
         <DashboardWidget />
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-1">
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+          <div>
             <WatchlistPanel onViewChart={(t) => { setSelectedChartTicker(t); setTab("chart"); }} />
           </div>
-          <div className="lg:col-span-2">
+          <div className="xl:col-span-2">
             <PortfolioPanel />
           </div>
         </div>
 
-        <div className="flex gap-2 border-b border-[var(--border)] pb-2 overflow-x-auto">
-          {(Object.keys(tabLabels) as Tab[]).map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`px-4 py-1.5 text-sm rounded-t whitespace-nowrap ${
-                tab === t ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : "text-[var(--muted-foreground)]"
-              }`}
-            >
-              {tabLabels[t]}
-            </button>
-          ))}
-        </div>
+        <section aria-labelledby="workspace-heading" className="space-y-4 pt-2">
+          <div>
+            <div className="section-kicker">Workspace</div>
+            <h2 id="workspace-heading" className="section-title mt-1 text-xl font-bold">Analysis &amp; execution tools</h2>
+          </div>
+          <div className="workspace-nav scroll-fade flex gap-1 overflow-x-auto rounded-xl border border-[var(--border-subtle)] bg-[var(--background-elevated)] p-1.5">
+            {(Object.keys(tabLabels) as Tab[]).map((t) => {
+              const Icon = TAB_ICONS[t];
+              return (
+                <button
+                  key={t}
+                  onClick={() => setTab(t)}
+                  className={`nav-pill ${tab === t ? "nav-pill-active" : ""}`}
+                  aria-current={tab === t ? "page" : undefined}
+                >
+                  <Icon className="h-4 w-4" aria-hidden="true" />
+                  {tabLabels[t]}
+                </button>
+              );
+            })}
+          </div>
 
-        {tab === "alerts" && <AlertsPanel />}
-        {tab === "orders" && <OrdersPanel focus={focus ?? undefined} />}
-        {tab === "live" && <LiveTradingPanel />}
-        {tab === "trades" && (
-          <TradesPanel focus={focus ?? undefined} onClearFocus={() => setFocus(null)} />
-        )}
-        {tab === "performance" && <AttributionPanel />}
-        {tab === "scanner" && <ScannerPanel focus={focus ?? undefined} />}
-        {tab === "price-alerts" && <PriceAlertsPanel />}
-        {tab === "chart" && <HistoricalChart ticker={selectedChartTicker} />}
-        {tab === "settings" && <SettingsPanel focus={focus ?? undefined} />}
-        {tab === "help" && <HelpPanel />}
+          <div className="min-w-0">
+            {tab === "alerts" && <AlertsPanel />}
+            {tab === "orders" && <OrdersPanel focus={focus ?? undefined} />}
+            {tab === "live" && <LiveTradingPanel />}
+            {tab === "trades" && (
+              <TradesPanel focus={focus ?? undefined} onClearFocus={() => setFocus(null)} />
+            )}
+            {tab === "performance" && <AttributionPanel />}
+            {tab === "scanner" && <ScannerPanel focus={focus ?? undefined} />}
+            {tab === "price-alerts" && <PriceAlertsPanel />}
+            {tab === "chart" && <HistoricalChart ticker={selectedChartTicker} />}
+            {tab === "settings" && <SettingsPanel focus={focus ?? undefined} />}
+            {tab === "help" && <HelpPanel />}
+          </div>
+        </section>
       </main>
 
-      <footer className="border-t border-[var(--border)] py-4 mt-8">
-        <div className="container mx-auto px-4 text-center text-xs text-[var(--muted-foreground)]">
-          Market Analysis v{APP_VERSION} &middot; Capital Preservation First &middot; Docker Orchestrated
-          &middot; <span className="font-semibold text-amber-500">PAPER</span>
+      <footer className="mt-10 border-t border-[var(--border-subtle)] bg-[var(--background-elevated)]/60 py-5">
+        <div className="mx-auto flex max-w-[1600px] flex-col items-center justify-between gap-2 px-4 text-xs text-[var(--muted-foreground)] sm:flex-row sm:px-6 lg:px-8">
+          <span>Market Analysis v{APP_VERSION} &middot; Decision support, not financial advice</span>
+          <span className="inline-flex items-center gap-2">
+            <span className="status-dot" aria-hidden="true" />
+            Capital preservation first &middot;{" "}
+            <strong className={tab === "live" ? "text-red-400" : "text-amber-400"}>
+              {tab === "live" ? "LIVE" : "PAPER"}
+            </strong>
+          </span>
         </div>
       </footer>
     </div>
