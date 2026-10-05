@@ -53,12 +53,13 @@ command_help() {
   case "$1" in
     install)
       cat <<'EOF'
-Usage: ./manage install [--base-url URL] [--bind-address ADDRESS] [--no-start]
+Usage: ./manage install [--base-url URL] [--bind-address ADDRESS] [--enable-auth] [--no-start]
 
 Creates .env from .env.example when needed, generates required secrets without
 printing them, validates Docker Compose, and starts the application. Use a
 remote-lab URL such as https://market.lab.example and an explicit bind address
-when the dashboard is not accessed through localhost.
+when the dashboard is not accessed through localhost. Non-loopback bindings
+require --enable-auth or an existing AUTH_ENABLED=true setting.
 EOF
       ;;
     start)
@@ -200,6 +201,7 @@ generate_missing_secrets() {
 prepare_env() {
   local base_url="$1"
   local bind_address="$2"
+  local enable_auth="$3"
 
   if [[ ! -f "$ENV_FILE" ]]; then
     [[ -f "$ENV_EXAMPLE" ]] || fail ".env.example is missing."
@@ -210,14 +212,16 @@ prepare_env() {
   if [[ -n "$base_url" ]]; then
     validate_base_url "$base_url"
     set_env_value PUBLIC_BASE_URL "$base_url"
-  elif [[ -z "$(env_value PUBLIC_BASE_URL)" ]]; then
-    set_env_value PUBLIC_BASE_URL "http://localhost:$(env_value FRONTEND_PORT)"
   fi
 
   if [[ -n "$bind_address" ]]; then
     set_env_value HOST_BIND_ADDRESS "$bind_address"
   elif [[ -z "$(env_value HOST_BIND_ADDRESS)" ]]; then
-    set_env_value HOST_BIND_ADDRESS "0.0.0.0"
+    set_env_value HOST_BIND_ADDRESS "127.0.0.1"
+  fi
+
+  if [[ "$enable_auth" -eq 1 ]]; then
+    set_env_value AUTH_ENABLED "true"
   fi
 
   generate_missing_secrets
@@ -226,6 +230,13 @@ prepare_env() {
 
 validate_compose() {
   require_env
+  local bind_address auth_enabled
+  bind_address="$(env_value HOST_BIND_ADDRESS)"
+  bind_address="${bind_address:-127.0.0.1}"
+  auth_enabled="$(env_value AUTH_ENABLED)"
+  if [[ "$bind_address" != "127.0.0.1" && "${auth_enabled,,}" != "true" ]]; then
+    fail "AUTH_ENABLED=true is required when HOST_BIND_ADDRESS is not 127.0.0.1. Re-run install with --enable-auth."
+  fi
   compose config --quiet || fail "Docker Compose configuration is invalid. Review the error above and .env."
 }
 
@@ -272,6 +283,7 @@ public_url() {
 install_command() {
   local base_url=""
   local bind_address=""
+  local enable_auth=0
   local no_start=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -289,6 +301,10 @@ install_command() {
         no_start=1
         shift
         ;;
+      --enable-auth)
+        enable_auth=1
+        shift
+        ;;
       *)
         fail "Unknown install option '$1'. Run './manage install --help'."
         ;;
@@ -296,7 +312,7 @@ install_command() {
   done
 
   preflight
-  prepare_env "$base_url" "$bind_address"
+  prepare_env "$base_url" "$bind_address" "$enable_auth"
   validate_compose
   if [[ "$no_start" -eq 1 ]]; then
     info "Installation configuration is ready. Secrets were written to .env without being displayed."
@@ -398,13 +414,23 @@ archive_volume() {
   local filename="$3"
   docker run --rm \
     --volume "$volume:/source:ro" \
-    --volume "$backup_dir:/backup" \
     python:3.12-slim \
-    python -c "import sys, tarfile; archive=tarfile.open('/backup/' + sys.argv[1], 'w:gz'); archive.add('/source', arcname='.'); archive.close()" \
+    python -c "import sys, tarfile; archive=tarfile.open(fileobj=sys.stdout.buffer, mode='w|gz'); archive.add('/source', arcname='.'); archive.close()" \
+    "$filename" \
+    >"$backup_dir/$filename"
+}
+
+validate_archive() {
+  local backup_dir="$1"
+  local filename="$2"
+  docker run --rm \
+    --volume "$backup_dir:/backup:ro" \
+    python:3.12-slim \
+    python -c "import pathlib, sys, tarfile; archive=tarfile.open('/backup/' + sys.argv[1]); members=archive.getmembers(); invalid=[m.name for m in members if pathlib.PurePosixPath(m.name).is_absolute() or '..' in pathlib.PurePosixPath(m.name).parts or m.issym() or m.islnk() or m.isdev() or m.isfifo()]; invalid and sys.exit('unsafe archive member: ' + invalid[0]); [(lambda stream: [None for _ in iter(lambda: stream.read(1024 * 1024), b'')])(archive.extractfile(m)) for m in members if m.isfile()]; archive.close()" \
     "$filename"
 }
 
-restore_volume() {
+extract_archive() {
   local volume="$1"
   local backup_dir="$2"
   local filename="$3"
@@ -416,42 +442,83 @@ restore_volume() {
     "$filename"
 }
 
+copy_volume() {
+  local source="$1"
+  local destination="$2"
+  docker run --rm \
+    --volume "$source:/source:ro" \
+    --volume "$destination:/destination" \
+    python:3.12-slim \
+    python -c "import pathlib, shutil; source=pathlib.Path('/source'); destination=pathlib.Path('/destination'); [shutil.rmtree(item) if item.is_dir() else item.unlink() for item in destination.iterdir()]; [shutil.copytree(item, destination / item.name, symlinks=False) if item.is_dir() else shutil.copy2(item, destination / item.name) for item in source.iterdir()]"
+}
+
+secure_backup_path() {
+  local backup_dir="$1"
+  chmod 700 "$backup_dir"
+  find "$backup_dir" -type f -exec chmod 600 {} +
+}
+
+restart_services() {
+  [[ $# -eq 0 ]] || compose start "$@"
+}
+
 backup_command() {
   local backup_dir="${1:-$ROOT_DIR/backups/$(date -u +%Y%m%dT%H%M%SZ)}"
   [[ $# -le 1 ]] || fail "Usage: ./manage backup [DIRECTORY]"
   preflight
   validate_compose
+  umask 077
   mkdir -p "$backup_dir"
   backup_dir="$(cd "$backup_dir" && pwd)"
+  secure_backup_path "$backup_dir"
 
-  local had_running=0
-  if [[ -n "$(compose ps --status running -q)" ]]; then
-    had_running=1
-  fi
   compose create data-ingestion quant-engine portfolio-engine >/dev/null
-  compose stop
+  local running_output
+  running_output="$(compose ps --services --status running)"
+  local -a running_services=()
+  if [[ -n "$running_output" ]]; then
+    while IFS= read -r service; do
+      [[ -z "$service" ]] || running_services+=("$service")
+    done <<<"$running_output"
+  fi
 
-  local spec service target filename volume backup_failed=0
+  local spec service target filename volume
+  local -a volumes=()
   for spec in "${VOLUME_SPECS[@]}"; do
     IFS=: read -r service target filename <<<"$spec"
     target="/${target#/}"
     volume="$(volume_name "$service" "$target")"
-    if [[ -z "$volume" ]] || ! archive_volume "$volume" "$backup_dir" "$filename"; then
-      backup_failed=1
-      break
-    fi
+    [[ -n "$volume" ]] || fail "Unable to resolve the $service data volume."
+    volumes+=("$volume")
   done
 
+  local backup_needs_restart=1
+  backup_on_error() {
+    local status=$?
+    trap - ERR
+    if [[ "$backup_needs_restart" -eq 1 ]]; then
+      restart_services "${running_services[@]}" >/dev/null 2>&1 || true
+    fi
+    printf 'Error: Backup failed. Previously running services were restarted when possible.\n' >&2
+    exit "$status"
+  }
+  trap backup_on_error ERR
+
+  [[ "${#running_services[@]}" -eq 0 ]] || compose stop "${running_services[@]}"
+  local index
+  for index in "${!VOLUME_SPECS[@]}"; do
+    filename="${VOLUME_SPECS[$index]##*:}"
+    archive_volume "${volumes[$index]}" "$backup_dir" "$filename"
+  done
   {
     printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'git_commit=%s\n' "$(git rev-parse HEAD 2>/dev/null || printf unknown)"
   } >"$backup_dir/manifest.txt"
+  secure_backup_path "$backup_dir"
 
-  if [[ "$had_running" -eq 1 ]]; then
-    compose start
-    wait_for_services
-  fi
-  [[ "$backup_failed" -eq 0 ]] || fail "Backup failed. Existing services were returned to their prior running state when possible."
+  restart_services "${running_services[@]}"
+  backup_needs_restart=0
+  trap - ERR
   info "Backup created: $backup_dir"
 }
 
@@ -474,17 +541,73 @@ restore_command() {
   for spec in "${VOLUME_SPECS[@]}"; do
     filename="${spec##*:}"
     [[ -f "$backup_dir/$filename" ]] || fail "Backup is incomplete: missing $filename."
+    validate_archive "$backup_dir" "$filename"
   done
 
-  compose down
   compose create data-ingestion quant-engine portfolio-engine >/dev/null
-  local service target volume
-  for spec in "${VOLUME_SPECS[@]}"; do
+  local running_output service target volume index
+  running_output="$(compose ps --services --status running)"
+  local -a running_services=()
+  if [[ -n "$running_output" ]]; then
+    while IFS= read -r service; do
+      [[ -z "$service" ]] || running_services+=("$service")
+    done <<<"$running_output"
+  fi
+
+  local restore_id
+  restore_id="market-analysis-restore-$(date -u +%Y%m%d%H%M%S)-$$"
+  local -a live_volumes=()
+  local -a stage_volumes=()
+  local -a rollback_volumes=()
+  local rollback_ready_count=0
+  local restore_stopped=0
+
+  restore_on_error() {
+    local status=$?
+    trap - ERR
+    if [[ "$restore_stopped" -eq 1 ]]; then
+      for ((index = 0; index < rollback_ready_count; index++)); do
+        copy_volume "${rollback_volumes[$index]}" "${live_volumes[$index]}" >/dev/null 2>&1 || true
+      done
+      restart_services "${running_services[@]}" >/dev/null 2>&1 || true
+    fi
+    for volume in "${stage_volumes[@]}" "${rollback_volumes[@]}"; do
+      [[ -z "$volume" ]] || docker volume rm -f "$volume" >/dev/null 2>&1 || true
+    done
+    printf 'Error: Restore failed. Original data and service state were recovered when possible.\n' >&2
+    exit "$status"
+  }
+  trap restore_on_error ERR
+
+  for index in "${!VOLUME_SPECS[@]}"; do
+    spec="${VOLUME_SPECS[$index]}"
     IFS=: read -r service target filename <<<"$spec"
     target="/${target#/}"
     volume="$(volume_name "$service" "$target")"
     [[ -n "$volume" ]] || fail "Unable to resolve the $service data volume."
-    restore_volume "$volume" "$backup_dir" "$filename"
+    live_volumes+=("$volume")
+    volume="${restore_id}-${index}-stage"
+    docker volume create "$volume" >/dev/null
+    stage_volumes+=("$volume")
+    extract_archive "$volume" "$backup_dir" "$filename"
+    volume="${restore_id}-${index}-rollback"
+    docker volume create "$volume" >/dev/null
+    rollback_volumes+=("$volume")
+  done
+
+  [[ "${#running_services[@]}" -eq 0 ]] || compose stop "${running_services[@]}"
+  restore_stopped=1
+  for index in "${!live_volumes[@]}"; do
+    copy_volume "${live_volumes[$index]}" "${rollback_volumes[$index]}"
+    rollback_ready_count=$((rollback_ready_count + 1))
+  done
+  for index in "${!live_volumes[@]}"; do
+    copy_volume "${stage_volumes[$index]}" "${live_volumes[$index]}"
+  done
+
+  trap - ERR
+  for volume in "${stage_volumes[@]}" "${rollback_volumes[@]}"; do
+    docker volume rm -f "$volume" >/dev/null 2>&1 || true
   done
 
   if [[ "$no_start" -eq 1 ]]; then

@@ -3,7 +3,7 @@ services:
   data-ingestion:
     build: ./services/data-ingestion
     ports:
-      - "${HOST_BIND_ADDRESS:-0.0.0.0}:${DATA_INGESTION_PORT:-8000}:8000"
+      - "127.0.0.1:${DATA_INGESTION_PORT:-8000}:8000"
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/data_ingestion.db
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-}
@@ -25,7 +25,7 @@ services:
   quant-engine:
     build: ./services/quant-engine
     ports:
-      - "${HOST_BIND_ADDRESS:-0.0.0.0}:${QUANT_ENGINE_PORT:-8001}:8001"
+      - "127.0.0.1:${QUANT_ENGINE_PORT:-8001}:8001"
     environment:
       - RISK_REWARD_RATIO=${RISK_REWARD_RATIO:-3.0}
       - ATR_STOP_MULTIPLIER=${ATR_STOP_MULTIPLIER:-1.5}
@@ -54,7 +54,7 @@ services:
   portfolio-engine:
     build: ./services/portfolio-engine
     ports:
-      - "${HOST_BIND_ADDRESS:-0.0.0.0}:${PORTFOLIO_ENGINE_PORT:-8002}:8002"
+      - "127.0.0.1:${PORTFOLIO_ENGINE_PORT:-8002}:8002"
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/portfolio.db
       - QUANT_ENGINE_URL=http://quant-engine:8001
@@ -76,7 +76,7 @@ services:
   notification-gateway:
     build: ./services/notification-gateway
     ports:
-      - "${HOST_BIND_ADDRESS:-0.0.0.0}:${NOTIFICATION_GATEWAY_PORT:-8003}:8003"
+      - "127.0.0.1:${NOTIFICATION_GATEWAY_PORT:-8003}:8003"
     environment:
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-}
       - SMTP_PORT=${SMTP_PORT:-587}
@@ -98,7 +98,7 @@ services:
   frontend:
     build: ./services/frontend
     ports:
-      - "${HOST_BIND_ADDRESS:-0.0.0.0}:${FRONTEND_PORT:-3000}:80"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-3000}:80"
     networks:
       - trading_network
     depends_on:
