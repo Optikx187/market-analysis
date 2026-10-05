@@ -1,6 +1,8 @@
 import os
 from typing import Optional
+from urllib.parse import urlparse
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -52,6 +54,30 @@ class Settings(BaseSettings):
     JWT_EXPIRY_HOURS: int = 24
     CREDENTIAL_ENCRYPTION_KEYS: str = ""
     INTERNAL_SERVICE_TOKEN: str = ""
+    DEPLOYMENT_PROFILE: str = "single-node"
+    PUBLIC_BASE_URL: str = "http://localhost:3000"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+
+    @property
+    def allowed_origins(self) -> list[str]:
+        return [
+            origin.strip().rstrip("/")
+            for origin in self.ALLOWED_ORIGINS.split(",")
+            if origin.strip()
+        ]
+
+    @model_validator(mode="after")
+    def validate_deployment_profile(self) -> "Settings":
+        if self.DEPLOYMENT_PROFILE.strip().lower() != "sandbox":
+            return self
+        if self.LIVE_TRADING_ENABLED:
+            raise ValueError("sandbox cannot enable live trading")
+        broker_host = urlparse(self.LIVE_BROKER_BASE_URL).hostname or ""
+        if broker_host not in {"localhost", "127.0.0.1"} and not broker_host.endswith(
+            ".invalid"
+        ):
+            raise ValueError("sandbox broker endpoint must be local or use a reserved .invalid host")
+        return self
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

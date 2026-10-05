@@ -91,7 +91,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Quant Engine Service", version="3.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
+    allow_origins=settings.allowed_origins, allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
 
@@ -718,7 +718,12 @@ async def _scanner_loop():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "service": "quant-engine"}
+    return {
+        "status": "healthy",
+        "service": "quant-engine",
+        "deployment_profile": settings.DEPLOYMENT_PROFILE,
+        "scanner_enabled": settings.SCAN_ENABLED,
+    }
 
 
 @app.post("/api/analyze", response_model=Optional[SignalResponse])

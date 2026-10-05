@@ -9,11 +9,12 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from pydantic_settings import BaseSettings
 
 from credentials import get_provider_credentials
@@ -31,6 +32,37 @@ class Settings(BaseSettings):
     NOTIFY_SLACK_ENABLED: bool = True
     NOTIFY_EMAIL_ENABLED: bool = True
     NOTIFY_SMS_ENABLED: bool = True
+    DEPLOYMENT_PROFILE: str = "single-node"
+    PUBLIC_BASE_URL: str = "http://localhost:3000"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+    NOTIFICATION_MODE: str = "live"
+    TELEGRAM_API_BASE_URL: str = "https://api.telegram.org"
+    TWILIO_API_BASE_URL: str = "https://api.twilio.com"
+
+    @property
+    def allowed_origins(self) -> list[str]:
+        return [
+            origin.strip().rstrip("/")
+            for origin in self.ALLOWED_ORIGINS.split(",")
+            if origin.strip()
+        ]
+
+    @model_validator(mode="after")
+    def validate_deployment_profile(self) -> "Settings":
+        profile = self.DEPLOYMENT_PROFILE.strip().lower()
+        mode = self.NOTIFICATION_MODE.strip().lower()
+        if mode not in {"live", "fake"}:
+            raise ValueError("NOTIFICATION_MODE must be 'live' or 'fake'")
+        if profile == "sandbox":
+            if mode != "fake":
+                raise ValueError("sandbox requires NOTIFICATION_MODE=fake")
+            endpoint_hosts = {
+                urlparse(self.TELEGRAM_API_BASE_URL).hostname,
+                urlparse(self.TWILIO_API_BASE_URL).hostname,
+            }
+            if any(not host or not host.endswith(".invalid") for host in endpoint_hosts):
+                raise ValueError("sandbox notification endpoints must use reserved .invalid hosts")
+        return self
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
@@ -38,9 +70,30 @@ class Settings(BaseSettings):
 settings = Settings()
 
 _bot_task: Optional[asyncio.Task] = None
+_fake_deliveries: list[dict[str, str]] = []
+
+_FAKE_CREDENTIALS = {
+    "telegram": {
+        "TELEGRAM_BOT_TOKEN": "sandbox-token",
+        "TELEGRAM_CHAT_ID": "sandbox-chat",
+    },
+    "discord": {"DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook"},
+    "slack": {"SLACK_WEBHOOK_URL": "https://slack.invalid/webhook"},
+    "email": {
+        "SMTP_HOST": "smtp.invalid",
+        "EMAIL_TO": "sandbox@example.invalid",
+    },
+    "sms": {
+        "TWILIO_ACCOUNT_SID": "sandbox-account",
+        "TWILIO_AUTH_TOKEN": "sandbox-token",
+        "SMS_TO_NUMBER": "+15555550100",
+    },
+}
 
 
 async def _credentials(provider: str) -> dict[str, str]:
+    if settings.NOTIFICATION_MODE.strip().lower() == "fake":
+        return dict(_FAKE_CREDENTIALS[provider])
     return await get_provider_credentials(
         provider,
         portfolio_engine_url=settings.PORTFOLIO_ENGINE_URL,
@@ -51,6 +104,9 @@ async def _credentials(provider: str) -> dict[str, str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _bot_task
+    if settings.NOTIFICATION_MODE.strip().lower() == "fake":
+        yield
+        return
     telegram = await _credentials("telegram")
     bot_token = telegram.get("TELEGRAM_BOT_TOKEN")
     chat_id = telegram.get("TELEGRAM_CHAT_ID")
@@ -70,7 +126,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Notification Gateway", version="2.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
+    allow_origins=settings.allowed_origins, allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
 
@@ -110,7 +166,26 @@ def format_alert(p: NotificationPayload) -> str:
     )
 
 
+def _record_fake_delivery(channel: str, message: str, enabled: bool) -> bool:
+    if not enabled:
+        return False
+    _fake_deliveries.append(
+        {
+            "channel": channel,
+            "message": message,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    if len(_fake_deliveries) > 500:
+        _fake_deliveries.pop(0)
+    return True
+
+
 async def send_telegram(message: str, force: bool = False) -> bool:
+    if settings.NOTIFICATION_MODE.strip().lower() == "fake":
+        return _record_fake_delivery(
+            "telegram", message, force or settings.NOTIFY_TELEGRAM_ENABLED
+        )
     credentials = await _credentials("telegram")
     bot_token = credentials.get("TELEGRAM_BOT_TOKEN")
     chat_id = credentials.get("TELEGRAM_CHAT_ID")
@@ -120,7 +195,7 @@ async def send_telegram(message: str, force: bool = False) -> bool:
     if not force and not settings.NOTIFY_TELEGRAM_ENABLED:
         logger.info("Telegram disabled via NOTIFY_TELEGRAM_ENABLED")
         return False
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    url = f"{settings.TELEGRAM_API_BASE_URL.rstrip('/')}/bot{bot_token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message}
     try:
         async with httpx.AsyncClient() as client:
@@ -134,6 +209,10 @@ async def send_telegram(message: str, force: bool = False) -> bool:
 
 
 async def send_discord(message: str, force: bool = False) -> bool:
+    if settings.NOTIFICATION_MODE.strip().lower() == "fake":
+        return _record_fake_delivery(
+            "discord", message, force or settings.NOTIFY_DISCORD_ENABLED
+        )
     credentials = await _credentials("discord")
     webhook_url = credentials.get("DISCORD_WEBHOOK_URL")
     if not webhook_url:
@@ -155,7 +234,19 @@ async def send_discord(message: str, force: bool = False) -> bool:
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "service": "notification-gateway"}
+    return {
+        "status": "healthy",
+        "service": "notification-gateway",
+        "deployment_profile": settings.DEPLOYMENT_PROFILE,
+        "notification_mode": settings.NOTIFICATION_MODE,
+    }
+
+
+@app.get("/api/notify/sandbox-deliveries")
+async def sandbox_deliveries():
+    if settings.NOTIFICATION_MODE.strip().lower() != "fake":
+        raise HTTPException(404, "Sandbox deliveries are unavailable")
+    return {"deliveries": list(_fake_deliveries)}
 
 
 @app.get("/api/settings/credentials")
@@ -310,6 +401,10 @@ async def get_reply_trades():
 # --- Phase 9: Additional Notification Channels ---
 
 async def send_slack(message: str, force: bool = False) -> bool:
+    if settings.NOTIFICATION_MODE.strip().lower() == "fake":
+        return _record_fake_delivery(
+            "slack", message, force or settings.NOTIFY_SLACK_ENABLED
+        )
     credentials = await _credentials("slack")
     webhook_url = credentials.get("SLACK_WEBHOOK_URL")
     if not webhook_url:
@@ -328,6 +423,12 @@ async def send_slack(message: str, force: bool = False) -> bool:
 
 
 async def send_email(subject: str, body: str, force: bool = False) -> bool:
+    if settings.NOTIFICATION_MODE.strip().lower() == "fake":
+        return _record_fake_delivery(
+            "email",
+            f"{subject}\n{body}",
+            force or settings.NOTIFY_EMAIL_ENABLED,
+        )
     credentials = await _credentials("email")
     smtp_host = credentials.get("SMTP_HOST")
     email_to = credentials.get("EMAIL_TO")
@@ -356,6 +457,10 @@ async def send_email(subject: str, body: str, force: bool = False) -> bool:
 
 
 async def send_sms(message: str, force: bool = False) -> bool:
+    if settings.NOTIFICATION_MODE.strip().lower() == "fake":
+        return _record_fake_delivery(
+            "sms", message, force or settings.NOTIFY_SMS_ENABLED
+        )
     credentials = await _credentials("sms")
     account_sid = credentials.get("TWILIO_ACCOUNT_SID")
     auth_token = credentials.get("TWILIO_AUTH_TOKEN")
@@ -365,7 +470,10 @@ async def send_sms(message: str, force: bool = False) -> bool:
     if not force and not settings.NOTIFY_SMS_ENABLED:
         return False
     try:
-        url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+        url = (
+            f"{settings.TWILIO_API_BASE_URL.rstrip('/')}/2010-04-01/"
+            f"Accounts/{account_sid}/Messages.json"
+        )
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 url,

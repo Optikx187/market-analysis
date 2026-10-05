@@ -252,6 +252,7 @@ function Initialize-Env([string]$BaseUrl, [string]$BindAddress, [bool]$EnableAut
     if (-not [string]::IsNullOrEmpty($BaseUrl)) {
         Assert-BaseUrl $BaseUrl
         Set-EnvValue -Key "PUBLIC_BASE_URL" -Value $BaseUrl
+        Set-EnvValue -Key "ALLOWED_ORIGINS" -Value $BaseUrl.TrimEnd("/")
     }
 
     if (-not [string]::IsNullOrEmpty($BindAddress)) {

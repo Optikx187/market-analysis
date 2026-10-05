@@ -1,0 +1,60 @@
+services:
+  data-ingestion:
+    environment:
+      DEPLOYMENT_PROFILE: multi-worker
+    volumes:
+      - multi-worker-data-ingestion-db:/app/data
+
+  quant-engine:
+    environment:
+      DEPLOYMENT_PROFILE: multi-worker
+    volumes:
+      - multi-worker-quant-engine-db:/app/data
+
+  portfolio-engine:
+    environment:
+      DEPLOYMENT_PROFILE: multi-worker
+    volumes:
+      - multi-worker-portfolio-db:/app/data
+      - ./.env:/workspace/.env
+
+  notification-gateway:
+    environment:
+      DEPLOYMENT_PROFILE: multi-worker
+
+  quant-worker:
+    build: ./services/quant-engine
+    profiles:
+      - multi-worker
+    expose:
+      - "8001"
+    environment:
+      RISK_REWARD_RATIO: ${RISK_REWARD_RATIO:-3.0}
+      ATR_STOP_MULTIPLIER: ${ATR_STOP_MULTIPLIER:-1.5}
+      TRAILING_STOP_PCT: ${TRAILING_STOP_PCT:-0.02}
+      ATR_VOLATILITY_THRESHOLD: ${ATR_VOLATILITY_THRESHOLD:-2.0}
+      SCAN_ENABLED: "false"
+      MARKET_HOURS_ONLY: ${MARKET_HOURS_ONLY:-true}
+      DATA_INGESTION_URL: http://data-ingestion:8000
+      PORTFOLIO_ENGINE_URL: http://portfolio-engine:8002
+      NOTIFICATION_GATEWAY_URL: http://notification-gateway:8003
+      BACKTEST_DATABASE_PATH: /tmp/backtests.db
+      DEPLOYMENT_PROFILE: multi-worker
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+    networks:
+      - trading_network
+    depends_on:
+      data-ingestion:
+        condition: service_healthy
+      portfolio-engine:
+        condition: service_started
+      notification-gateway:
+        condition: service_started
+    deploy:
+      replicas: ${QUANT_WORKER_REPLICAS:-2}
+
+volumes:
+  multi-worker-data-ingestion-db:
+  multi-worker-quant-engine-db:
+  multi-worker-portfolio-db:

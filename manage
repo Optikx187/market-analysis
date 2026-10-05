@@ -212,6 +212,7 @@ prepare_env() {
   if [[ -n "$base_url" ]]; then
     validate_base_url "$base_url"
     set_env_value PUBLIC_BASE_URL "$base_url"
+    set_env_value ALLOWED_ORIGINS "${base_url%/}"
   fi
 
   if [[ -n "$bind_address" ]]; then

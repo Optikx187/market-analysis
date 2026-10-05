@@ -119,6 +119,7 @@ class ManageCommandTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         env_contents = (self.temp_dir / ".env").read_text()
         self.assertIn("PUBLIC_BASE_URL=https://market.lab.example", env_contents)
+        self.assertIn("ALLOWED_ORIGINS=https://market.lab.example", env_contents)
         self.assertIn("HOST_BIND_ADDRESS=192.0.2.10", env_contents)
         self.assertIn("AUTH_ENABLED=true", env_contents)
         self.assertIn("CREDENTIAL_ENCRYPTION_KEYS=mock-fernet-secret", env_contents)

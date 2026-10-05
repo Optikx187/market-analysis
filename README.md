@@ -18,22 +18,25 @@ It combines:
 
 ## Current deployment scope
 
-The repository currently supports a **single Docker Compose host**. It is suitable for a local lab, private workstation, or sandbox server.
+The repository supports portable Docker Compose profiles for a private
+workstation, deterministic sandbox, single remote-lab host, and a
+multi-worker-ready topology.
 
 The current release is **not yet horizontally scalable**:
 
 - market data, portfolio state, and backtests use separate SQLite databases;
 - scanner scheduling, deduplication, and some notification state are held in process memory;
-- multiple quant-engine replicas would run duplicate schedulers;
+- durable scheduled-work distribution still requires leases and a broker;
 - watchlists, market data, and price alerts are shared rather than tenant-scoped;
 - there is no durable notification queue or multi-destination routing model;
-- the Compose file exposes backend ports on the host.
+- only the frontend/nginx edge is published on the host; backend services stay
+  private to the Compose network.
 
 Do not run multiple active application clusters against copies of the same SQLite files. A PostgreSQL-backed, job-leased architecture is required before multi-host tracker workers are safe.
 
 ## Architecture
 
-| Service | Port | Responsibility | Durable state |
+| Service | Network port | Responsibility | Durable state |
 | --- | ---: | --- | --- |
 | Frontend | `3000` | React dashboard and nginx API proxy | Browser session state |
 | Data ingestion | `8000` | Assets, OHLCV candles, quotes, data quality, price alerts, earnings | SQLite named volume |
@@ -45,10 +48,11 @@ Do not run multiple active application clusters against copies of the same SQLit
 Browser
   |
   v
-Frontend / nginx :3000
+Frontend / nginx :3000 (host edge)
   |             |              |                  |
   v             v              v                  v
 Data :8000   Quant :8001   Portfolio :8002   Notifications :8003
+(private Compose network only)
                     |             |
                     +-------------+
 ```
@@ -131,6 +135,98 @@ dashboard URL and service status. The default dashboard is
 
 See [Operator management commands](docs/operator-management.md) for complete
 remote-lab, backup, restore, upgrade, log, and rollback instructions.
+
+## Deployment profiles
+
+The base Compose file remains the supported single-node default used by
+`manage` and `manage.ps1`. Add one profile overlay for explicit deployments.
+The commands are identical in Linux shells and Windows PowerShell.
+
+### Deterministic sandbox
+
+Initialize local secrets without starting the default profile:
+
+```bash
+./manage install --base-url http://sandbox.market.test --no-start
+```
+
+```powershell
+.\manage.ps1 install --base-url http://sandbox.market.test --no-start
+```
+
+Start the isolated sandbox:
+
+```bash
+docker compose -p market-analysis-sandbox \
+  -f docker-compose.yml \
+  -f deploy/compose.sandbox.yml \
+  up --build -d
+```
+
+```powershell
+docker compose -p market-analysis-sandbox `
+  -f docker-compose.yml `
+  -f deploy/compose.sandbox.yml `
+  up --build -d
+```
+
+The sandbox:
+
+- uses deterministic fake market candles and quotes;
+- captures fake Telegram, Discord, Slack, email, and SMS deliveries internally;
+- uses the deterministic paper-order engine as its broker boundary;
+- disables scheduled scans and hard-disables live execution;
+- rejects external market, notification, and broker endpoints at startup;
+- uses separate `sandbox-*` volumes;
+- requires no third-party credentials or provider calls after images exist.
+
+Add `sandbox.market.test` to the test machine's hosts file, or verify it without
+changing DNS:
+
+```bash
+curl --resolve sandbox.market.test:3000:127.0.0.1 \
+  http://sandbox.market.test:3000/api/status
+```
+
+### Explicit single-node profile
+
+The following is equivalent to the default topology and preserves the existing
+single-node volume paths:
+
+```text
+docker compose -f docker-compose.yml -f deploy/compose.single-node.yml up --build -d
+```
+
+### Multi-worker-ready profile
+
+```bash
+docker compose -p market-analysis-workers \
+  -f docker-compose.yml \
+  -f deploy/compose.multi-worker.yml \
+  --profile multi-worker \
+  up --build -d
+```
+
+```powershell
+docker compose -p market-analysis-workers `
+  -f docker-compose.yml `
+  -f deploy/compose.multi-worker.yml `
+  --profile multi-worker `
+  up --build -d
+```
+
+This profile adds two private, stateless quant worker containers by default and
+keeps the primary quant-engine scheduler as a singleton. Worker scanners are
+disabled so the profile cannot duplicate scheduled signals. Set
+`QUANT_WORKER_REPLICAS` to change the worker count. Durable job distribution,
+leases, and notification outboxes remain separate roadmap work; do not treat
+this profile as multi-host scheduling.
+
+### Profile rollback
+
+Stop the selected profile without `--volumes`, then start the prior profile.
+The single-node profile retains the original volume names. Sandbox and
+multi-worker profile data remain isolated in their own named volumes.
 
 ## Existing installation lifecycle
 
@@ -619,7 +715,8 @@ Some settings edited through the UI update the environment file. Use the Setting
 
 ## API documentation
 
-Each FastAPI service exposes interactive OpenAPI documentation when accessed directly:
+Each FastAPI service exposes interactive OpenAPI documentation when run
+directly for development:
 
 - data ingestion: `http://localhost:8000/docs`;
 - quant engine: `http://localhost:8001/docs`;
@@ -636,7 +733,8 @@ Major API groups:
 - `/api/auth`, `/api/settings`, `/api/live-trading`, `/api/live-orders`;
 - `/api/notify`.
 
-Backend ports should not remain publicly exposed in a production deployment.
+Containerized deployments intentionally do not publish backend ports. Use the
+nginx `/api/...` routes for application traffic.
 
 ## Local development
 
@@ -707,6 +805,10 @@ Compose validation:
 
 ```bash
 docker compose config
+docker compose -f docker-compose.yml -f deploy/compose.sandbox.yml config
+docker compose -f docker-compose.yml -f deploy/compose.single-node.yml config
+docker compose -f docker-compose.yml -f deploy/compose.multi-worker.yml \
+  --profile multi-worker config
 docker compose build
 ```
 
@@ -748,7 +850,7 @@ Enter the configured `SETTINGS_OPERATOR_TOKEN` in the Settings authorization con
 Check:
 
 ```bash
-curl http://localhost:8000/api/status
+curl http://localhost:3000/api/status
 docker compose logs data-ingestion
 ```
 
@@ -780,7 +882,7 @@ Use **Refresh Data** and inspect data-ingestion logs.
 Check:
 
 ```bash
-curl http://localhost:8001/api/scanner/status
+curl http://localhost:3000/api/scanner/status
 docker compose logs quant-engine
 ```
 
@@ -797,7 +899,7 @@ Review:
 Check channel status and gateway logs:
 
 ```bash
-curl http://localhost:8003/api/notify/channels
+curl http://localhost:3000/api/notify/channels
 docker compose logs notification-gateway
 ```
 
@@ -805,7 +907,7 @@ Verify credentials, provider network access, and channel enablement.
 
 ### Port conflict
 
-The current stack binds `3000`, `8000`, `8001`, `8002`, and `8003`.
+The current stack binds only the frontend edge port, `3000` by default.
 
 Identify the conflicting process or change the host-side Compose port mapping.
 
