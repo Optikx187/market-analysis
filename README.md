@@ -55,10 +55,55 @@ A highly performant, decoupled microservices platform for algorithmic market ana
 ## Quick Start
 
 ### Prerequisites
-- Docker & Docker Compose installed
+- Git and internet access
+- Docker Engine with the Compose v2 plugin, or Docker Desktop using Linux containers
 - (Optional) API keys for Binance, Alpaca, Telegram, Discord
 
-### 1. Configure Environment
+### 1. Install and start
+
+Linux or macOS:
+
+```bash
+git clone https://github.com/Optikx187/market-analysis.git
+cd market-analysis
+./manage install
+```
+
+Windows PowerShell:
+
+```powershell
+git clone https://github.com/Optikx187/market-analysis.git
+Set-Location market-analysis
+.\manage.ps1 install
+```
+
+The installer securely generates required local secrets, validates Compose,
+builds the images, starts the services, and waits for readiness. Provider and
+notification credentials are optional and can be added later through
+**Settings → Credentials**.
+
+For remote-lab addresses, backups, restore, upgrades, logs, and rollback, see
+[Operator management commands](docs/operator-management.md).
+
+### 2. Access the dashboard
+
+Open **http://localhost:3000** by default. Run `./manage status` or
+`.\manage.ps1 status` to display the configured operator URL and service
+status.
+
+### 3. Stop services
+
+```bash
+./manage stop
+```
+
+```powershell
+.\manage.ps1 stop
+```
+
+Named data volumes are preserved.
+
+### Manual configuration
 
 Run the interactive setup script to configure all API keys and credentials:
 
@@ -79,26 +124,16 @@ cp .env.example .env
 # Edit .env with your credentials
 ```
 
-### 2. Build & Run
+Then build and start with Compose:
 
 ```bash
-docker-compose up --build
+docker compose up --build
 ```
 
-### 3. Access the Dashboard
-
-Open **http://localhost:3000** in your browser.
-
-### 4. Stop Services
+### Run risk model tests
 
 ```bash
-docker-compose down
-```
-
-### 5. Run Risk Model Tests
-
-```bash
-docker-compose run --rm quant-engine pytest tests/ -v
+docker compose run --rm quant-engine pytest tests/ -v
 ```
 
 ## Local Development (Without Docker)
