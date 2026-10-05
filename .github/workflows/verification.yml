@@ -207,6 +207,7 @@ jobs:
         shell: pwsh
         run: |
           .\verify-changes.ps1 full `
+            --base-ref HEAD `
             --dry-run `
             --json artifacts\verification\windows.json `
             --junit artifacts\verification\windows.xml
