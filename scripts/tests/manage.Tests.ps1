@@ -95,6 +95,7 @@ exit 0
     Assert-True (-not $install.Output.Contains("mock-fernet-secret")) "Secret was printed."
     $envContents = Get-Content (Join-Path $TempRoot ".env") -Raw
     Assert-True ($envContents.Contains("PUBLIC_BASE_URL=https://market.lab.example")) "Base URL was not stored."
+    Assert-True ($envContents.Contains("ALLOWED_ORIGINS=https://market.lab.example")) "Allowed origin was not stored."
     Assert-True ($envContents.Contains("HOST_BIND_ADDRESS=192.0.2.10")) "Bind address was not stored."
     Assert-True ($envContents.Contains("AUTH_ENABLED=true")) "Authentication was not enabled."
     Assert-True ($envContents.Contains("CREDENTIAL_ENCRYPTION_KEYS=mock-fernet-secret")) "Secret was not generated."

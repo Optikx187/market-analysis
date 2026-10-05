@@ -1,0 +1,16 @@
+services:
+  data-ingestion:
+    environment:
+      DEPLOYMENT_PROFILE: single-node
+
+  quant-engine:
+    environment:
+      DEPLOYMENT_PROFILE: single-node
+
+  portfolio-engine:
+    environment:
+      DEPLOYMENT_PROFILE: single-node
+
+  notification-gateway:
+    environment:
+      DEPLOYMENT_PROFILE: single-node

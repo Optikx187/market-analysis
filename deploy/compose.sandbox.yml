@@ -1,0 +1,48 @@
+services:
+  data-ingestion:
+    environment:
+      DEPLOYMENT_PROFILE: sandbox
+      MARKET_DATA_MODE: fake
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://sandbox.market.test}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://sandbox.market.test}
+      BINANCE_REST_URL: https://binance.invalid/api/v3
+      YAHOO_CHART_URL: https://yahoo.invalid/chart
+      ALPACA_DATA_URL: https://alpaca-data.invalid/v2
+      ALPACA_TRADING_URL: https://alpaca-paper.invalid
+    volumes:
+      - sandbox-data-ingestion-db:/app/data
+
+  quant-engine:
+    environment:
+      DEPLOYMENT_PROFILE: sandbox
+      SCAN_ENABLED: "false"
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://sandbox.market.test}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://sandbox.market.test}
+    volumes:
+      - sandbox-quant-engine-db:/app/data
+
+  portfolio-engine:
+    environment:
+      DEPLOYMENT_PROFILE: sandbox
+      AUTH_ENABLED: ${SANDBOX_AUTH_ENABLED:-true}
+      LIVE_TRADING_ENABLED: "false"
+      LIVE_BROKER_BASE_URL: https://broker.invalid
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://sandbox.market.test}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://sandbox.market.test}
+    volumes:
+      - sandbox-portfolio-db:/app/data
+      - ./.env:/workspace/.env
+
+  notification-gateway:
+    environment:
+      DEPLOYMENT_PROFILE: sandbox
+      NOTIFICATION_MODE: fake
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://sandbox.market.test}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://sandbox.market.test}
+      TELEGRAM_API_BASE_URL: https://telegram.invalid
+      TWILIO_API_BASE_URL: https://twilio.invalid
+
+volumes:
+  sandbox-data-ingestion-db:
+  sandbox-quant-engine-db:
+  sandbox-portfolio-db:

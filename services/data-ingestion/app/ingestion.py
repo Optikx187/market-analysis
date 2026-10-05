@@ -11,13 +11,13 @@ from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.credentials import get_provider_credentials
+from app.config import settings
 from app.database import async_session
+from app.fake_market import fake_candles
 from app.models import Asset, AssetType, Candle
 
 logger = logging.getLogger(__name__)
 
-BINANCE_REST_URL = "https://api.binance.com/api/v3"
-ALPACA_DATA_URL = "https://data.alpaca.markets/v2"
 CRYPTO_BINANCE_MAP = {"BTC": "BTCUSDT", "ETH": "ETHUSDT"}
 
 CRYPTO_NAMES = {
@@ -79,7 +79,7 @@ async def fetch_historical_yfinance(
 async def fetch_historical_binance(
     symbol: str, interval: str = "1d", limit: int = 1000,
 ) -> pd.DataFrame:
-    url = f"{BINANCE_REST_URL}/klines"
+    url = f"{settings.BINANCE_REST_URL.rstrip('/')}/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     async with httpx.AsyncClient() as client:
         resp = await client.get(url, params=params, timeout=30)
@@ -106,7 +106,7 @@ async def fetch_historical_alpaca(
         return pd.DataFrame()
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
-    url = f"{ALPACA_DATA_URL}/stocks/{ticker}/bars"
+    url = f"{settings.ALPACA_DATA_URL.rstrip('/')}/stocks/{ticker}/bars"
     headers = {
         "APCA-API-KEY-ID": api_key,
         "APCA-API-SECRET-KEY": api_secret,
@@ -178,6 +178,8 @@ async def fetch_historical(
 ) -> pd.DataFrame:
     if interval not in {"1d", "4h", "1h"}:
         raise ValueError("interval must be one of: 1d, 4h, 1h")
+    if settings.MARKET_DATA_MODE.strip().lower() == "fake":
+        return fake_candles(ticker, asset_type, interval).tail(1000)
     if asset_type == AssetType.CRYPTO:
         symbol = get_binance_symbol(ticker)
         try:

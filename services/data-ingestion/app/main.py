@@ -19,6 +19,7 @@ from app.credentials import get_provider_credentials
 from app.database import get_db, init_db, async_session
 from app.models import Asset, AssetType, Candle, PriceAlert
 from app.data_quality import DataQualityReport, assess_data_quality
+from app.fake_market import fake_quote
 from app.ingestion import refresh_asset_data, load_candles
 from app.ingestion import get_binance_symbol, get_crypto_name, CRYPTO_NAMES
 
@@ -199,11 +200,17 @@ async def _check_provider_health(
 async def _health_check_loop():
     """Periodically check external API connectivity and auto-backfill on reconnect."""
     await asyncio.sleep(5)  # initial delay
+    if settings.MARKET_DATA_MODE.strip().lower() == "fake":
+        for provider in _connectivity:
+            _update_connectivity(provider, True)
+            record_api_success(provider)
+        while True:
+            await asyncio.sleep(60)
     first_check = True
     while True:
         try:
             binance_ok = await _check_provider_health(
-                "binance", "https://api.binance.com/api/v3/ping",
+                "binance", f"{settings.BINANCE_REST_URL.rstrip('/')}/ping",
                 any_response_ok=True,
             )
             was_binance_offline = not _connectivity["binance"]["online"]
@@ -213,7 +220,7 @@ async def _health_check_loop():
 
             yahoo_ok = await _check_provider_health(
                 "yahoo",
-                "https://query2.finance.yahoo.com/v8/finance/chart/SPY",
+                f"{settings.YAHOO_CHART_URL.rstrip('/')}/SPY",
                 any_response_ok=True,
             )
             was_yahoo_offline = not _connectivity["yahoo"]["online"]
@@ -227,7 +234,7 @@ async def _health_check_loop():
             if alpaca_credentials.get("ALPACA_API_KEY") and alpaca_credentials.get("ALPACA_API_SECRET"):
                 alpaca_ok = await _check_provider_health(
                     "alpaca",
-                    "https://paper-api.alpaca.markets/v2/clock",
+                    f"{settings.ALPACA_TRADING_URL.rstrip('/')}/v2/clock",
                     any_response_ok=True,
                 )
                 _update_connectivity("alpaca", alpaca_ok)
@@ -273,7 +280,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Data Ingestion Service", version="2.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
+    allow_origins=settings.allowed_origins, allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
 
@@ -467,13 +474,25 @@ async def get_candles(
 @app.get("/api/symbols/lookup/{ticker}", response_model=SymbolLookupResponse)
 async def lookup_symbol(ticker: str, asset_type: str = "stock"):
     ticker = ticker.strip().upper()
+    if settings.MARKET_DATA_MODE.strip().lower() == "fake":
+        normalized_type = "crypto" if asset_type.lower() == "crypto" else "stock"
+        quote = fake_quote(ticker, AssetType(normalized_type))
+        return SymbolLookupResponse(
+            ticker=ticker,
+            name=str(quote["name"]),
+            asset_type=normalized_type,
+            recognized=True,
+        )
     if asset_type.lower() == "crypto":
         symbol = get_binance_symbol(ticker)
         crypto_name = get_crypto_name(ticker)
         is_known = ticker in CRYPTO_NAMES_SET
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": symbol})
+                resp = await client.get(
+                    f"{settings.BINANCE_REST_URL.rstrip('/')}/ticker/price",
+                    params={"symbol": symbol},
+                )
                 resp.raise_for_status()
             record_api_success("binance")
             return SymbolLookupResponse(ticker=ticker, name=crypto_name, asset_type="crypto", recognized=True)
@@ -519,7 +538,7 @@ async def _alpaca_stock_quote(ticker: str) -> QuoteResponse | None:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             snap_resp = await client.get(
-                f"https://data.alpaca.markets/v2/stocks/{ticker}/snapshot",
+                f"{settings.ALPACA_DATA_URL.rstrip('/')}/stocks/{ticker}/snapshot",
                 headers=headers,
             )
             snap_resp.raise_for_status()
@@ -549,12 +568,18 @@ async def _alpaca_stock_quote(ticker: str) -> QuoteResponse | None:
 @app.get("/api/quotes/{ticker}", response_model=QuoteResponse)
 async def get_quote(ticker: str, asset_type: str = "stock"):
     ticker = ticker.strip().upper()
+    if settings.MARKET_DATA_MODE.strip().lower() == "fake":
+        normalized_type = AssetType.CRYPTO if asset_type.lower() == "crypto" else AssetType.STOCK
+        return QuoteResponse(**fake_quote(ticker, normalized_type))
     now = datetime.now(timezone.utc).isoformat()
     if asset_type.lower() == "crypto":
         symbol = get_binance_symbol(ticker)
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get("https://api.binance.com/api/v3/ticker/24hr", params={"symbol": symbol})
+                resp = await client.get(
+                    f"{settings.BINANCE_REST_URL.rstrip('/')}/ticker/24hr",
+                    params={"symbol": symbol},
+                )
                 resp.raise_for_status()
                 data = resp.json()
             record_api_success("binance")
@@ -659,6 +684,8 @@ async def system_status(db: AsyncSession = Depends(get_db)):
     warnings = sum(report.status == "warning" for report in reports)
     return {
         "service": "data-ingestion",
+        "deployment_profile": settings.DEPLOYMENT_PROFILE,
+        "market_data_mode": settings.MARKET_DATA_MODE,
         "started_at": _service_start_time,
         "current_time": datetime.now(timezone.utc).isoformat(),
         "last_api_calls": _api_call_log,
@@ -676,6 +703,8 @@ async def system_status(db: AsyncSession = Depends(get_db)):
 @app.get("/api/settings/credentials")
 async def credential_status():
     """Return which credential groups are configured (without exposing values)."""
+    if settings.MARKET_DATA_MODE.strip().lower() == "fake":
+        return {"binance": True, "alpaca": True, "mode": "fake"}
     binance = await get_provider_credentials("binance")
     alpaca = await get_provider_credentials("alpaca")
     return {
@@ -824,6 +853,13 @@ _earnings_cache_time: dict[str, str] = {}
 async def get_earnings(ticker: str):
     """Get earnings calendar data for a ticker."""
     ticker = ticker.strip().upper()
+    if settings.MARKET_DATA_MODE.strip().lower() == "fake":
+        return {
+            "ticker": ticker,
+            "has_earnings": False,
+            "next_earnings_date": None,
+            "earnings": None,
+        }
     cached_time = _earnings_cache_time.get(ticker)
     if cached_time:
         cache_age = (datetime.now(timezone.utc) - datetime.fromisoformat(cached_time)).total_seconds()
@@ -870,6 +906,9 @@ async def get_earnings(ticker: str):
 @app.get("/api/earnings/upcoming/all")
 async def get_upcoming_earnings(db: AsyncSession = Depends(get_db)):
     """Get earnings dates for all watchlist tickers within the next 14 days."""
+    if settings.MARKET_DATA_MODE.strip().lower() == "fake":
+        result = await db.execute(select(Asset).where(Asset.is_active == True))
+        return {"upcoming": [], "checked": len(result.scalars().all())}
     result = await db.execute(select(Asset).where(Asset.is_active == True))
     assets = result.scalars().all()
     upcoming = []

@@ -13,6 +13,17 @@ class Settings(BaseSettings):
     SCAN_ENABLED: bool = True
     MARKET_HOURS_ONLY: bool = True
     BACKTEST_DATABASE_PATH: str = "./backtests.db"
+    DEPLOYMENT_PROFILE: str = "single-node"
+    PUBLIC_BASE_URL: str = "http://localhost:3000"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+
+    @property
+    def allowed_origins(self) -> list[str]:
+        return [
+            origin.strip().rstrip("/")
+            for origin in self.ALLOWED_ORIGINS.split(",")
+            if origin.strip()
+        ]
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

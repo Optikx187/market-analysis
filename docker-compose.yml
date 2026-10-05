@@ -2,11 +2,19 @@ services:
   # SERVICE A: Data Ingestion
   data-ingestion:
     build: ./services/data-ingestion
-    ports:
-      - "127.0.0.1:${DATA_INGESTION_PORT:-8000}:8000"
+    expose:
+      - "8000"
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/data_ingestion.db
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-}
+      - DEPLOYMENT_PROFILE=${DEPLOYMENT_PROFILE:-single-node}
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost:3000}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      - MARKET_DATA_MODE=${MARKET_DATA_MODE:-live}
+      - BINANCE_REST_URL=${BINANCE_REST_URL:-https://api.binance.com/api/v3}
+      - YAHOO_CHART_URL=${YAHOO_CHART_URL:-https://query2.finance.yahoo.com/v8/finance/chart}
+      - ALPACA_DATA_URL=${ALPACA_DATA_URL:-https://data.alpaca.markets/v2}
+      - ALPACA_TRADING_URL=${ALPACA_TRADING_URL:-https://paper-api.alpaca.markets}
     volumes:
       - data-ingestion-db:/app/data
     networks:
@@ -24,8 +32,8 @@ services:
   # SERVICE B: Quantitative Analytics & Risk Engine
   quant-engine:
     build: ./services/quant-engine
-    ports:
-      - "127.0.0.1:${QUANT_ENGINE_PORT:-8001}:8001"
+    expose:
+      - "8001"
     environment:
       - RISK_REWARD_RATIO=${RISK_REWARD_RATIO:-3.0}
       - ATR_STOP_MULTIPLIER=${ATR_STOP_MULTIPLIER:-1.5}
@@ -38,6 +46,9 @@ services:
       - PORTFOLIO_ENGINE_URL=http://portfolio-engine:8002
       - NOTIFICATION_GATEWAY_URL=http://notification-gateway:8003
       - BACKTEST_DATABASE_PATH=/app/data/backtests.db
+      - DEPLOYMENT_PROFILE=${DEPLOYMENT_PROFILE:-single-node}
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost:3000}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
     volumes:
       - quant-engine-db:/app/data
     networks:
@@ -53,13 +64,16 @@ services:
   # SERVICE C: Portfolio & Integration Engine
   portfolio-engine:
     build: ./services/portfolio-engine
-    ports:
-      - "127.0.0.1:${PORTFOLIO_ENGINE_PORT:-8002}:8002"
+    expose:
+      - "8002"
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/portfolio.db
       - QUANT_ENGINE_URL=http://quant-engine:8001
       - DATA_INGESTION_URL=http://data-ingestion:8000
       - HOST_ENV_PATH=/workspace/.env
+      - DEPLOYMENT_PROFILE=${DEPLOYMENT_PROFILE:-single-node}
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost:3000}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
     volumes:
       - portfolio-db:/app/data
       - ./.env:/workspace/.env
@@ -75,8 +89,8 @@ services:
   # NOTIFICATION GATEWAY (part of Service D)
   notification-gateway:
     build: ./services/notification-gateway
-    ports:
-      - "127.0.0.1:${NOTIFICATION_GATEWAY_PORT:-8003}:8003"
+    expose:
+      - "8003"
     environment:
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-}
       - SMTP_PORT=${SMTP_PORT:-587}
@@ -86,6 +100,12 @@ services:
       - NOTIFY_EMAIL_ENABLED=${NOTIFY_EMAIL_ENABLED:-true}
       - NOTIFY_SMS_ENABLED=${NOTIFY_SMS_ENABLED:-true}
       - PORTFOLIO_ENGINE_URL=http://portfolio-engine:8002
+      - DEPLOYMENT_PROFILE=${DEPLOYMENT_PROFILE:-single-node}
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost:3000}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      - NOTIFICATION_MODE=${NOTIFICATION_MODE:-live}
+      - TELEGRAM_API_BASE_URL=${TELEGRAM_API_BASE_URL:-https://api.telegram.org}
+      - TWILIO_API_BASE_URL=${TWILIO_API_BASE_URL:-https://api.twilio.com}
     networks:
       - trading_network
     depends_on:

@@ -69,10 +69,53 @@ ports:
 `PUBLIC_BASE_URL` is the operator-facing URL. When blank, management commands
 derive `http://localhost:<FRONTEND_PORT>`. `HOST_BIND_ADDRESS` defaults to
 `127.0.0.1`. Non-loopback bindings require authentication; `--enable-auth`
-enables registration/login and uses the generated JWT secret. Only the
-dashboard uses this address; backend API ports remain bound to loopback and are
-reached through the frontend proxy. Firewall and TLS configuration remain the
+enables registration/login and uses the generated JWT secret. Supplying
+`--base-url` also sets `ALLOWED_ORIGINS` to that URL. Only the dashboard edge is
+published; backend APIs remain private to the Compose network and are reached
+through the frontend proxy. Firewall and TLS configuration remain the
 operator's responsibility.
+
+## Portable deployment profiles
+
+The management commands operate the default single-node profile. Use the
+additive Compose overlays when an explicit topology is required:
+
+| Profile | Overlay | Storage | External providers |
+| --- | --- | --- | --- |
+| Single node | `deploy/compose.single-node.yml` | Existing base volumes | Configured providers |
+| Sandbox | `deploy/compose.sandbox.yml` | Isolated `sandbox-*` volumes | Deterministic fake boundaries only |
+| Multi-worker | `deploy/compose.multi-worker.yml` | Isolated `multi-worker-*` volumes | Configured providers |
+
+Sandbox startup:
+
+```bash
+./manage install --base-url http://sandbox.market.test --no-start
+docker compose -p market-analysis-sandbox \
+  -f docker-compose.yml -f deploy/compose.sandbox.yml up --build -d
+```
+
+```powershell
+.\manage.ps1 install --base-url http://sandbox.market.test --no-start
+docker compose -p market-analysis-sandbox `
+  -f docker-compose.yml -f deploy/compose.sandbox.yml up --build -d
+```
+
+Multi-worker topology validation:
+
+```bash
+docker compose -p market-analysis-workers \
+  -f docker-compose.yml -f deploy/compose.multi-worker.yml \
+  --profile multi-worker up --build -d
+```
+
+The additional quant workers are private and have scheduling disabled. They do
+not replace the future durable job broker, worker leases, or PostgreSQL
+migration.
+
+To roll back, use the same files and project name with `down` but never add
+`--volumes`. Start the previous profile afterward. Existing single-node data is
+unchanged because the sandbox and multi-worker overlays use different logical
+volumes.
 
 ## Lifecycle and diagnostics
 

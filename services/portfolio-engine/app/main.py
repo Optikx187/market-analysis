@@ -520,7 +520,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Portfolio Engine Service", version="2.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
+    allow_origins=settings.allowed_origins, allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
 
@@ -554,7 +554,12 @@ async def enforce_authentication_boundary(request: Request, call_next):
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "service": "portfolio-engine"}
+    return {
+        "status": "healthy",
+        "service": "portfolio-engine",
+        "deployment_profile": settings.DEPLOYMENT_PROFILE,
+        "live_trading_enabled": settings.LIVE_TRADING_ENABLED,
+    }
 
 
 @app.post("/api/process-signal", response_model=SignalDecision)

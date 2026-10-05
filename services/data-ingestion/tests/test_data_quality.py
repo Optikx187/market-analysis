@@ -8,6 +8,7 @@ from app.data_quality import (
     _stock_intraday_is_stale,
     assess_data_quality,
 )
+from app.fake_market import fake_candles, fake_quote
 from app.ingestion import _resample_four_hour, validate_candles_for_storage
 from app.models import AssetType
 
@@ -200,3 +201,17 @@ def test_crypto_four_hour_resampling_is_continuous_utc() -> None:
 
     assert len(resampled) == 6
     assert resampled["timestamp"].dt.hour.tolist() == [0, 4, 8, 12, 16, 20]
+
+
+def test_fake_market_is_deterministic_and_data_quality_eligible() -> None:
+    first = fake_candles("BTC", AssetType.CRYPTO, "1d")
+    second = fake_candles("BTC", AssetType.CRYPTO, "1d")
+    quote = fake_quote("BTC", AssetType.CRYPTO)
+
+    pd.testing.assert_frame_equal(first, second)
+    report = assess_data_quality("BTC", AssetType.CRYPTO, first)
+
+    assert report.is_eligible is True
+    assert quote["ticker"] == "BTC"
+    assert quote["name"] == "Bitcoin"
+    assert quote["price"] == float(first.iloc[-1]["close"])
