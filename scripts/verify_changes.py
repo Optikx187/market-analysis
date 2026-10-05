@@ -300,6 +300,10 @@ def jobs_for_path(path: str) -> set[str]:
         return jobs | {"management"}
     if path == "scripts/check_docs.py":
         return jobs | {"management", "docs"}
+    if path == "scripts/verify_changes.py":
+        return jobs | set(CORE_JOBS)
+    if path == "scripts/ci_sandbox_smoke.sh":
+        return jobs | {"management", "compose"}
     if path.startswith("scripts/"):
         return jobs | {"management"}
     if path == ".env.example":
@@ -333,6 +337,26 @@ def classify_paths(paths: Iterable[str]) -> list[str]:
     for path in paths:
         selected.update(jobs_for_path(path))
     return ordered_jobs(selected)
+
+
+def ci_plan(selected_jobs: Iterable[str]) -> dict[str, object]:
+    selected = set(selected_jobs)
+    return {
+        "backend_services": [
+            service for service in BACKEND_SERVICES if service in selected
+        ],
+        "image_services": [
+            service
+            for service in (*BACKEND_SERVICES, "frontend")
+            if f"image-{service}" in selected
+        ],
+        "run_frontend": "frontend" in selected,
+        "run_management": "management" in selected,
+        "run_compose": "compose" in selected,
+        "run_docs": "docs" in selected,
+        "high_risk": "compose" in selected
+        or any(name.startswith("image-") for name in selected),
+    }
 
 
 def ordered_jobs(names: Iterable[str]) -> list[str]:
@@ -557,6 +581,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         "dry_run": args.dry_run,
         "changed_paths": paths,
         "selected_jobs": selected_names,
+        "ci_plan": ci_plan(selected_names),
         "success": success,
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),

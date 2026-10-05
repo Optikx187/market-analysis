@@ -24,6 +24,7 @@ Thumbs.db
 # Docker
 *.log
 backups/
+artifacts/
 
 # pytest
 .pytest_cache/

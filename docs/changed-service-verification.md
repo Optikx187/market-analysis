@@ -57,7 +57,9 @@ Every selected tier includes the repository whitespace check.
 | `shared/**`, `schemas/**`, or `contracts/**` | All service checks plus Compose |
 | Any migration directory or migration configuration | All backend checks plus Compose |
 | `docker-compose*.yml`, `deploy/compose.*`, or `.env.example` | Compose profile rendering; `.env.example` also runs management tests |
-| `manage`, `manage.ps1`, `verify-changes*`, or `scripts/**` | Management and verification-tool tests |
+| `manage`, `manage.ps1`, `verify-changes*`, or ordinary `scripts/**` | Management and verification-tool tests |
+| `scripts/verify_changes.py` | Broader core checks because it controls job selection |
+| `scripts/ci_sandbox_smoke.sh` | Management tests plus the Compose sandbox smoke |
 | `README.md`, `docs/**`, `deploy/README.md`, or `.agents/**` | Local documentation-link validation |
 | Hosted-pipeline configuration or an unrecognized path | The broader core check set |
 
@@ -77,9 +79,56 @@ command:
 ```
 
 The JSON report includes schema version `1`, changed paths, selected jobs,
-commands, durations, exit codes, and bounded stdout/stderr tails. JUnit emits
-one test case per selected job. Dry-run jobs are represented as planned in JSON
-and skipped in JUnit.
+commands, durations, exit codes, bounded stdout/stderr tails, and a portable
+`ci_plan`. The plan contains affected backend and image matrices, utility-job
+flags, and the high-risk decision consumed by hosted CI. JUnit emits one test
+case per selected job. Dry-run jobs are represented as planned in JSON and
+skipped in JUnit.
+
+## Hosted pipeline
+
+`.github/workflows/verification.yml` runs on pull requests, manual dispatches,
+and a nightly schedule.
+
+- superseded runs for the same pull request or ref are canceled;
+- backend services, frontend, management, documentation, changed images, and
+  Compose smoke run as independent jobs;
+- the PowerShell entry point is exercised on a hosted Windows runner when
+  management tooling changes and during manual or nightly runs;
+- Python and npm caches are keyed by each requirements file or lockfile;
+- changed image builds use BuildKit's GitHub Actions cache by service;
+- JSON, JUnit, image metadata, security results, rendered Compose, smoke
+  results, and service logs are uploaded as artifacts;
+- documentation-only pull requests avoid service and image builds;
+- manual, nightly, and high-risk changes run full verification and dependency
+  audits.
+
+A change is high risk when the classifier selects Compose or an image build.
+This includes workflow, shared contract, schema, migration, deployment,
+dependency, Dockerfile, `.env.example`, and ambiguous root changes.
+
+The Compose smoke job runs `scripts/ci_sandbox_smoke.sh`. It starts the real
+five-service sandbox with isolated volumes and deterministic test-only
+credentials, verifies service readiness, requests a fake crypto quote, captures
+a fake notification delivery, and confirms live trading is disabled. Its trap
+always removes containers and volumes and restores any pre-existing `.env`.
+
+### GitLab portability
+
+The path rules and job plan do not depend on GitHub Actions. A GitLab
+classification job can run the same contract:
+
+```bash
+./verify-changes changed \
+  --base-ref "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" \
+  --dry-run \
+  --json artifacts/verification/classification.json \
+  --junit artifacts/verification/classification.xml
+```
+
+Subsequent GitLab jobs can read `ci_plan` from the JSON report and call the same
+`service`, `full`, and sandbox-smoke commands. Only cache, artifact, and matrix
+syntax is provider-specific.
 
 ## Safety boundary
 
@@ -94,13 +143,17 @@ Data-ingestion tests that exercise provider adapters use the normal provider cod
 path with mocked clients and reserved `.invalid` endpoints; this preserves their
 coverage without allowing a production endpoint.
 
-The verification jobs do not start the application, contact production market
-or notification providers, or submit broker orders. Dependency installation
-and image pulls can still contact their package or container registries.
+The service jobs do not contact production market or notification providers or
+submit broker orders. The hosted Compose job starts only the sandbox boundary,
+whose reserved `.invalid` endpoints, fake delivery adapters, disabled scanner,
+and disabled live execution fail closed. Dependency installation, audit, and
+image pulls can still contact their package or container registries.
 
 ## Rollback
 
-The command is additive and does not change application data. To remove it,
-delete `verify-changes`, `verify-changes.ps1`,
-`scripts/verify_changes.py`, `scripts/check_docs.py`, and their tests, then
+The pipeline is additive and does not change application data. Disable it by
+removing `.github/workflows/verification.yml`; local verification continues to
+work. To remove the entire verification feature, also delete `verify-changes`,
+`verify-changes.ps1`, `scripts/verify_changes.py`,
+`scripts/ci_sandbox_smoke.sh`, `scripts/check_docs.py`, and their tests, then
 remove the README references. No database or volume rollback is required.

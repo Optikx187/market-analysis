@@ -80,12 +80,104 @@ class ClassifierTest(unittest.TestCase):
             ),
             ["repository", "management", "compose", "docs"],
         )
+        self.assertEqual(
+            verify_changes.classify_paths(["scripts/ci_sandbox_smoke.sh"]),
+            ["repository", "management", "compose"],
+        )
+        self.assertEqual(
+            verify_changes.classify_paths(["scripts/verify_changes.py"]),
+            list(verify_changes.CORE_JOBS),
+        )
 
     def test_ambiguous_path_uses_broader_core_check_set(self) -> None:
         self.assertEqual(
             verify_changes.classify_paths(["unexpected-root-config.toml"]),
             list(verify_changes.CORE_JOBS),
         )
+
+    def test_ci_plan_keeps_documentation_changes_lightweight(self) -> None:
+        selected = verify_changes.classify_paths(["docs/operator-management.md"])
+
+        self.assertEqual(
+            verify_changes.ci_plan(selected),
+            {
+                "backend_services": [],
+                "image_services": [],
+                "run_frontend": False,
+                "run_management": False,
+                "run_compose": False,
+                "run_docs": True,
+                "high_risk": False,
+            },
+        )
+
+    def test_ci_plan_marks_dependency_and_shared_changes_high_risk(self) -> None:
+        dependency_plan = verify_changes.ci_plan(
+            verify_changes.classify_paths(
+                ["services/frontend/package-lock.json"]
+            )
+        )
+        shared_plan = verify_changes.ci_plan(
+            verify_changes.classify_paths(["contracts/events/v1.json"])
+        )
+
+        self.assertEqual(dependency_plan["image_services"], ["frontend"])
+        self.assertTrue(dependency_plan["run_frontend"])
+        self.assertTrue(dependency_plan["high_risk"])
+        self.assertEqual(
+            shared_plan["backend_services"],
+            list(verify_changes.BACKEND_SERVICES),
+        )
+        self.assertTrue(shared_plan["run_compose"])
+        self.assertTrue(shared_plan["high_risk"])
+
+    def test_representative_hosted_ci_path_matrix(self) -> None:
+        cases = {
+            "docs/operations.md": {
+                "backend_services": [],
+                "image_services": [],
+                "run_docs": True,
+                "high_risk": False,
+            },
+            "services/quant-engine/app/main.py": {
+                "backend_services": ["quant-engine"],
+                "image_services": [],
+                "run_docs": False,
+                "high_risk": False,
+            },
+            "services/portfolio-engine/requirements.txt": {
+                "backend_services": ["portfolio-engine"],
+                "image_services": ["portfolio-engine"],
+                "run_docs": False,
+                "high_risk": True,
+            },
+            "services/frontend/package-lock.json": {
+                "backend_services": [],
+                "image_services": ["frontend"],
+                "run_docs": False,
+                "high_risk": True,
+            },
+            "schemas/events/v1.json": {
+                "backend_services": list(verify_changes.BACKEND_SERVICES),
+                "image_services": [],
+                "run_docs": False,
+                "high_risk": True,
+            },
+            ".github/workflows/verification.yml": {
+                "backend_services": list(verify_changes.BACKEND_SERVICES),
+                "image_services": [],
+                "run_docs": False,
+                "high_risk": True,
+            },
+        }
+
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                plan = verify_changes.ci_plan(
+                    verify_changes.classify_paths([path])
+                )
+                for key, value in expected.items():
+                    self.assertEqual(plan[key], value)
 
 
 class JobCatalogTest(unittest.TestCase):
@@ -181,6 +273,11 @@ class ReportAndEntryPointTest(unittest.TestCase):
             self.assertEqual(report["mode"], "full")
             self.assertTrue(report["dry_run"])
             self.assertEqual(report["selected_jobs"], list(verify_changes.FULL_JOBS))
+            self.assertEqual(
+                report["ci_plan"]["backend_services"],
+                list(verify_changes.BACKEND_SERVICES),
+            )
+            self.assertTrue(report["ci_plan"]["high_risk"])
             self.assertTrue(report["success"])
             self.assertEqual(
                 {job["status"] for job in report["jobs"]},
@@ -206,7 +303,11 @@ class ReportAndEntryPointTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Selected jobs: repository, management, docs", result.stdout)
+        selected_line = next(
+            line for line in result.stdout.splitlines() if line.startswith("Selected jobs:")
+        )
+        self.assertIn("repository", selected_line)
+        self.assertIn("management", selected_line)
 
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is not installed")
     def test_powershell_entry_point_runs_full_dry_run(self) -> None:

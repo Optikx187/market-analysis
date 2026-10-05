@@ -862,7 +862,13 @@ docker compose -f docker-compose.yml -f deploy/compose.multi-worker.yml \
 docker compose build
 ```
 
-The repository currently has no committed GitHub Actions or GitLab CI pipeline. External provider and live-order tests should use deterministic fake services and must never use production credentials.
+GitHub pull requests use the path-filtered
+[verification pipeline](docs/changed-service-verification.md#hosted-pipeline).
+Affected services run independently with dependency and image-layer caches.
+Manual, nightly, and high-risk changes also run the full-system and dependency
+security tiers. All Compose smoke checks use fake providers, fake
+notifications, and disabled live trading; production credentials are never
+required.
 
 ## Troubleshooting
 
