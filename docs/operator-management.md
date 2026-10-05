@@ -55,19 +55,24 @@ ports:
 ```bash
 ./manage install \
   --base-url https://market.lab.example \
-  --bind-address 192.0.2.10
+  --bind-address 192.0.2.10 \
+  --enable-auth
 ```
 
 ```powershell
 .\manage.ps1 install `
   --base-url https://market.lab.example `
-  --bind-address 192.0.2.10
+  --bind-address 192.0.2.10 `
+  --enable-auth
 ```
 
-`PUBLIC_BASE_URL` is the operator-facing URL. `HOST_BIND_ADDRESS` defaults to
-`0.0.0.0`; set it to a specific lab interface or `127.0.0.1` when a local
-reverse proxy is the only intended entry point. Firewall and TLS configuration
-remain the operator's responsibility.
+`PUBLIC_BASE_URL` is the operator-facing URL. When blank, management commands
+derive `http://localhost:<FRONTEND_PORT>`. `HOST_BIND_ADDRESS` defaults to
+`127.0.0.1`. Non-loopback bindings require authentication; `--enable-auth`
+enables registration/login and uses the generated JWT secret. Only the
+dashboard uses this address; backend API ports remain bound to loopback and are
+reached through the frontend proxy. Firewall and TLS configuration remain the
+operator's responsibility.
 
 ## Lifecycle and diagnostics
 

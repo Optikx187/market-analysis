@@ -25,8 +25,7 @@ $VolumeSpecs = @(
 Set-Location $RootDir
 
 function Fail([string]$Message) {
-    [Console]::Error.WriteLine("Error: $Message")
-    exit 1
+    throw $Message
 }
 
 function Invoke-Checked {
@@ -80,7 +79,7 @@ function Show-CommandHelp([string]$Name) {
     switch ($Name) {
         "install" {
             @"
-Usage: .\manage.ps1 install [--base-url URL] [--bind-address ADDRESS] [--no-start]
+Usage: .\manage.ps1 install [--base-url URL] [--bind-address ADDRESS] [--enable-auth] [--no-start]
 
 Creates .env from .env.example when needed, generates required secrets without
 printing them, validates Docker Compose, and starts the application.
@@ -174,16 +173,49 @@ function Set-EnvValue([string]$Key, [string]$Value) {
     [IO.File]::WriteAllLines($EnvFile, $lines, $Utf8NoBom)
 }
 
-function Protect-EnvFile {
+function Protect-Path([string]$Path, [bool]$Directory) {
     if ($RunningOnWindows) {
-        & icacls $EnvFile /inheritance:r /grant:r "$($env:USERNAME):(F)" *> $null
-        if ($LASTEXITCODE -ne 0) {
-            Fail "Unable to restrict the .env ACL to the current Windows user."
+        try {
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+            $acl = if ($Directory) {
+                [Security.AccessControl.DirectorySecurity]::new()
+            }
+            else {
+                [Security.AccessControl.FileSecurity]::new()
+            }
+            $acl.SetOwner($identity)
+            $acl.SetAccessRuleProtection($true, $false)
+            $rule = if ($Directory) {
+                [Security.AccessControl.FileSystemAccessRule]::new(
+                    $identity,
+                    [Security.AccessControl.FileSystemRights]::FullControl,
+                    [Security.AccessControl.InheritanceFlags]"ContainerInherit,ObjectInherit",
+                    [Security.AccessControl.PropagationFlags]::None,
+                    [Security.AccessControl.AccessControlType]::Allow
+                )
+            }
+            else {
+                [Security.AccessControl.FileSystemAccessRule]::new(
+                    $identity,
+                    [Security.AccessControl.FileSystemRights]::FullControl,
+                    [Security.AccessControl.AccessControlType]::Allow
+                )
+            }
+            $acl.AddAccessRule($rule)
+            Set-Acl -LiteralPath $Path -AclObject $acl
+        }
+        catch {
+            Fail "Unable to restrict '$Path' to the current Windows user."
         }
     }
     else {
-        Invoke-Checked -File "chmod" -Arguments @("600", $EnvFile)
+        $mode = if ($Directory) { "700" } else { "600" }
+        Invoke-Checked -File "chmod" -Arguments @($mode, $Path)
     }
+}
+
+function Protect-EnvFile {
+    Protect-Path -Path $EnvFile -Directory $false
 }
 
 function Assert-BaseUrl([string]$Url) {
@@ -208,7 +240,7 @@ function Initialize-Secret {
     }
 }
 
-function Initialize-Env([string]$BaseUrl, [string]$BindAddress) {
+function Initialize-Env([string]$BaseUrl, [string]$BindAddress, [bool]$EnableAuth) {
     if (-not (Test-Path $EnvFile -PathType Leaf)) {
         if (-not (Test-Path $EnvExample -PathType Leaf)) {
             Fail ".env.example is missing."
@@ -221,15 +253,16 @@ function Initialize-Env([string]$BaseUrl, [string]$BindAddress) {
         Assert-BaseUrl $BaseUrl
         Set-EnvValue -Key "PUBLIC_BASE_URL" -Value $BaseUrl
     }
-    elseif ([string]::IsNullOrEmpty((Get-EnvValue "PUBLIC_BASE_URL"))) {
-        Set-EnvValue -Key "PUBLIC_BASE_URL" -Value "http://localhost:$(Get-EnvValue 'FRONTEND_PORT')"
-    }
 
     if (-not [string]::IsNullOrEmpty($BindAddress)) {
         Set-EnvValue -Key "HOST_BIND_ADDRESS" -Value $BindAddress
     }
     elseif ([string]::IsNullOrEmpty((Get-EnvValue "HOST_BIND_ADDRESS"))) {
-        Set-EnvValue -Key "HOST_BIND_ADDRESS" -Value "0.0.0.0"
+        Set-EnvValue -Key "HOST_BIND_ADDRESS" -Value "127.0.0.1"
+    }
+
+    if ($EnableAuth) {
+        Set-EnvValue -Key "AUTH_ENABLED" -Value "true"
     }
 
     Initialize-Secret
@@ -238,6 +271,14 @@ function Initialize-Env([string]$BaseUrl, [string]$BindAddress) {
 
 function Test-ComposeConfig {
     Assert-EnvFile
+    $bindAddress = Get-EnvValue "HOST_BIND_ADDRESS"
+    if ([string]::IsNullOrEmpty($bindAddress)) {
+        $bindAddress = "127.0.0.1"
+    }
+    $authEnabled = Get-EnvValue "AUTH_ENABLED"
+    if ($bindAddress -ne "127.0.0.1" -and $authEnabled -ne "true") {
+        Fail "AUTH_ENABLED=true is required when HOST_BIND_ADDRESS is not 127.0.0.1. Re-run install with --enable-auth."
+    }
     & docker compose config --quiet
     if ($LASTEXITCODE -ne 0) {
         Fail "Docker Compose configuration is invalid. Review the error above and .env."
@@ -284,6 +325,7 @@ function Get-PublicUrl {
 function Install-App([string[]]$Arguments) {
     $baseUrl = ""
     $bindAddress = ""
+    $enableAuth = $false
     $noStart = $false
     for ($index = 0; $index -lt $Arguments.Count; $index++) {
         switch ($Arguments[$index]) {
@@ -297,19 +339,20 @@ function Install-App([string[]]$Arguments) {
                 $index++
                 $bindAddress = $Arguments[$index]
             }
+            "--enable-auth" { $enableAuth = $true }
             "--no-start" { $noStart = $true }
             default { Fail "Unknown install option '$($Arguments[$index])'." }
         }
     }
 
     Invoke-Preflight
-    Initialize-Env -BaseUrl $baseUrl -BindAddress $bindAddress
+    Initialize-Env -BaseUrl $baseUrl -BindAddress $bindAddress -EnableAuth $enableAuth
     Test-ComposeConfig
     if ($noStart) {
         Write-Output "Installation configuration is ready. Secrets were written to .env without being displayed."
         return
     }
-    Invoke-Compose @("up", "--build", "-d")
+    Invoke-Compose -Arguments @("up", "--build", "-d")
     Wait-ForServiceReadiness
     Write-Output "Dashboard: $(Get-PublicUrl)"
 }
@@ -327,10 +370,10 @@ function Start-App([string[]]$Arguments) {
     Invoke-Preflight
     Test-ComposeConfig
     if ($build) {
-        Invoke-Compose @("up", "--build", "-d")
+        Invoke-Compose -Arguments @("up", "--build", "-d")
     }
     else {
-        Invoke-Compose @("up", "-d")
+        Invoke-Compose -Arguments @("up", "-d")
     }
     Wait-ForServiceReadiness
     Write-Output "Dashboard: $(Get-PublicUrl)"
@@ -339,14 +382,14 @@ function Start-App([string[]]$Arguments) {
 function Stop-App {
     Invoke-Preflight
     Assert-EnvFile
-    Invoke-Compose @("down")
+    Invoke-Compose -Arguments @("down")
     Write-Output "Application stopped. Persistent volumes were preserved."
 }
 
 function Show-Status {
     Invoke-Preflight
     Assert-EnvFile
-    Invoke-Compose @("ps")
+    Invoke-Compose -Arguments @("ps")
     Write-Output "Dashboard: $(Get-PublicUrl)"
 }
 
@@ -374,15 +417,15 @@ function Show-Log([string[]]$Arguments) {
     $composeArgs = @("logs", "--tail", $tailLines)
     if ($follow) { $composeArgs += "--follow" }
     if (-not [string]::IsNullOrEmpty($service)) { $composeArgs += $service }
-    Invoke-Compose $composeArgs
+    Invoke-Compose -Arguments $composeArgs
 }
 
 function Get-VolumeName([string]$Service, [string]$Target) {
-    $containerId = (Get-ComposeOutput @("ps", "-aq", $Service) | Select-Object -First 1)
+    $containerId = (Get-ComposeOutput -Arguments @("ps", "-aq", $Service) | Select-Object -First 1)
     if ([string]::IsNullOrWhiteSpace($containerId)) {
         & docker compose create $Service *> $null
         if ($LASTEXITCODE -ne 0) { Fail "Unable to create the $Service container." }
-        $containerId = (Get-ComposeOutput @("ps", "-aq", $Service) | Select-Object -First 1)
+        $containerId = (Get-ComposeOutput -Arguments @("ps", "-aq", $Service) | Select-Object -First 1)
     }
     if ([string]::IsNullOrWhiteSpace($containerId)) {
         Fail "Unable to create or locate the $Service container."
@@ -394,22 +437,42 @@ function Get-VolumeName([string]$Service, [string]$Target) {
 }
 
 function Export-Volume([string]$Volume, [string]$BackupDir, [string]$FileName) {
-    $code = "import sys, tarfile; archive=tarfile.open('/backup/' + sys.argv[1], 'w:gz'); archive.add('/source', arcname='.'); archive.close()"
+    $code = "import os, sys, tarfile; os.umask(0o077); archive=tarfile.open('/backup/' + sys.argv[1], 'w:gz'); archive.add('/source', arcname='.'); archive.close()"
     Invoke-Checked -File "docker" -Arguments @(
         "run", "--rm",
         "--volume", "${Volume}:/source:ro",
         "--volume", "${BackupDir}:/backup",
         "python:3.12-slim", "python", "-c", $code, $FileName
     )
+    Protect-Path -Path (Join-Path $BackupDir $FileName) -Directory $false
 }
 
-function Import-Volume([string]$Volume, [string]$BackupDir, [string]$FileName) {
+function Test-Archive([string]$BackupDir, [string]$FileName) {
+    $code = "import pathlib, sys, tarfile; archive=tarfile.open('/backup/' + sys.argv[1]); members=archive.getmembers(); invalid=[m.name for m in members if pathlib.PurePosixPath(m.name).is_absolute() or '..' in pathlib.PurePosixPath(m.name).parts or m.issym() or m.islnk() or m.isdev() or m.isfifo()]; invalid and sys.exit('unsafe archive member: ' + invalid[0]); [(lambda stream: [None for _ in iter(lambda: stream.read(1024 * 1024), b'')])(archive.extractfile(m)) for m in members if m.isfile()]; archive.close()"
+    Invoke-Checked -File "docker" -Arguments @(
+        "run", "--rm",
+        "--volume", "${BackupDir}:/backup:ro",
+        "python:3.12-slim", "python", "-c", $code, $FileName
+    )
+}
+
+function Expand-ArchiveToVolume([string]$Volume, [string]$BackupDir, [string]$FileName) {
     $code = "import pathlib, shutil, sys, tarfile; root=pathlib.Path('/restore'); [shutil.rmtree(item) if item.is_dir() else item.unlink() for item in root.iterdir()]; archive=tarfile.open('/backup/' + sys.argv[1]); archive.extractall('/restore', filter='data'); archive.close()"
     Invoke-Checked -File "docker" -Arguments @(
         "run", "--rm",
         "--volume", "${Volume}:/restore",
         "--volume", "${BackupDir}:/backup:ro",
         "python:3.12-slim", "python", "-c", $code, $FileName
+    )
+}
+
+function Copy-Volume([string]$Source, [string]$Destination) {
+    $code = "import pathlib, shutil; source=pathlib.Path('/source'); destination=pathlib.Path('/destination'); [shutil.rmtree(item) if item.is_dir() else item.unlink() for item in destination.iterdir()]; [shutil.copytree(item, destination / item.name, symlinks=False) if item.is_dir() else shutil.copy2(item, destination / item.name) for item in source.iterdir()]"
+    Invoke-Checked -File "docker" -Arguments @(
+        "run", "--rm",
+        "--volume", "${Source}:/source:ro",
+        "--volume", "${Destination}:/destination",
+        "python:3.12-slim", "python", "-c", $code
     )
 }
 
@@ -425,12 +488,17 @@ function Backup-App([string[]]$Arguments) {
     Test-ComposeConfig
     New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
     $backupDir = (Resolve-Path $backupDir).Path
+    Protect-Path -Path $backupDir -Directory $true
 
-    $running = Get-ComposeOutput @("ps", "--status", "running", "-q")
-    $hadRunning = -not [string]::IsNullOrWhiteSpace("$running")
+    $runningServices = @(
+        Get-ComposeOutput -Arguments @("ps", "--services", "--status", "running") |
+            Where-Object { -not [string]::IsNullOrWhiteSpace("$_") }
+    )
     & docker compose create data-ingestion quant-engine portfolio-engine *> $null
     if ($LASTEXITCODE -ne 0) { Fail "Unable to prepare data containers for backup." }
-    Invoke-Compose @("stop")
+    if ($runningServices.Count -gt 0) {
+        Invoke-Compose -Arguments (@("stop") + $runningServices)
+    }
 
     try {
         foreach ($spec in $VolumeSpecs) {
@@ -451,11 +519,11 @@ function Backup-App([string[]]$Arguments) {
             $manifest,
             $Utf8NoBom
         )
+        Protect-Path -Path (Join-Path $backupDir "manifest.txt") -Directory $false
     }
     finally {
-        if ($hadRunning) {
-            Invoke-Compose @("start")
-            Wait-ForServiceReadiness
+        if ($runningServices.Count -gt 0) {
+            Invoke-Compose -Arguments (@("start") + $runningServices)
         }
     }
     Write-Output "Backup created: $backupDir"
@@ -481,21 +549,82 @@ function Restore-App([string[]]$Arguments) {
         if (-not (Test-Path (Join-Path $backupDir $spec.File) -PathType Leaf)) {
             Fail "Backup is incomplete: missing $($spec.File)."
         }
+        Test-Archive -BackupDir $backupDir -FileName $spec.File
     }
 
-    Invoke-Compose @("down")
     & docker compose create data-ingestion quant-engine portfolio-engine *> $null
     if ($LASTEXITCODE -ne 0) { Fail "Unable to prepare data containers for restore." }
-    foreach ($spec in $VolumeSpecs) {
-        $volume = Get-VolumeName -Service $spec.Service -Target $spec.Target
-        Import-Volume -Volume $volume -BackupDir $backupDir -FileName $spec.File
+    $runningServices = @(
+        Get-ComposeOutput -Arguments @("ps", "--services", "--status", "running") |
+            Where-Object { -not [string]::IsNullOrWhiteSpace("$_") }
+    )
+    $restoreId = "market-analysis-restore-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))-$PID"
+    $liveVolumes = [Collections.Generic.List[string]]::new()
+    $stageVolumes = [Collections.Generic.List[string]]::new()
+    $rollbackVolumes = [Collections.Generic.List[string]]::new()
+    $rollbackReadyCount = 0
+    $servicesStopped = $false
+    $restoreSucceeded = $false
+
+    try {
+        for ($index = 0; $index -lt $VolumeSpecs.Count; $index++) {
+            $spec = $VolumeSpecs[$index]
+            $liveVolumes.Add((Get-VolumeName -Service $spec.Service -Target $spec.Target))
+            $stageVolume = "$restoreId-$index-stage"
+            Invoke-Checked -File "docker" -Arguments @("volume", "create", $stageVolume)
+            $stageVolumes.Add($stageVolume)
+            Expand-ArchiveToVolume -Volume $stageVolume -BackupDir $backupDir -FileName $spec.File
+            $rollbackVolume = "$restoreId-$index-rollback"
+            Invoke-Checked -File "docker" -Arguments @("volume", "create", $rollbackVolume)
+            $rollbackVolumes.Add($rollbackVolume)
+        }
+        if ($runningServices.Count -gt 0) {
+            Invoke-Compose -Arguments (@("stop") + $runningServices)
+        }
+        $servicesStopped = $true
+        for ($index = 0; $index -lt $liveVolumes.Count; $index++) {
+            Copy-Volume -Source $liveVolumes[$index] -Destination $rollbackVolumes[$index]
+            $rollbackReadyCount++
+        }
+        for ($index = 0; $index -lt $liveVolumes.Count; $index++) {
+            Copy-Volume -Source $stageVolumes[$index] -Destination $liveVolumes[$index]
+        }
+        $restoreSucceeded = $true
+    }
+    finally {
+        if (-not $restoreSucceeded -and $servicesStopped) {
+            for ($index = 0; $index -lt $rollbackReadyCount; $index++) {
+                try {
+                    Copy-Volume -Source $rollbackVolumes[$index] -Destination $liveVolumes[$index]
+                }
+                catch {
+                    Write-Verbose "Unable to restore rollback volume $index."
+                }
+            }
+            if ($runningServices.Count -gt 0) {
+                try {
+                    Invoke-Compose -Arguments (@("start") + $runningServices)
+                }
+                catch {
+                    Write-Verbose "Unable to restart the previously running services."
+                }
+            }
+        }
+        foreach ($volume in @($stageVolumes) + @($rollbackVolumes)) {
+            try {
+                & docker volume rm -f $volume *> $null
+            }
+            catch {
+                Write-Verbose "Unable to remove temporary volume $volume."
+            }
+        }
     }
 
     if ($noStart) {
         Write-Output "Backup restored. Services remain stopped."
         return
     }
-    Invoke-Compose @("up", "-d")
+    Invoke-Compose -Arguments @("up", "-d")
     Wait-ForServiceReadiness
     Write-Output "Backup restored and verified."
 }
@@ -511,8 +640,8 @@ function Update-App([string[]]$Arguments) {
     }
     Backup-App @()
     Invoke-Checked -File "git" -Arguments @("pull", "--ff-only")
-    Invoke-Compose @("build", "--pull")
-    Invoke-Compose @("up", "-d")
+    Invoke-Compose -Arguments @("build", "--pull")
+    Invoke-Compose -Arguments @("up", "-d")
     Wait-ForServiceReadiness
     Write-Output "Upgrade completed. Dashboard: $(Get-PublicUrl)"
 }
@@ -533,31 +662,37 @@ function Test-App([string[]]$Arguments) {
     Write-Output "Verification passed."
 }
 
-if ($CommandArgs.Count -gt 0 -and $CommandArgs[0] -in @("--help", "-h")) {
-    Show-CommandHelp $Command
-    exit 0
-}
+try {
+    if ($CommandArgs.Count -gt 0 -and $CommandArgs[0] -in @("--help", "-h")) {
+        Show-CommandHelp $Command
+        exit 0
+    }
 
-switch ($Command) {
-    { $_ -in @("help", "--help", "-h") } { Show-Usage }
-    "install" { Install-App $CommandArgs }
-    "start" { Start-App $CommandArgs }
-    "stop" {
-        if ($CommandArgs.Count -ne 0) { Fail "Usage: .\manage.ps1 stop" }
-        Stop-App
+    switch ($Command) {
+        { $_ -in @("help", "--help", "-h") } { Show-Usage }
+        "install" { Install-App $CommandArgs }
+        "start" { Start-App $CommandArgs }
+        "stop" {
+            if ($CommandArgs.Count -ne 0) { Fail "Usage: .\manage.ps1 stop" }
+            Stop-App
+        }
+        "restart" {
+            Stop-App
+            Start-App $CommandArgs
+        }
+        "status" {
+            if ($CommandArgs.Count -ne 0) { Fail "Usage: .\manage.ps1 status" }
+            Show-Status
+        }
+        "logs" { Show-Log $CommandArgs }
+        "backup" { Backup-App $CommandArgs }
+        "restore" { Restore-App $CommandArgs }
+        "upgrade" { Update-App $CommandArgs }
+        "verify" { Test-App $CommandArgs }
+        default { Fail "Unknown command '$Command'. Run '.\manage.ps1 help'." }
     }
-    "restart" {
-        Stop-App
-        Start-App $CommandArgs
-    }
-    "status" {
-        if ($CommandArgs.Count -ne 0) { Fail "Usage: .\manage.ps1 status" }
-        Show-Status
-    }
-    "logs" { Show-Log $CommandArgs }
-    "backup" { Backup-App $CommandArgs }
-    "restore" { Restore-App $CommandArgs }
-    "upgrade" { Update-App $CommandArgs }
-    "verify" { Test-App $CommandArgs }
-    default { Fail "Unknown command '$Command'. Run '.\manage.ps1 help'." }
+}
+catch {
+    [Console]::Error.WriteLine("Error: $($_.Exception.Message)")
+    exit 1
 }
