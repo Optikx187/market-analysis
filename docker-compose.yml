@@ -2,13 +2,13 @@ services:
   # SERVICE A: Data Ingestion
   data-ingestion:
     build: ./services/data-ingestion
-    container_name: data-ingestion
     ports:
-      - "8000:8000"
+      - "${DATA_INGESTION_PORT:-8000}:8000"
     environment:
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/data_ingestion.db
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-}
     volumes:
-      - data-ingestion-db:/app
+      - data-ingestion-db:/app/data
     networks:
       - trading_network
     healthcheck:
@@ -24,9 +24,8 @@ services:
   # SERVICE B: Quantitative Analytics & Risk Engine
   quant-engine:
     build: ./services/quant-engine
-    container_name: quant-engine
     ports:
-      - "8001:8001"
+      - "${QUANT_ENGINE_PORT:-8001}:8001"
     environment:
       - RISK_REWARD_RATIO=${RISK_REWARD_RATIO:-3.0}
       - ATR_STOP_MULTIPLIER=${ATR_STOP_MULTIPLIER:-1.5}
@@ -54,9 +53,8 @@ services:
   # SERVICE C: Portfolio & Integration Engine
   portfolio-engine:
     build: ./services/portfolio-engine
-    container_name: portfolio-engine
     ports:
-      - "8002:8002"
+      - "${PORTFOLIO_ENGINE_PORT:-8002}:8002"
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/portfolio.db
       - QUANT_ENGINE_URL=http://quant-engine:8001
@@ -77,9 +75,8 @@ services:
   # NOTIFICATION GATEWAY (part of Service D)
   notification-gateway:
     build: ./services/notification-gateway
-    container_name: notification-gateway
     ports:
-      - "8003:8003"
+      - "${NOTIFICATION_GATEWAY_PORT:-8003}:8003"
     environment:
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-}
       - SMTP_PORT=${SMTP_PORT:-587}
@@ -100,9 +97,8 @@ services:
   # SERVICE D: Frontend (React + Nginx reverse proxy)
   frontend:
     build: ./services/frontend
-    container_name: frontend
     ports:
-      - "3000:80"
+      - "${FRONTEND_PORT:-3000}:80"
     networks:
       - trading_network
     depends_on:
