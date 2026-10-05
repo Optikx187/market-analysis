@@ -89,169 +89,96 @@ Run Docker commands in PowerShell, Windows Terminal, or WSL. Git line-ending con
 
 ## Fresh installation
 
-### 1. Clone the repository
+Linux or macOS:
 
 ```bash
 git clone https://github.com/Optikx187/market-analysis.git
 cd market-analysis
-```
-
-### 2. Create `.env`
-
-The interactive wizard generates the credential-encryption key and internal service token, prompts for optional providers, and writes `.env`:
-
-```bash
-python3 scripts/setup.py
-```
-
-On Windows:
-
-```powershell
-py scripts/setup.py
-```
-
-The wizard is optional. To configure manually:
-
-Linux/macOS:
-
-```bash
-cp .env.example .env
+./manage install
 ```
 
 Windows PowerShell:
 
 ```powershell
-Copy-Item .env.example .env
+git clone https://github.com/Optikx187/market-analysis.git
+Set-Location market-analysis
+.\manage.ps1 install
 ```
 
-Generate a Fernet-compatible credential-encryption key without installing Python on the host:
+Installation creates and protects `.env`, generates the required encryption
+and operator secrets without displaying them, validates Compose, builds the
+images, starts the services, and waits for internal readiness. Provider and
+notification credentials are optional and can be added later through
+**Settings → Credentials**.
+
+For a remote lab, specify both the operator-facing URL and host interface:
 
 ```bash
-docker run --rm python:3.12-slim python -c "import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
+./manage install \
+  --base-url https://market.lab.example \
+  --bind-address 192.0.2.10
 ```
-
-Place the result in:
-
-```dotenv
-CREDENTIAL_ENCRYPTION_KEYS=<generated Fernet key>
-```
-
-Generate internal and operator tokens:
-
-```bash
-docker run --rm python:3.12-slim python -c "import secrets; print(secrets.token_hex(32))"
-```
-
-Run the command separately for each token and set:
-
-```dotenv
-INTERNAL_SERVICE_TOKEN=<random value>
-SETTINGS_OPERATOR_TOKEN=<different random value>
-```
-
-`scripts/setup.py` currently generates `CREDENTIAL_ENCRYPTION_KEYS` and `INTERNAL_SERVICE_TOKEN`, but it does **not** generate `SETTINGS_OPERATOR_TOKEN`. Add that value before using protected Settings operations.
-
-Keep `.env` private. Never commit it.
-
-On Linux/macOS, restrict access:
-
-```bash
-chmod 600 .env
-```
-
-On Windows, store the project in a user-controlled directory and restrict the file with Windows ACLs. Unix mode `0600` is not an equivalent security boundary on a Windows filesystem.
-
-### 3. Validate the Compose configuration
-
-```bash
-docker compose config
-```
-
-### 4. Build and start
-
-```bash
-docker compose up --build -d
-```
-
-### 5. Check status
-
-```bash
-docker compose ps
-```
-
-Health checks:
-
-```bash
-curl http://localhost:8000/health
-curl http://localhost:8001/health
-curl http://localhost:8002/health
-curl http://localhost:8003/health
-```
-
-PowerShell:
 
 ```powershell
-Invoke-RestMethod http://localhost:8000/health
-Invoke-RestMethod http://localhost:8001/health
-Invoke-RestMethod http://localhost:8002/health
-Invoke-RestMethod http://localhost:8003/health
+.\manage.ps1 install `
+  --base-url https://market.lab.example `
+  --bind-address 192.0.2.10
 ```
 
-Open:
+Run `./manage status` or `.\manage.ps1 status` to display the configured
+dashboard URL and service status. The default dashboard is
+`http://localhost:3000`.
 
-```text
-http://localhost:3000
-```
+See [Operator management commands](docs/operator-management.md) for complete
+remote-lab, backup, restore, upgrade, log, and rollback instructions.
 
-### 6. Review startup logs
+## Existing installation lifecycle
+
+| Operation | Linux/macOS | Windows PowerShell |
+| --- | --- | --- |
+| Start | `./manage start` | `.\manage.ps1 start` |
+| Rebuild and start | `./manage start --build` | `.\manage.ps1 start --build` |
+| Stop and preserve data | `./manage stop` | `.\manage.ps1 stop` |
+| Restart | `./manage restart` | `.\manage.ps1 restart` |
+| Status | `./manage status` | `.\manage.ps1 status` |
+| Logs | `./manage logs` | `.\manage.ps1 logs` |
+| Verify | `./manage verify` | `.\manage.ps1 verify` |
+
+The stop, restart, backup, and upgrade paths preserve named data volumes. Do
+not run `docker compose down --volumes` unless you intentionally want to
+delete the databases.
+
+## Backup, restore, and upgrade
+
+Create a consistent backup of all three database volumes:
 
 ```bash
-docker compose logs --tail=100
-docker compose logs -f portfolio-engine
+./manage backup
 ```
 
-Provider credentials placed in `.env` are migration inputs. On portfolio-engine startup they are encrypted into the portfolio database and removed from `.env`. The encryption key and internal service token remain external configuration.
-
-## Starting and stopping
-
-Start an existing installation:
-
-```bash
-docker compose up -d
+```powershell
+.\manage.ps1 backup
 ```
 
-Stop containers while preserving named volumes:
+Restore a trusted backup:
 
 ```bash
-docker compose down
+./manage restore /secure/path/to/backup
 ```
 
-Rebuild after a code or dependency change:
-
-```bash
-docker compose up --build -d
+```powershell
+.\manage.ps1 restore C:\secure\path\to\backup
 ```
 
-> Do not run `docker compose down -v` unless you intend to delete the named databases.
-
-## Existing database and upgrade precautions
-
-The current application does not yet provide first-class `backup`, `restore`, `upgrade`, or rollback commands. Schema initialization also mixes SQLAlchemy `create_all`, handwritten compatibility updates, and direct SQLite table creation.
-
-Before updating:
-
-1. stop user activity and live execution;
-2. run `docker compose ps` and record the current image/commit;
-3. stop the stack with `docker compose down`;
-4. identify and back up all three named volumes;
-5. copy `.env` and encryption keys to a separate protected location;
-6. test restoration in a separate Compose project;
-7. only then pull changes and rebuild.
-
-List the relevant volumes:
+Upgrade a clean checkout with a pre-upgrade backup, fast-forward pull, image
+rebuild, startup, and readiness verification:
 
 ```bash
-docker volume ls
+./manage upgrade
+```
+
+```powershell
+.\manage.ps1 upgrade
 ```
 
 The logical Compose volumes are:
@@ -260,35 +187,42 @@ The logical Compose volumes are:
 - `quant-engine-db`;
 - `portfolio-db`.
 
-Docker prefixes their physical names with the Compose project name.
+Docker prefixes their physical names with the Compose project name. Inside the
+containers, the database locations are:
 
-### Current data-ingestion upgrade limitation
-
-The current Compose file mounts the data-ingestion volume at `/app`, not at a dedicated data directory. That volume can retain application files from its first initialization and obscure code in a rebuilt image.
-
-For an installation with existing data, do not assume that rebuilding the data-ingestion image alone upgrades the running code. Back up the volume and plan a controlled migration that preserves only `data_ingestion.db` in a newly initialized volume. This layout should be fixed before relying on routine unattended upgrades.
-
-### Database locations
-
-Inside the current containers:
-
-- data ingestion: `/app/data_ingestion.db`;
+- data ingestion: `/app/data/data_ingestion.db`;
 - quant backtests: `/app/data/backtests.db`;
 - portfolio: `/app/data/portfolio.db`.
 
-The corresponding named volumes preserve these files across ordinary `docker compose down` and container replacement.
+A complete recovery set includes the backup archives, `.env` or equivalent
+secret-manager configuration, every active and retained
+`CREDENTIAL_ENCRYPTION_KEYS` key, and the corresponding application revision.
+Without the encryption key, encrypted provider credentials cannot be recovered
+from the portfolio database.
 
-### Restore requirements
+## Manual installation
 
-A complete recovery set includes:
+The management commands are the supported path. For troubleshooting or custom
+automation, the equivalent manual flow is:
 
-- all database backups;
-- `.env` or equivalent secret-manager configuration;
-- every active and retained `CREDENTIAL_ENCRYPTION_KEYS` key;
-- the application version used to create the backup;
-- provider and notification configuration records.
+```bash
+cp .env.example .env
+python3 scripts/setup.py
+docker compose config
+docker compose up --build -d
+docker compose ps
+```
 
-Without the credential-encryption key, encrypted provider credentials cannot be recovered from the database backup.
+On Windows, use `Copy-Item .env.example .env` and `py scripts/setup.py`.
+Provider credentials placed in `.env` are migration inputs: portfolio-engine
+encrypts them into its database and removes the plaintext provider values from
+`.env`. Keep `.env` private and never commit it.
+
+Run risk-model tests with:
+
+```bash
+docker compose run --rm quant-engine pytest tests/ -v
+```
 
 ## First-run onboarding
 

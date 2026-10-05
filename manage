@@ -1,0 +1,578 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$ROOT_DIR/.env"
+ENV_EXAMPLE="$ROOT_DIR/.env.example"
+VOLUME_SPECS=(
+  "data-ingestion:/app/data:data-ingestion-db.tgz"
+  "quant-engine:/app/data:quant-engine-db.tgz"
+  "portfolio-engine:/app/data:portfolio-db.tgz"
+)
+
+cd "$ROOT_DIR"
+
+info() {
+  printf '%s\n' "$*"
+}
+
+fail() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+compose() {
+  docker compose "$@"
+}
+
+usage() {
+  cat <<'EOF'
+Market Analysis operator commands
+
+Usage:
+  ./manage <command> [options]
+
+Commands:
+  install   Create a secure .env, validate Compose, build, and start
+  start     Start the application
+  stop      Stop the application without deleting persistent data
+  restart   Restart the application
+  status    Show service status and the configured dashboard URL
+  logs      Stream or print service logs
+  backup    Stop services briefly and archive all persistent volumes
+  restore   Restore persistent volumes from a backup directory
+  upgrade   Back up, fast-forward Git, rebuild, and verify
+  verify    Validate Compose and service readiness
+  help      Show this help
+
+Run "./manage <command> --help" for command-specific options.
+EOF
+}
+
+command_help() {
+  case "$1" in
+    install)
+      cat <<'EOF'
+Usage: ./manage install [--base-url URL] [--bind-address ADDRESS] [--no-start]
+
+Creates .env from .env.example when needed, generates required secrets without
+printing them, validates Docker Compose, and starts the application. Use a
+remote-lab URL such as https://market.lab.example and an explicit bind address
+when the dashboard is not accessed through localhost.
+EOF
+      ;;
+    start)
+      cat <<'EOF'
+Usage: ./manage start [--build]
+
+Starts all services and waits for their internal readiness endpoints.
+EOF
+      ;;
+    stop)
+      cat <<'EOF'
+Usage: ./manage stop
+
+Stops and removes application containers and networks. Named data volumes are
+preserved. This command never passes --volumes.
+EOF
+      ;;
+    restart)
+      cat <<'EOF'
+Usage: ./manage restart [--build]
+
+Stops and starts the application, preserving named data volumes.
+EOF
+      ;;
+    status)
+      cat <<'EOF'
+Usage: ./manage status
+
+Prints Docker Compose service status and the configured public dashboard URL.
+EOF
+      ;;
+    logs)
+      cat <<'EOF'
+Usage: ./manage logs [SERVICE] [--follow] [--tail LINES]
+
+Prints logs for all services or one Compose service. Defaults to 200 lines.
+EOF
+      ;;
+    backup)
+      cat <<'EOF'
+Usage: ./manage backup [DIRECTORY]
+
+Briefly stops services, archives the three persistent named volumes, and then
+restarts the previously running deployment. The default destination is a
+timestamped directory under ./backups.
+EOF
+      ;;
+    restore)
+      cat <<'EOF'
+Usage: ./manage restore DIRECTORY [--no-start]
+
+Stops the application, replaces all three persistent volumes from a backup
+created by "./manage backup", and starts the restored deployment by default.
+EOF
+      ;;
+    upgrade)
+      cat <<'EOF'
+Usage: ./manage upgrade
+
+Requires a clean Git worktree. Creates a backup, fast-forwards the current
+branch, rebuilds images, starts services, and verifies readiness.
+EOF
+      ;;
+    verify)
+      cat <<'EOF'
+Usage: ./manage verify [--config-only]
+
+Validates the rendered Compose configuration. Unless --config-only is used,
+also verifies every running service through its internal readiness endpoint.
+EOF
+      ;;
+    *)
+      fail "Unknown command '$1'. Run './manage help'."
+      ;;
+  esac
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "'$1' is required but was not found in PATH."
+}
+
+preflight() {
+  require_command git
+  require_command docker
+  docker info >/dev/null 2>&1 || fail "Docker is installed but the daemon is unavailable. Start Docker Desktop or the Docker service."
+  docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required. Install a current Docker Desktop or Docker Engine Compose plugin."
+}
+
+require_env() {
+  [[ -f "$ENV_FILE" ]] || fail ".env is missing. Run './manage install' first."
+}
+
+env_value() {
+  local key="$1"
+  awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE"
+}
+
+set_env_value() {
+  local key="$1"
+  local value="$2"
+  local temp_file
+  temp_file="$(mktemp "$ROOT_DIR/.env.XXXXXX")"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { replaced = 0 }
+    index($0, key "=") == 1 {
+      print key "=" value
+      replaced = 1
+      next
+    }
+    { print }
+    END {
+      if (!replaced) {
+        print key "=" value
+      }
+    }
+  ' "$ENV_FILE" >"$temp_file"
+  chmod 600 "$temp_file"
+  mv "$temp_file" "$ENV_FILE"
+}
+
+validate_base_url() {
+  [[ "$1" =~ ^https?://[^[:space:]]+$ ]] || fail "Base URL must begin with http:// or https:// and contain no spaces."
+}
+
+generate_missing_secrets() {
+  local generated key value
+  generated="$(docker run --rm python:3.12-slim python -c \
+    "import base64, os, secrets; print('CREDENTIAL_ENCRYPTION_KEYS=' + base64.urlsafe_b64encode(os.urandom(32)).decode()); print('INTERNAL_SERVICE_TOKEN=' + secrets.token_urlsafe(32)); print('SETTINGS_OPERATOR_TOKEN=' + secrets.token_urlsafe(32)); print('JWT_SECRET=' + secrets.token_hex(32)); print('LIVE_OPERATOR_TOKEN=' + secrets.token_urlsafe(32))")" \
+    || fail "Unable to generate deployment secrets with Docker."
+
+  while IFS='=' read -r key value; do
+    [[ -n "$key" && -n "$value" ]] || continue
+    if [[ -z "$(env_value "$key")" ]]; then
+      set_env_value "$key" "$value"
+    fi
+  done <<<"$generated"
+}
+
+prepare_env() {
+  local base_url="$1"
+  local bind_address="$2"
+
+  if [[ ! -f "$ENV_FILE" ]]; then
+    [[ -f "$ENV_EXAMPLE" ]] || fail ".env.example is missing."
+    cp "$ENV_EXAMPLE" "$ENV_FILE"
+  fi
+  chmod 600 "$ENV_FILE"
+
+  if [[ -n "$base_url" ]]; then
+    validate_base_url "$base_url"
+    set_env_value PUBLIC_BASE_URL "$base_url"
+  elif [[ -z "$(env_value PUBLIC_BASE_URL)" ]]; then
+    set_env_value PUBLIC_BASE_URL "http://localhost:$(env_value FRONTEND_PORT)"
+  fi
+
+  if [[ -n "$bind_address" ]]; then
+    set_env_value HOST_BIND_ADDRESS "$bind_address"
+  elif [[ -z "$(env_value HOST_BIND_ADDRESS)" ]]; then
+    set_env_value HOST_BIND_ADDRESS "0.0.0.0"
+  fi
+
+  generate_missing_secrets
+  chmod 600 "$ENV_FILE"
+}
+
+validate_compose() {
+  require_env
+  compose config --quiet || fail "Docker Compose configuration is invalid. Review the error above and .env."
+}
+
+service_ready() {
+  local service="$1"
+  if [[ "$service" == "frontend" ]]; then
+    compose exec -T frontend wget -q -O /dev/null http://127.0.0.1/
+  else
+    compose exec -T "$service" python -c \
+      "import httpx; httpx.get('http://localhost:${2}/health', timeout=5).raise_for_status()"
+  fi
+}
+
+wait_for_services() {
+  local attempt service failed
+  info "Waiting for service readiness..."
+  for ((attempt = 1; attempt <= 60; attempt++)); do
+    failed=0
+    service_ready portfolio-engine 8002 >/dev/null 2>&1 || failed=1
+    service_ready data-ingestion 8000 >/dev/null 2>&1 || failed=1
+    service_ready notification-gateway 8003 >/dev/null 2>&1 || failed=1
+    service_ready quant-engine 8001 >/dev/null 2>&1 || failed=1
+    service_ready frontend 80 >/dev/null 2>&1 || failed=1
+    if [[ "$failed" -eq 0 ]]; then
+      info "All services are ready."
+      return
+    fi
+    sleep 2
+  done
+  compose ps >&2 || true
+  fail "Services did not become ready within 120 seconds. Run './manage logs' for details."
+}
+
+public_url() {
+  local configured
+  configured="$(env_value PUBLIC_BASE_URL)"
+  if [[ -n "$configured" ]]; then
+    printf '%s' "$configured"
+  else
+    printf 'http://localhost:%s' "$(env_value FRONTEND_PORT)"
+  fi
+}
+
+install_command() {
+  local base_url=""
+  local bind_address=""
+  local no_start=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --base-url)
+        [[ $# -ge 2 ]] || fail "--base-url requires a value."
+        base_url="$2"
+        shift 2
+        ;;
+      --bind-address)
+        [[ $# -ge 2 ]] || fail "--bind-address requires a value."
+        bind_address="$2"
+        shift 2
+        ;;
+      --no-start)
+        no_start=1
+        shift
+        ;;
+      *)
+        fail "Unknown install option '$1'. Run './manage install --help'."
+        ;;
+    esac
+  done
+
+  preflight
+  prepare_env "$base_url" "$bind_address"
+  validate_compose
+  if [[ "$no_start" -eq 1 ]]; then
+    info "Installation configuration is ready. Secrets were written to .env without being displayed."
+    return
+  fi
+  compose up --build -d
+  wait_for_services
+  info "Dashboard: $(public_url)"
+}
+
+start_command() {
+  local build=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --build)
+        build=1
+        shift
+        ;;
+      *)
+        fail "Unknown start option '$1'. Run './manage start --help'."
+        ;;
+    esac
+  done
+  preflight
+  validate_compose
+  if [[ "$build" -eq 1 ]]; then
+    compose up --build -d
+  else
+    compose up -d
+  fi
+  wait_for_services
+  info "Dashboard: $(public_url)"
+}
+
+stop_command() {
+  preflight
+  require_env
+  compose down
+  info "Application stopped. Persistent volumes were preserved."
+}
+
+status_command() {
+  preflight
+  require_env
+  compose ps
+  info "Dashboard: $(public_url)"
+}
+
+logs_command() {
+  local service=""
+  local follow=0
+  local tail_lines=200
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --follow|-f)
+        follow=1
+        shift
+        ;;
+      --tail)
+        [[ $# -ge 2 ]] || fail "--tail requires a line count."
+        tail_lines="$2"
+        shift 2
+        ;;
+      -*)
+        fail "Unknown logs option '$1'. Run './manage logs --help'."
+        ;;
+      *)
+        [[ -z "$service" ]] || fail "Only one service may be specified."
+        service="$1"
+        shift
+        ;;
+    esac
+  done
+  preflight
+  require_env
+  local args=(logs --tail "$tail_lines")
+  [[ "$follow" -eq 0 ]] || args+=(--follow)
+  [[ -z "$service" ]] || args+=("$service")
+  compose "${args[@]}"
+}
+
+volume_name() {
+  local service="$1"
+  local target="$2"
+  local container_id
+  container_id="$(compose ps -aq "$service" | head -n 1)"
+  if [[ -z "$container_id" ]]; then
+    compose create "$service" >/dev/null
+    container_id="$(compose ps -aq "$service" | head -n 1)"
+  fi
+  [[ -n "$container_id" ]] || fail "Unable to create or locate the $service container."
+  docker inspect "$container_id" \
+    --format "{{range .Mounts}}{{if eq .Destination \"$target\"}}{{.Name}}{{end}}{{end}}"
+}
+
+archive_volume() {
+  local volume="$1"
+  local backup_dir="$2"
+  local filename="$3"
+  docker run --rm \
+    --volume "$volume:/source:ro" \
+    --volume "$backup_dir:/backup" \
+    python:3.12-slim \
+    python -c "import sys, tarfile; archive=tarfile.open('/backup/' + sys.argv[1], 'w:gz'); archive.add('/source', arcname='.'); archive.close()" \
+    "$filename"
+}
+
+restore_volume() {
+  local volume="$1"
+  local backup_dir="$2"
+  local filename="$3"
+  docker run --rm \
+    --volume "$volume:/restore" \
+    --volume "$backup_dir:/backup:ro" \
+    python:3.12-slim \
+    python -c "import pathlib, shutil, sys, tarfile; root=pathlib.Path('/restore'); [shutil.rmtree(item) if item.is_dir() else item.unlink() for item in root.iterdir()]; archive=tarfile.open('/backup/' + sys.argv[1]); archive.extractall('/restore', filter='data'); archive.close()" \
+    "$filename"
+}
+
+backup_command() {
+  local backup_dir="${1:-$ROOT_DIR/backups/$(date -u +%Y%m%dT%H%M%SZ)}"
+  [[ $# -le 1 ]] || fail "Usage: ./manage backup [DIRECTORY]"
+  preflight
+  validate_compose
+  mkdir -p "$backup_dir"
+  backup_dir="$(cd "$backup_dir" && pwd)"
+
+  local had_running=0
+  if [[ -n "$(compose ps --status running -q)" ]]; then
+    had_running=1
+  fi
+  compose create data-ingestion quant-engine portfolio-engine >/dev/null
+  compose stop
+
+  local spec service target filename volume backup_failed=0
+  for spec in "${VOLUME_SPECS[@]}"; do
+    IFS=: read -r service target filename <<<"$spec"
+    target="/${target#/}"
+    volume="$(volume_name "$service" "$target")"
+    if [[ -z "$volume" ]] || ! archive_volume "$volume" "$backup_dir" "$filename"; then
+      backup_failed=1
+      break
+    fi
+  done
+
+  {
+    printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'git_commit=%s\n' "$(git rev-parse HEAD 2>/dev/null || printf unknown)"
+  } >"$backup_dir/manifest.txt"
+
+  if [[ "$had_running" -eq 1 ]]; then
+    compose start
+    wait_for_services
+  fi
+  [[ "$backup_failed" -eq 0 ]] || fail "Backup failed. Existing services were returned to their prior running state when possible."
+  info "Backup created: $backup_dir"
+}
+
+restore_command() {
+  [[ $# -ge 1 ]] || fail "Usage: ./manage restore DIRECTORY [--no-start]"
+  local backup_dir="$1"
+  local no_start=0
+  shift
+  if [[ "${1:-}" == "--no-start" ]]; then
+    no_start=1
+    shift
+  fi
+  [[ $# -eq 0 ]] || fail "Usage: ./manage restore DIRECTORY [--no-start]"
+  [[ -d "$backup_dir" ]] || fail "Backup directory '$backup_dir' does not exist."
+  backup_dir="$(cd "$backup_dir" && pwd)"
+
+  preflight
+  validate_compose
+  local spec filename
+  for spec in "${VOLUME_SPECS[@]}"; do
+    filename="${spec##*:}"
+    [[ -f "$backup_dir/$filename" ]] || fail "Backup is incomplete: missing $filename."
+  done
+
+  compose down
+  compose create data-ingestion quant-engine portfolio-engine >/dev/null
+  local service target volume
+  for spec in "${VOLUME_SPECS[@]}"; do
+    IFS=: read -r service target filename <<<"$spec"
+    target="/${target#/}"
+    volume="$(volume_name "$service" "$target")"
+    [[ -n "$volume" ]] || fail "Unable to resolve the $service data volume."
+    restore_volume "$volume" "$backup_dir" "$filename"
+  done
+
+  if [[ "$no_start" -eq 1 ]]; then
+    info "Backup restored. Services remain stopped."
+    return
+  fi
+  compose up -d
+  wait_for_services
+  info "Backup restored and verified."
+}
+
+upgrade_command() {
+  [[ $# -eq 0 ]] || fail "Usage: ./manage upgrade"
+  preflight
+  validate_compose
+  [[ -z "$(git status --porcelain)" ]] || fail "Git worktree has local changes. Commit or move them before upgrading."
+  backup_command
+  git pull --ff-only
+  compose build --pull
+  compose up -d
+  wait_for_services
+  info "Upgrade completed. Dashboard: $(public_url)"
+}
+
+verify_command() {
+  local config_only=0
+  if [[ "${1:-}" == "--config-only" ]]; then
+    config_only=1
+    shift
+  fi
+  [[ $# -eq 0 ]] || fail "Usage: ./manage verify [--config-only]"
+  preflight
+  validate_compose
+  if [[ "$config_only" -eq 0 ]]; then
+    wait_for_services
+  fi
+  info "Verification passed."
+}
+
+main() {
+  local command="${1:-help}"
+  [[ $# -eq 0 ]] || shift
+  if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    command_help "$command"
+    return
+  fi
+
+  case "$command" in
+    help|--help|-h)
+      usage
+      ;;
+    install)
+      install_command "$@"
+      ;;
+    start)
+      start_command "$@"
+      ;;
+    stop)
+      [[ $# -eq 0 ]] || fail "Usage: ./manage stop"
+      stop_command
+      ;;
+    restart)
+      stop_command
+      start_command "$@"
+      ;;
+    status)
+      [[ $# -eq 0 ]] || fail "Usage: ./manage status"
+      status_command
+      ;;
+    logs)
+      logs_command "$@"
+      ;;
+    backup)
+      backup_command "$@"
+      ;;
+    restore)
+      restore_command "$@"
+      ;;
+    upgrade)
+      upgrade_command "$@"
+      ;;
+    verify)
+      verify_command "$@"
+      ;;
+    *)
+      fail "Unknown command '$command'. Run './manage help'."
+      ;;
+  esac
+}
+
+main "$@"
