@@ -813,6 +813,20 @@ Its proxy expects backend services on local ports `8000`-`8003`.
 
 ## Tests
 
+Use changed-service verification for the smallest safe local check set:
+
+```bash
+./verify-changes changed
+```
+
+```powershell
+.\verify-changes.ps1 changed
+```
+
+Run one explicit service with `service <name>`, or use `full` before a broad
+release. JSON/JUnit reports and the complete path-to-job mapping are documented
+in [Changed-service verification](docs/changed-service-verification.md).
+
 Backend:
 
 ```bash

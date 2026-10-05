@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_COMMAND="${PYTHON:-python3}"
+
+exec "$PYTHON_COMMAND" "$ROOT_DIR/scripts/verify_changes.py" "$@"
