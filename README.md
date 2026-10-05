@@ -116,13 +116,15 @@ For a remote lab, specify both the operator-facing URL and host interface:
 ```bash
 ./manage install \
   --base-url https://market.lab.example \
-  --bind-address 192.0.2.10
+  --bind-address 192.0.2.10 \
+  --enable-auth
 ```
 
 ```powershell
 .\manage.ps1 install `
   --base-url https://market.lab.example `
-  --bind-address 192.0.2.10
+  --bind-address 192.0.2.10 `
+  --enable-auth
 ```
 
 Run `./manage status` or `.\manage.ps1 status` to display the configured
@@ -160,6 +162,21 @@ Create a consistent backup of all three database volumes:
 .\manage.ps1 backup
 ```
 
+Each backup includes `manifest.json` with archive SHA-256 checksums, application
+revision, Compose project, SQLite schema fingerprints, integrity results, file
+inventories, and per-table record counts. Backup succeeds only after the
+archives reconcile with that manifest.
+
+Verify a retained backup without changing application data:
+
+```bash
+./manage verify-backup /secure/path/to/backup
+```
+
+```powershell
+.\manage.ps1 verify-backup C:\secure\path\to\backup
+```
+
 Restore a trusted backup:
 
 ```bash
@@ -168,6 +185,21 @@ Restore a trusted backup:
 
 ```powershell
 .\manage.ps1 restore C:\secure\path\to\backup
+```
+
+To verify a restore without overwriting the active installation, target a
+separate stopped Compose project:
+
+```bash
+./manage restore /secure/path/to/backup \
+  --project-name market-analysis-restore-check \
+  --no-start
+```
+
+```powershell
+.\manage.ps1 restore C:\secure\path\to\backup `
+  --project-name market-analysis-restore-check `
+  --no-start
 ```
 
 Upgrade a clean checkout with a pre-upgrade backup, fast-forward pull, image
@@ -180,6 +212,10 @@ rebuild, startup, and readiness verification:
 ```powershell
 .\manage.ps1 upgrade
 ```
+
+A failed or unreconciled backup stops the upgrade before Git or containers are
+changed. `--allow-backup-failure` is an explicit emergency override and should
+only be used when another tested recovery point is already available.
 
 The logical Compose volumes are:
 

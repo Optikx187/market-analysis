@@ -14,6 +14,7 @@ $ErrorActionPreference = "Stop"
 $RootDir = $PSScriptRoot
 $EnvFile = Join-Path $RootDir ".env"
 $EnvExample = Join-Path $RootDir ".env.example"
+$BackupTool = Join-Path $RootDir "scripts/backup_manifest.py"
 $RunningOnWindows = $env:OS -eq "Windows_NT"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
 $VolumeSpecs = @(
@@ -66,6 +67,7 @@ Commands:
   status    Show service status and the configured dashboard URL
   logs      Stream or print service logs
   backup    Stop services briefly and archive all persistent volumes
+  verify-backup  Validate backup checksums, schemas, and record counts
   restore   Restore persistent volumes from a backup directory
   upgrade   Back up, fast-forward Git, rebuild, and verify
   verify    Validate Compose and service readiness
@@ -103,11 +105,14 @@ printing them, validates Docker Compose, and starts the application.
         "backup" {
             "Usage: .\manage.ps1 backup [DIRECTORY]"
         }
+        "verify-backup" {
+            "Usage: .\manage.ps1 verify-backup DIRECTORY"
+        }
         "restore" {
-            "Usage: .\manage.ps1 restore DIRECTORY [--no-start]"
+            "Usage: .\manage.ps1 restore DIRECTORY [--no-start] [--project-name NAME] [--allow-legacy]"
         }
         "upgrade" {
-            "Usage: .\manage.ps1 upgrade"
+            "Usage: .\manage.ps1 upgrade [--allow-backup-failure]"
         }
         "verify" {
             "Usage: .\manage.ps1 verify [--config-only]"
@@ -423,7 +428,7 @@ function Show-Log([string[]]$Arguments) {
 function Get-VolumeName([string]$Service, [string]$Target) {
     $containerId = (Get-ComposeOutput -Arguments @("ps", "-aq", $Service) | Select-Object -First 1)
     if ([string]::IsNullOrWhiteSpace($containerId)) {
-        & docker compose create $Service *> $null
+        & docker compose up --no-start --no-deps $Service *> $null
         if ($LASTEXITCODE -ne 0) { Fail "Unable to create the $Service container." }
         $containerId = (Get-ComposeOutput -Arguments @("ps", "-aq", $Service) | Select-Object -First 1)
     }
@@ -476,6 +481,94 @@ function Copy-Volume([string]$Source, [string]$Destination) {
     )
 }
 
+function Invoke-BackupTool {
+    param(
+        [Parameter(Mandatory = $true)][string]$BackupDir,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [string]$Volume = ""
+    )
+    if (-not (Test-Path $BackupTool -PathType Leaf)) {
+        Fail "Backup metadata tool is missing: $BackupTool"
+    }
+    $dockerArguments = @(
+        "run", "--rm",
+        "--volume", "${BackupTool}:/tool.py:ro",
+        "--volume", "${BackupDir}:/backup:ro"
+    )
+    if (-not [string]::IsNullOrWhiteSpace($Volume)) {
+        $dockerArguments += @("--volume", "${Volume}:/volume:ro")
+    }
+    $dockerArguments += @("python:3.12-slim", "python", "/tool.py")
+    $dockerArguments += $Arguments
+    $output = & docker @dockerArguments
+    if ($LASTEXITCODE -ne 0) {
+        Fail "Backup metadata verification failed."
+    }
+    return $output
+}
+
+function New-BackupManifest([string]$BackupDir) {
+    $commit = (& git rev-parse HEAD 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) {
+        $commit = "unknown"
+    }
+    $version = (& git describe --always --dirty --tags 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($version)) {
+        $version = $commit
+    }
+    $composeProject = $env:COMPOSE_PROJECT_NAME
+    if ([string]::IsNullOrWhiteSpace($composeProject)) {
+        $composeProject = Split-Path $RootDir -Leaf
+    }
+    $encryptionArgument = if (
+        [string]::IsNullOrWhiteSpace((Get-EnvValue "CREDENTIAL_ENCRYPTION_KEYS"))
+    ) {
+        "--no-encryption-key-configured"
+    }
+    else {
+        "--encryption-key-configured"
+    }
+    $manifest = Invoke-BackupTool -BackupDir $BackupDir -Arguments @(
+        "create",
+        "--backup-dir", "/backup",
+        "--git-commit", $commit,
+        "--app-version", $version,
+        "--compose-project", $composeProject,
+        $encryptionArgument
+    )
+    [IO.File]::WriteAllText(
+        (Join-Path $BackupDir "manifest.json"),
+        (($manifest -join [Environment]::NewLine) + [Environment]::NewLine),
+        $Utf8NoBom
+    )
+    Protect-Path -Path (Join-Path $BackupDir "manifest.json") -Directory $false
+}
+
+function Test-BackupManifest([string]$BackupDir) {
+    Invoke-BackupTool -BackupDir $BackupDir -Arguments @(
+        "verify", "--backup-dir", "/backup"
+    )
+}
+
+function Test-RestoredVolume(
+    [string]$Volume,
+    [string]$BackupDir,
+    [string]$Service
+) {
+    Invoke-BackupTool -BackupDir $BackupDir -Volume $Volume -Arguments @(
+        "verify-volume",
+        "--backup-dir", "/backup",
+        "--volume-root", "/volume",
+        "--service", $Service
+    )
+}
+
+function Assert-ProjectName([string]$ProjectName) {
+    if ($ProjectName -notmatch "^[a-z0-9][a-z0-9_-]*$") {
+        Fail "Compose project name must use lowercase letters, digits, hyphens, or underscores."
+    }
+}
+
 function Backup-App([string[]]$Arguments) {
     if ($Arguments.Count -gt 1) { Fail "Usage: .\manage.ps1 backup [DIRECTORY]" }
     $backupDir = if ($Arguments.Count -eq 1) {
@@ -494,8 +587,6 @@ function Backup-App([string[]]$Arguments) {
         Get-ComposeOutput -Arguments @("ps", "--services", "--status", "running") |
             Where-Object { -not [string]::IsNullOrWhiteSpace("$_") }
     )
-    & docker compose create data-ingestion quant-engine portfolio-engine *> $null
-    if ($LASTEXITCODE -ne 0) { Fail "Unable to prepare data containers for backup." }
     if ($runningServices.Count -gt 0) {
         Invoke-Compose -Arguments (@("stop") + $runningServices)
     }
@@ -508,43 +599,94 @@ function Backup-App([string[]]$Arguments) {
             }
             Export-Volume -Volume $volume -BackupDir $backupDir -FileName $spec.File
         }
-        $commit = & git rev-parse HEAD
-        if ($LASTEXITCODE -ne 0) { $commit = "unknown" }
-        $manifest = @(
-            "created_at=$([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))",
-            "git_commit=$commit"
-        )
-        [IO.File]::WriteAllLines(
-            (Join-Path $backupDir "manifest.txt"),
-            $manifest,
-            $Utf8NoBom
-        )
-        Protect-Path -Path (Join-Path $backupDir "manifest.txt") -Directory $false
+        New-BackupManifest -BackupDir $backupDir
+        Test-BackupManifest -BackupDir $backupDir
     }
     finally {
         if ($runningServices.Count -gt 0) {
             Invoke-Compose -Arguments (@("start") + $runningServices)
         }
     }
-    Write-Output "Backup created: $backupDir"
+    Write-Output "Backup created and verified: $backupDir"
+    Write-Output "Encryption keys are not included. Retain CREDENTIAL_ENCRYPTION_KEYS separately."
+}
+
+function Test-BackupApp([string[]]$Arguments) {
+    if ($Arguments.Count -ne 1) {
+        Fail "Usage: .\manage.ps1 verify-backup DIRECTORY"
+    }
+    $backupDir = $Arguments[0]
+    if (-not (Test-Path $backupDir -PathType Container)) {
+        Fail "Backup directory '$backupDir' does not exist."
+    }
+    $backupDir = (Resolve-Path $backupDir).Path
+    Invoke-Preflight
+    Test-BackupManifest -BackupDir $backupDir
 }
 
 function Restore-App([string[]]$Arguments) {
-    if ($Arguments.Count -lt 1 -or $Arguments.Count -gt 2) {
-        Fail "Usage: .\manage.ps1 restore DIRECTORY [--no-start]"
+    if ($Arguments.Count -lt 1) {
+        Fail "Usage: .\manage.ps1 restore DIRECTORY [--no-start] [--project-name NAME] [--allow-legacy]"
     }
     $backupDir = $Arguments[0]
-    $noStart = $Arguments.Count -eq 2 -and $Arguments[1] -eq "--no-start"
-    if ($Arguments.Count -eq 2 -and -not $noStart) {
-        Fail "Usage: .\manage.ps1 restore DIRECTORY [--no-start]"
+    $noStart = $false
+    $allowLegacy = $false
+    $projectName = ""
+    for ($index = 1; $index -lt $Arguments.Count; $index++) {
+        switch ($Arguments[$index]) {
+            "--no-start" {
+                $noStart = $true
+            }
+            "--allow-legacy" {
+                $allowLegacy = $true
+            }
+            "--project-name" {
+                if ($index + 1 -ge $Arguments.Count) {
+                    Fail "--project-name requires a value."
+                }
+                $index++
+                $projectName = $Arguments[$index]
+            }
+            default {
+                Fail "Usage: .\manage.ps1 restore DIRECTORY [--no-start] [--project-name NAME] [--allow-legacy]"
+            }
+        }
     }
     if (-not (Test-Path $backupDir -PathType Container)) {
         Fail "Backup directory '$backupDir' does not exist."
     }
     $backupDir = (Resolve-Path $backupDir).Path
+    if (-not [string]::IsNullOrWhiteSpace($projectName)) {
+        $sourceProject = $env:COMPOSE_PROJECT_NAME
+        if ([string]::IsNullOrWhiteSpace($sourceProject)) {
+            $sourceProject = Get-EnvValue "COMPOSE_PROJECT_NAME"
+        }
+        if ([string]::IsNullOrWhiteSpace($sourceProject)) {
+            $sourceProject = Split-Path $RootDir -Leaf
+        }
+        Assert-ProjectName -ProjectName $projectName
+        if ($projectName -eq $sourceProject) {
+            Fail "--project-name must differ from the active Compose project '$sourceProject'."
+        }
+        if (-not $noStart) {
+            Fail "--project-name requires --no-start so isolated restores cannot conflict with the running deployment."
+        }
+        $env:COMPOSE_PROJECT_NAME = $projectName
+    }
 
     Invoke-Preflight
     Test-ComposeConfig
+    $verifiedManifest = $false
+    if (Test-Path (Join-Path $backupDir "manifest.json") -PathType Leaf) {
+        Test-BackupManifest -BackupDir $backupDir
+        $verifiedManifest = $true
+    }
+    elseif ($allowLegacy) {
+        Write-Output "Warning: restoring a legacy backup without checksum or record-count reconciliation."
+    }
+    else {
+        Fail "Backup is missing manifest.json. Use --allow-legacy only for a trusted older backup."
+    }
     foreach ($spec in $VolumeSpecs) {
         if (-not (Test-Path (Join-Path $backupDir $spec.File) -PathType Leaf)) {
             Fail "Backup is incomplete: missing $($spec.File)."
@@ -552,8 +694,6 @@ function Restore-App([string[]]$Arguments) {
         Test-Archive -BackupDir $backupDir -FileName $spec.File
     }
 
-    & docker compose create data-ingestion quant-engine portfolio-engine *> $null
-    if ($LASTEXITCODE -ne 0) { Fail "Unable to prepare data containers for restore." }
     $runningServices = @(
         Get-ComposeOutput -Arguments @("ps", "--services", "--status", "running") |
             Where-Object { -not [string]::IsNullOrWhiteSpace("$_") }
@@ -574,6 +714,12 @@ function Restore-App([string[]]$Arguments) {
             Invoke-Checked -File "docker" -Arguments @("volume", "create", $stageVolume)
             $stageVolumes.Add($stageVolume)
             Expand-ArchiveToVolume -Volume $stageVolume -BackupDir $backupDir -FileName $spec.File
+            if ($verifiedManifest) {
+                Test-RestoredVolume `
+                    -Volume $stageVolume `
+                    -BackupDir $backupDir `
+                    -Service $spec.Service
+            }
             $rollbackVolume = "$restoreId-$index-rollback"
             Invoke-Checked -File "docker" -Arguments @("volume", "create", $rollbackVolume)
             $rollbackVolumes.Add($rollbackVolume)
@@ -621,7 +767,12 @@ function Restore-App([string[]]$Arguments) {
     }
 
     if ($noStart) {
-        Write-Output "Backup restored. Services remain stopped."
+        if (-not [string]::IsNullOrWhiteSpace($projectName)) {
+            Write-Output "Backup restored into isolated Compose project '$projectName'. Services remain stopped."
+        }
+        else {
+            Write-Output "Backup restored. Services remain stopped."
+        }
         return
     }
     Invoke-Compose -Arguments @("up", "-d")
@@ -630,7 +781,13 @@ function Restore-App([string[]]$Arguments) {
 }
 
 function Update-App([string[]]$Arguments) {
-    if ($Arguments.Count -ne 0) { Fail "Usage: .\manage.ps1 upgrade" }
+    $allowBackupFailure = $false
+    if ($Arguments.Count -eq 1 -and $Arguments[0] -eq "--allow-backup-failure") {
+        $allowBackupFailure = $true
+    }
+    elseif ($Arguments.Count -ne 0) {
+        Fail "Usage: .\manage.ps1 upgrade [--allow-backup-failure]"
+    }
     Invoke-Preflight
     Test-ComposeConfig
     $status = & git status --porcelain
@@ -638,7 +795,15 @@ function Update-App([string[]]$Arguments) {
     if (-not [string]::IsNullOrWhiteSpace("$status")) {
         Fail "Git worktree has local changes. Commit or move them before upgrading."
     }
-    Backup-App @()
+    try {
+        Backup-App @()
+    }
+    catch {
+        if (-not $allowBackupFailure) {
+            Fail "Upgrade stopped because the pre-upgrade backup failed. $($_.Exception.Message)"
+        }
+        Write-Output "Warning: continuing upgrade after backup failure by explicit operator override."
+    }
     Invoke-Checked -File "git" -Arguments @("pull", "--ff-only")
     Invoke-Compose -Arguments @("build", "--pull")
     Invoke-Compose -Arguments @("up", "-d")
@@ -686,6 +851,7 @@ try {
         }
         "logs" { Show-Log $CommandArgs }
         "backup" { Backup-App $CommandArgs }
+        "verify-backup" { Test-BackupApp $CommandArgs }
         "restore" { Restore-App $CommandArgs }
         "upgrade" { Update-App $CommandArgs }
         "verify" { Test-App $CommandArgs }

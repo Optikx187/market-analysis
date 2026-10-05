@@ -5,7 +5,7 @@ $BinDir = Join-Path $TempRoot "bin"
 $CommandLog = Join-Path $TempRoot "commands.log"
 $Commands = @(
     "install", "start", "stop", "restart", "status", "logs",
-    "backup", "restore", "upgrade", "verify"
+    "backup", "verify-backup", "restore", "upgrade", "verify"
 )
 
 function Assert-True([bool]$Condition, [string]$Message) {
@@ -27,10 +27,17 @@ try {
     Copy-Item (Join-Path $SourceRoot "manage.ps1") $TempRoot
     Copy-Item (Join-Path $SourceRoot ".env.example") $TempRoot
     Copy-Item (Join-Path $SourceRoot "docker-compose.yml") $TempRoot
+    New-Item -ItemType Directory -Path (Join-Path $TempRoot "scripts") | Out-Null
+    Copy-Item `
+        (Join-Path $SourceRoot "scripts/backup_manifest.py") `
+        (Join-Path $TempRoot "scripts/backup_manifest.py")
 
     @'
 #!/bin/sh
 printf '%s\n' "$*" >> "$MOCK_LOG"
+if [ "$1" = "compose" ]; then
+  printf 'compose-project=%s\n' "${COMPOSE_PROJECT_NAME:-default}" >> "$MOCK_LOG"
+fi
 if [ "$1" = "compose" ] && [ "$2" = "ps" ] && [ "$3" = "--services" ]; then
   printf 'data-ingestion\nportfolio-engine\n'
 fi
@@ -43,6 +50,10 @@ fi
 if [ "$1" = "run" ] && [ "${MOCK_ARCHIVE_FAIL:-0}" = "1" ] &&
    printf '%s\n' "$*" | grep -q 'quant-engine-db.tgz'; then
   exit 1
+fi
+if [ "$1" = "run" ] && printf '%s\n' "$*" | grep -q '/tool.py create'; then
+  printf '%s\n' '{"format_version":1,"volumes":[]}'
+  exit 0
 fi
 if [ "$1" = "run" ] && [ "$2" = "--rm" ] && [ "$3" = "python:3.12-slim" ]; then
   cat <<'EOF'
@@ -111,6 +122,12 @@ exit 0
     Assert-True (
         $commandLogContents.Contains("compose start data-ingestion portfolio-engine")
     ) "Backup did not restart exactly the running services."
+    Assert-True (
+        Test-Path (Join-Path $backupDir "manifest.json") -PathType Leaf
+    ) "Backup manifest was not created."
+    Assert-True (
+        $backup.Output.Contains("Encryption keys are not included")
+    ) "Backup omitted the encryption-key recovery warning."
 
     Set-Content -Path $CommandLog -Value "" -Encoding utf8NoBOM
     $env:MOCK_ARCHIVE_FAIL = "1"
@@ -121,6 +138,76 @@ exit 0
     Assert-True (
         $commandLogContents.Contains("compose start data-ingestion portfolio-engine")
     ) "Failed backup did not restart the previously running services."
+
+    $isolatedBackupDir = Join-Path $TempRoot "isolated-backup"
+    New-Item -ItemType Directory -Path $isolatedBackupDir | Out-Null
+    foreach ($file in @(
+        "data-ingestion-db.tgz",
+        "quant-engine-db.tgz",
+        "portfolio-db.tgz",
+        "manifest.json"
+    )) {
+        New-Item -ItemType File -Path (Join-Path $isolatedBackupDir $file) | Out-Null
+    }
+    $isolatedRestore = Invoke-Manage @(
+        "restore",
+        $isolatedBackupDir,
+        "--project-name", "restore-check",
+        "--no-start"
+    )
+    Assert-True (
+        $isolatedRestore.ExitCode -eq 0
+    ) "Isolated restore failed: $($isolatedRestore.Output)"
+    Assert-True (
+        $isolatedRestore.Output.Contains("isolated Compose project 'restore-check'")
+    ) "Isolated restore did not identify its target project."
+    $commandLogContents = Get-Content $CommandLog -Raw
+    Assert-True (
+        $commandLogContents.Contains("compose-project=restore-check")
+    ) "Isolated restore did not use its requested Compose project."
+
+    $legacyBackupDir = Join-Path $TempRoot "legacy-backup"
+    New-Item -ItemType Directory -Path $legacyBackupDir | Out-Null
+    foreach ($file in @(
+        "data-ingestion-db.tgz",
+        "quant-engine-db.tgz",
+        "portfolio-db.tgz"
+    )) {
+        New-Item -ItemType File -Path (Join-Path $legacyBackupDir $file) | Out-Null
+    }
+    $legacyRefused = Invoke-Manage @("restore", $legacyBackupDir, "--no-start")
+    Assert-True (
+        $legacyRefused.ExitCode -ne 0
+    ) "Restore accepted a legacy backup without explicit override."
+    $legacyAllowed = Invoke-Manage @(
+        "restore", $legacyBackupDir, "--no-start", "--allow-legacy"
+    )
+    Assert-True (
+        $legacyAllowed.ExitCode -eq 0
+    ) "Restore rejected the explicit legacy-backup override."
+    Assert-True (
+        $legacyAllowed.Output.Contains("legacy backup")
+    ) "Legacy restore omitted its reconciliation warning."
+
+    Set-Content -Path $CommandLog -Value "" -Encoding utf8NoBOM
+    $env:MOCK_ARCHIVE_FAIL = "1"
+    $blockedUpgrade = Invoke-Manage @("upgrade")
+    Assert-True ($blockedUpgrade.ExitCode -ne 0) "Upgrade ignored a failed backup."
+    $commandLogContents = Get-Content $CommandLog -Raw
+    Assert-True (
+        -not $commandLogContents.Contains("git pull --ff-only")
+    ) "Upgrade pulled code after a failed backup."
+
+    Set-Content -Path $CommandLog -Value "" -Encoding utf8NoBOM
+    $overriddenUpgrade = Invoke-Manage @("upgrade", "--allow-backup-failure")
+    Remove-Item Env:MOCK_ARCHIVE_FAIL
+    Assert-True (
+        $overriddenUpgrade.ExitCode -eq 0
+    ) "Explicit backup-failure override did not continue the upgrade."
+    $commandLogContents = Get-Content $CommandLog -Raw
+    Assert-True (
+        $commandLogContents.Contains("git pull --ff-only")
+    ) "Explicit override did not continue to the Git update."
 
     Write-Output "PowerShell management tests passed"
 }

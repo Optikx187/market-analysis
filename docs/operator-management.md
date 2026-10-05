@@ -85,6 +85,7 @@ operator's responsibility.
 | Status and URL | `./manage status` | `.\manage.ps1 status` |
 | All logs | `./manage logs` | `.\manage.ps1 logs` |
 | One service | `./manage logs quant-engine --follow` | `.\manage.ps1 logs quant-engine --follow` |
+| Verify a backup | `./manage verify-backup /path/to/backup` | `.\manage.ps1 verify-backup C:\path\to\backup` |
 | Validate configuration | `./manage verify --config-only` | `.\manage.ps1 verify --config-only` |
 | Validate running services | `./manage verify` | `.\manage.ps1 verify` |
 
@@ -110,12 +111,36 @@ destination is `backups/<UTC timestamp>` and contains:
 - `data-ingestion-db.tgz`
 - `quant-engine-db.tgz`
 - `portfolio-db.tgz`
-- `manifest.txt`
+- `manifest.json`
+
+`manifest.json` records:
+
+- the UTC creation time, Git commit, application version, and Compose project;
+- each archive's SHA-256 checksum and byte size;
+- a file inventory with per-file checksums;
+- SQLite integrity results, `PRAGMA user_version`, schema fingerprints, and
+  table record counts;
+- an explicit warning that encryption keys are not included.
+
+The backup command reopens every archive, verifies safe extraction, runs
+SQLite integrity checks, and reconciles the archive contents with the manifest
+before reporting success. A verification failure restarts the services that
+were running and returns a nonzero status.
 
 Use an explicit destination when required:
 
 ```bash
 ./manage backup /secure/path/market-analysis-before-upgrade
+```
+
+Verify a retained recovery point without touching the running deployment:
+
+```bash
+./manage verify-backup /secure/path/market-analysis-before-upgrade
+```
+
+```powershell
+.\manage.ps1 verify-backup C:\secure\market-analysis-before-upgrade
 ```
 
 Restore only from a trusted backup created by the same command:
@@ -129,8 +154,35 @@ Restore only from a trusted backup created by the same command:
 ```
 
 Restore stops the deployment, replaces all three persistent volume contents,
-starts the application, and verifies readiness. Add `--no-start` to inspect the
-restored volumes before startup.
+starts the application, and verifies readiness. Before downtime, it verifies
+archive checksums, inventories, schemas, integrity, and record counts. It then
+reconciles each staged volume against the same manifest before replacing live
+data. Add `--no-start` to inspect the restored volumes before startup.
+
+Test recovery without overwriting the source deployment by restoring into an
+isolated, stopped Compose project:
+
+```bash
+./manage restore /secure/path/market-analysis-before-upgrade \
+  --project-name market-analysis-restore-check \
+  --no-start
+```
+
+```powershell
+.\manage.ps1 restore C:\secure\market-analysis-before-upgrade `
+  --project-name market-analysis-restore-check `
+  --no-start
+```
+
+The alternate project name gives the restored containers and named volumes a
+separate namespace. Remove that isolated project after inspection with
+`COMPOSE_PROJECT_NAME=market-analysis-restore-check docker compose down
+--volumes` or the PowerShell equivalent. Never use `--volumes` against the
+active project.
+
+Backups created before `manifest.json` can be restored only with the explicit
+`--allow-legacy` option. That bypasses checksum and record-count reconciliation;
+use it only for a trusted older archive after retaining a separate copy.
 
 ## Upgrade and rollback
 
@@ -146,7 +198,9 @@ The supported upgrade command requires a clean Git worktree:
 
 It creates a backup, runs `git pull --ff-only`, rebuilds with refreshed base
 images, starts the services, and verifies readiness. It never deletes named
-volumes.
+volumes. A failed or unreconciled backup stops the upgrade before `git pull`.
+The emergency `--allow-backup-failure` override is available only for cases
+where another tested recovery point already exists.
 
 If verification fails:
 
@@ -171,3 +225,6 @@ removed without changing the persistent volume layout.
 - Backups contain portfolio and configuration data. Store them as sensitive
   files and keep encryption keys available for the corresponding retention
   period.
+- `CREDENTIAL_ENCRYPTION_KEYS` is deliberately excluded from backup archives.
+  Preserve every active and retained key in a separate secret manager; encrypted
+  provider credentials cannot be recovered without the matching key.

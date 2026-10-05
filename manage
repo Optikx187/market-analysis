@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$ROOT_DIR/.env"
 ENV_EXAMPLE="$ROOT_DIR/.env.example"
+BACKUP_TOOL="$ROOT_DIR/scripts/backup_manifest.py"
 VOLUME_SPECS=(
   "data-ingestion:/app/data:data-ingestion-db.tgz"
   "quant-engine:/app/data:quant-engine-db.tgz"
@@ -40,6 +41,7 @@ Commands:
   status    Show service status and the configured dashboard URL
   logs      Stream or print service logs
   backup    Stop services briefly and archive all persistent volumes
+  verify-backup  Validate backup checksums, schemas, and record counts
   restore   Restore persistent volumes from a backup directory
   upgrade   Back up, fast-forward Git, rebuild, and verify
   verify    Validate Compose and service readiness
@@ -104,23 +106,34 @@ Usage: ./manage backup [DIRECTORY]
 
 Briefly stops services, archives the three persistent named volumes, and then
 restarts the previously running deployment. The default destination is a
-timestamped directory under ./backups.
+timestamped directory under ./backups. The backup is verified before success.
+EOF
+      ;;
+    verify-backup)
+      cat <<'EOF'
+Usage: ./manage verify-backup DIRECTORY
+
+Validates archive checksums, safe extraction, SQLite integrity, schemas, file
+inventories, and table record counts without changing application data.
 EOF
       ;;
     restore)
       cat <<'EOF'
-Usage: ./manage restore DIRECTORY [--no-start]
+Usage: ./manage restore DIRECTORY [--no-start] [--project-name NAME] [--allow-legacy]
 
 Stops the application, replaces all three persistent volumes from a backup
 created by "./manage backup", and starts the restored deployment by default.
+Use --project-name with --no-start to restore into an isolated Compose project.
+Legacy backups without checksums require the explicit --allow-legacy override.
 EOF
       ;;
     upgrade)
       cat <<'EOF'
-Usage: ./manage upgrade
+Usage: ./manage upgrade [--allow-backup-failure]
 
 Requires a clean Git worktree. Creates a backup, fast-forwards the current
-branch, rebuilds images, starts services, and verifies readiness.
+branch, rebuilds images, starts services, and verifies readiness. A failed
+backup stops the upgrade unless --allow-backup-failure is explicitly supplied.
 EOF
       ;;
     verify)
@@ -400,7 +413,7 @@ volume_name() {
   local container_id
   container_id="$(compose ps -aq "$service" | head -n 1)"
   if [[ -z "$container_id" ]]; then
-    compose create "$service" >/dev/null
+    compose up --no-start --no-deps "$service" >/dev/null
     container_id="$(compose ps -aq "$service" | head -n 1)"
   fi
   [[ -n "$container_id" ]] || fail "Unable to create or locate the $service container."
@@ -458,6 +471,60 @@ secure_backup_path() {
   find "$backup_dir" -type f -exec chmod 600 {} +
 }
 
+backup_tool() {
+  local backup_dir="$1"
+  shift
+  [[ -f "$BACKUP_TOOL" ]] || fail "Backup metadata tool is missing: $BACKUP_TOOL"
+  docker run --rm \
+    --volume "$BACKUP_TOOL:/tool.py:ro" \
+    --volume "$backup_dir:/backup:ro" \
+    python:3.12-slim \
+    python /tool.py "$@"
+}
+
+create_backup_manifest() {
+  local backup_dir="$1"
+  local git_commit app_version compose_project encryption_option
+  git_commit="$(git rev-parse HEAD 2>/dev/null || printf unknown)"
+  app_version="$(git describe --always --dirty --tags 2>/dev/null || printf '%s' "$git_commit")"
+  compose_project="${COMPOSE_PROJECT_NAME:-$(basename "$ROOT_DIR")}"
+  encryption_option="--no-encryption-key-configured"
+  if [[ -n "$(env_value CREDENTIAL_ENCRYPTION_KEYS)" ]]; then
+    encryption_option="--encryption-key-configured"
+  fi
+  backup_tool "$backup_dir" create \
+    --backup-dir /backup \
+    --git-commit "${git_commit:-unknown}" \
+    --app-version "${app_version:-${git_commit:-unknown}}" \
+    --compose-project "$compose_project" \
+    "$encryption_option" \
+    >"$backup_dir/manifest.json"
+}
+
+verify_backup_manifest() {
+  local backup_dir="$1"
+  backup_tool "$backup_dir" verify --backup-dir /backup
+}
+
+verify_restored_volume() {
+  local volume="$1"
+  local backup_dir="$2"
+  local service="$3"
+  docker run --rm \
+    --volume "$BACKUP_TOOL:/tool.py:ro" \
+    --volume "$backup_dir:/backup:ro" \
+    --volume "$volume:/volume:ro" \
+    python:3.12-slim \
+    python /tool.py verify-volume \
+      --backup-dir /backup \
+      --volume-root /volume \
+      --service "$service"
+}
+
+validate_project_name() {
+  [[ "$1" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || fail "Compose project name must use lowercase letters, digits, hyphens, or underscores."
+}
+
 restart_services() {
   [[ $# -eq 0 ]] || compose start "$@"
 }
@@ -472,7 +539,6 @@ backup_command() {
   backup_dir="$(cd "$backup_dir" && pwd)"
   secure_backup_path "$backup_dir"
 
-  compose create data-ingestion quant-engine portfolio-engine >/dev/null
   local running_output
   running_output="$(compose ps --services --status running)"
   local -a running_services=()
@@ -510,33 +576,76 @@ backup_command() {
     filename="${VOLUME_SPECS[$index]##*:}"
     archive_volume "${volumes[$index]}" "$backup_dir" "$filename"
   done
-  {
-    printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf 'git_commit=%s\n' "$(git rev-parse HEAD 2>/dev/null || printf unknown)"
-  } >"$backup_dir/manifest.txt"
+  create_backup_manifest "$backup_dir"
+  verify_backup_manifest "$backup_dir"
   secure_backup_path "$backup_dir"
 
   restart_services "${running_services[@]}"
   backup_needs_restart=0
   trap - ERR
-  info "Backup created: $backup_dir"
+  info "Backup created and verified: $backup_dir"
+  info "Encryption keys are not included. Retain CREDENTIAL_ENCRYPTION_KEYS separately."
+}
+
+verify_backup_command() {
+  [[ $# -eq 1 ]] || fail "Usage: ./manage verify-backup DIRECTORY"
+  local backup_dir="$1"
+  [[ -d "$backup_dir" ]] || fail "Backup directory '$backup_dir' does not exist."
+  backup_dir="$(cd "$backup_dir" && pwd)"
+  preflight
+  verify_backup_manifest "$backup_dir"
 }
 
 restore_command() {
   [[ $# -ge 1 ]] || fail "Usage: ./manage restore DIRECTORY [--no-start]"
   local backup_dir="$1"
   local no_start=0
+  local allow_legacy=0
+  local project_name=""
   shift
-  if [[ "${1:-}" == "--no-start" ]]; then
-    no_start=1
-    shift
-  fi
-  [[ $# -eq 0 ]] || fail "Usage: ./manage restore DIRECTORY [--no-start]"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-start)
+        no_start=1
+        shift
+        ;;
+      --project-name)
+        [[ $# -ge 2 ]] || fail "--project-name requires a value."
+        project_name="$2"
+        shift 2
+        ;;
+      --allow-legacy)
+        allow_legacy=1
+        shift
+        ;;
+      *)
+        fail "Usage: ./manage restore DIRECTORY [--no-start] [--project-name NAME] [--allow-legacy]"
+        ;;
+    esac
+  done
   [[ -d "$backup_dir" ]] || fail "Backup directory '$backup_dir' does not exist."
   backup_dir="$(cd "$backup_dir" && pwd)"
+  if [[ -n "$project_name" ]]; then
+    local source_project
+    source_project="${COMPOSE_PROJECT_NAME:-$(env_value COMPOSE_PROJECT_NAME)}"
+    source_project="${source_project:-$(basename "$ROOT_DIR")}"
+    validate_project_name "$project_name"
+    [[ "$project_name" != "$source_project" ]] || fail "--project-name must differ from the active Compose project '$source_project'."
+    [[ "$no_start" -eq 1 ]] || fail "--project-name requires --no-start so isolated restores cannot conflict with the running deployment."
+    export COMPOSE_PROJECT_NAME="$project_name"
+  fi
 
   preflight
   validate_compose
+  local verified_manifest=0
+  if [[ -f "$backup_dir/manifest.json" ]]; then
+    verify_backup_manifest "$backup_dir"
+    verified_manifest=1
+  elif [[ "$allow_legacy" -eq 1 ]]; then
+    info "Warning: restoring a legacy backup without checksum or record-count reconciliation."
+  else
+    fail "Backup is missing manifest.json. Use --allow-legacy only for a trusted older backup."
+  fi
   local spec filename
   for spec in "${VOLUME_SPECS[@]}"; do
     filename="${spec##*:}"
@@ -544,7 +653,6 @@ restore_command() {
     validate_archive "$backup_dir" "$filename"
   done
 
-  compose create data-ingestion quant-engine portfolio-engine >/dev/null
   local running_output service target volume index
   running_output="$(compose ps --services --status running)"
   local -a running_services=()
@@ -590,6 +698,9 @@ restore_command() {
     docker volume create "$volume" >/dev/null
     stage_volumes+=("$volume")
     extract_archive "$volume" "$backup_dir" "$filename"
+    if [[ "$verified_manifest" -eq 1 ]]; then
+      verify_restored_volume "$volume" "$backup_dir" "$service"
+    fi
     volume="${restore_id}-${index}-rollback"
     docker volume create "$volume" >/dev/null
     rollback_volumes+=("$volume")
@@ -611,7 +722,11 @@ restore_command() {
   done
 
   if [[ "$no_start" -eq 1 ]]; then
-    info "Backup restored. Services remain stopped."
+    if [[ -n "$project_name" ]]; then
+      info "Backup restored into isolated Compose project '$project_name'. Services remain stopped."
+    else
+      info "Backup restored. Services remain stopped."
+    fi
     return
   fi
   compose up -d
@@ -620,11 +735,21 @@ restore_command() {
 }
 
 upgrade_command() {
-  [[ $# -eq 0 ]] || fail "Usage: ./manage upgrade"
+  local allow_backup_failure=0
+  if [[ "${1:-}" == "--allow-backup-failure" ]]; then
+    allow_backup_failure=1
+    shift
+  fi
+  [[ $# -eq 0 ]] || fail "Usage: ./manage upgrade [--allow-backup-failure]"
   preflight
   validate_compose
   [[ -z "$(git status --porcelain)" ]] || fail "Git worktree has local changes. Commit or move them before upgrading."
-  backup_command
+  if ! "$ROOT_DIR/manage" backup; then
+    if [[ "$allow_backup_failure" -eq 0 ]]; then
+      fail "Upgrade stopped because the pre-upgrade backup failed."
+    fi
+    info "Warning: continuing upgrade after backup failure by explicit operator override."
+  fi
   git pull --ff-only
   compose build --pull
   compose up -d
@@ -682,6 +807,9 @@ main() {
       ;;
     backup)
       backup_command "$@"
+      ;;
+    verify-backup)
+      verify_backup_command "$@"
       ;;
     restore)
       restore_command "$@"

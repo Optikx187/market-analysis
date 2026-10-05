@@ -16,6 +16,7 @@ COMMANDS = (
     "status",
     "logs",
     "backup",
+    "verify-backup",
     "restore",
     "upgrade",
     "verify",
@@ -23,6 +24,9 @@ COMMANDS = (
 
 FAKE_DOCKER = """#!/bin/sh
 printf '%s\\n' "$*" >> "$MOCK_LOG"
+if [ "$1" = "compose" ]; then
+  printf 'compose-project=%s\\n' "${COMPOSE_PROJECT_NAME:-default}" >> "$MOCK_LOG"
+fi
 if [ "$1" = "info" ] && [ "${MOCK_DOCKER_INFO_FAIL:-0}" = "1" ]; then
   exit 1
 fi
@@ -38,6 +42,10 @@ fi
 if [ "$1" = "run" ] && [ "${MOCK_ARCHIVE_FAIL:-0}" = "1" ] &&
    printf '%s\\n' "$*" | grep -q 'quant-engine-db.tgz'; then
   exit 1
+fi
+if [ "$1" = "run" ] && printf '%s\\n' "$*" | grep -q '/tool.py create'; then
+  printf '%s\\n' '{"format_version":1,"volumes":[]}'
+  exit 0
 fi
 if [ "$1" = "run" ] && [ "$2" = "--rm" ] && [ "$3" = "python:3.12-slim" ]; then
   cat <<'EOF'
@@ -67,6 +75,11 @@ class ManageCommandTest(unittest.TestCase):
         self.bin_dir.mkdir()
         for filename in ("manage", ".env.example", "docker-compose.yml"):
             shutil.copy2(ROOT / filename, self.temp_dir / filename)
+        (self.temp_dir / "scripts").mkdir()
+        shutil.copy2(
+            ROOT / "scripts" / "backup_manifest.py",
+            self.temp_dir / "scripts" / "backup_manifest.py",
+        )
         (self.temp_dir / "manage").chmod(0o755)
         self._write_executable("docker", FAKE_DOCKER)
         self._write_executable("git", FAKE_GIT)
@@ -215,9 +228,105 @@ class ManageCommandTest(unittest.TestCase):
         self.assertNotIn("compose start quant-engine", log)
         self.assertEqual(stat.S_IMODE(backup_dir.stat().st_mode), 0o700)
         self.assertEqual(
-            stat.S_IMODE((backup_dir / "manifest.txt").stat().st_mode),
+            stat.S_IMODE((backup_dir / "manifest.json").stat().st_mode),
             0o600,
         )
+        self.assertIn("Encryption keys are not included", result.stdout)
+
+    def test_isolated_restore_uses_separate_compose_project(self) -> None:
+        shutil.copy2(self.temp_dir / ".env.example", self.temp_dir / ".env")
+        backup_dir = self.temp_dir / "backup"
+        backup_dir.mkdir()
+        for filename in (
+            "data-ingestion-db.tgz",
+            "quant-engine-db.tgz",
+            "portfolio-db.tgz",
+            "manifest.json",
+        ):
+            (backup_dir / filename).touch()
+
+        result = self.run_manage(
+            "restore",
+            str(backup_dir),
+            "--project-name",
+            "restore-check",
+            "--no-start",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("isolated Compose project 'restore-check'", result.stdout)
+        self.assertIn("compose-project=restore-check", self.log_file.read_text())
+
+    def test_restore_requires_explicit_legacy_override(self) -> None:
+        shutil.copy2(self.temp_dir / ".env.example", self.temp_dir / ".env")
+        backup_dir = self.temp_dir / "legacy-backup"
+        backup_dir.mkdir()
+        for archive in (
+            "data-ingestion-db.tgz",
+            "quant-engine-db.tgz",
+            "portfolio-db.tgz",
+        ):
+            (backup_dir / archive).touch()
+
+        refused = self.run_manage("restore", str(backup_dir), "--no-start")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("missing manifest.json", refused.stderr)
+
+        allowed = self.run_manage(
+            "restore",
+            str(backup_dir),
+            "--no-start",
+            "--allow-legacy",
+        )
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertIn("legacy backup", allowed.stdout)
+
+    def test_isolated_restore_rejects_active_project_name(self) -> None:
+        shutil.copy2(self.temp_dir / ".env.example", self.temp_dir / ".env")
+        backup_dir = self.temp_dir / "backup"
+        backup_dir.mkdir()
+        for archive in (
+            "data-ingestion-db.tgz",
+            "quant-engine-db.tgz",
+            "portfolio-db.tgz",
+            "manifest.json",
+        ):
+            (backup_dir / archive).touch()
+
+        result = self.run_manage(
+            "restore",
+            str(backup_dir),
+            "--project-name",
+            self.temp_dir.name,
+            "--no-start",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must differ from the active Compose project", result.stderr)
+
+    def test_upgrade_stops_after_failed_backup_without_override(self) -> None:
+        shutil.copy2(self.temp_dir / ".env.example", self.temp_dir / ".env")
+
+        result = self.run_manage(
+            "upgrade",
+            extra_env={"MOCK_ARCHIVE_FAIL": "1"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pre-upgrade backup failed", result.stderr)
+        self.assertNotIn("git pull --ff-only", self.log_file.read_text())
+
+    def test_upgrade_can_explicitly_override_failed_backup(self) -> None:
+        shutil.copy2(self.temp_dir / ".env.example", self.temp_dir / ".env")
+
+        result = self.run_manage(
+            "upgrade",
+            "--allow-backup-failure",
+            extra_env={"MOCK_ARCHIVE_FAIL": "1"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("explicit operator override", result.stdout)
+        self.assertIn("git pull --ff-only", self.log_file.read_text())
 
     def test_failed_backup_restarts_previous_services(self) -> None:
         shutil.copy2(self.temp_dir / ".env.example", self.temp_dir / ".env")
