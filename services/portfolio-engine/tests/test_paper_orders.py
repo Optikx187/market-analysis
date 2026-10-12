@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app import main
 from app import paper_orders as paper
-from app.database import Base, _migrate_existing_tables, get_db
+from app.database import Base, get_db
 
 # Frictions are pinned per request so every expected fill price is exact:
 # a 1% one-way cost and a 1% volume participation cap.
@@ -23,11 +23,10 @@ def _service(database_path, monkeypatch) -> Iterator[TestClient]:
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async def prepare() -> None:
-        """Create/upgrade the schema the way ``init_db`` does, on its own engine."""
+        """Create the current test schema on its own engine."""
         setup_engine = create_async_engine(url)
         async with setup_engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
-            await connection.run_sync(_migrate_existing_tables)
         await setup_engine.dispose()
 
     async def override_get_db():

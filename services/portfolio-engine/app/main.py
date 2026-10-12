@@ -28,7 +28,8 @@ from app.credential_store import (
     CredentialConfigurationError,
     CredentialDecryptionError,
 )
-from app.database import get_db, init_db, async_session
+from app.database import async_session, get_db
+from app.migration_state import validate_schema
 from app.models import (
     Trade, TradeStatus, SignalDirection, Portfolio, EquitySnapshot, AlertLog, CredentialSecret, User,
     TradeExecution, TradeJournal, ExecutionKind, PaperOrder, PaperOrderEvent, PaperOrderFill,
@@ -511,7 +512,7 @@ async def _initialize_live_control() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_auth_configuration()
-    await init_db()
+    await validate_schema()
     await _initialize_credential_store()
     await _initialize_live_control()
     yield

@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 from collections.abc import Iterator
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -115,6 +116,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_fetch_upcoming_earnings", earnings)
     monkeypatch.setattr(main, "_fetch_data_status", data_status)
     monkeypatch.setattr(main, "_fetch_candles", candles)
+    monkeypatch.setattr(main, "validate_schema", AsyncMock())
+    monkeypatch.setattr(main, "async_session", session_factory)
     main.app.dependency_overrides[get_db] = override_get_db
 
     class Env:

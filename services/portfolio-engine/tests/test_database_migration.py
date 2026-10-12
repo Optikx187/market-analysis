@@ -1,233 +1,323 @@
+import asyncio
+import hashlib
+import sqlite3
+from pathlib import Path
+
+import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.database import _migrate_existing_tables
-
-
-def test_existing_trade_and_alert_tables_receive_risk_columns(tmp_path) -> None:
-    engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
-    with engine.begin() as connection:
-        connection.execute(text(
-            "CREATE TABLE trades (id INTEGER PRIMARY KEY, ticker VARCHAR(20) NOT NULL)"
-        ))
-        connection.execute(text(
-            "CREATE TABLE alert_logs (id INTEGER PRIMARY KEY, ticker VARCHAR(20) NOT NULL)"
-        ))
-        connection.execute(text("INSERT INTO trades (ticker) VALUES ('AAPL')"))
-        connection.execute(text("INSERT INTO alert_logs (ticker) VALUES ('AAPL')"))
-        _migrate_existing_tables(connection)
-
-        inspector = inspect(connection)
-        trade_columns = {column["name"] for column in inspector.get_columns("trades")}
-        alert_columns = {column["name"] for column in inspector.get_columns("alert_logs")}
-        trade_row = connection.execute(text(
-            "SELECT user_key, asset_type, sector, market_regime, regime_label FROM trades"
-        )).one()
-        alert_row = connection.execute(text(
-            "SELECT user_key, approved, risk_decision_json, market_regime, regime_label FROM alert_logs"
-        )).one()
-
-    regime_columns = {
-        "market_regime",
-        "volatility_regime",
-        "breadth_regime",
-        "risk_regime",
-        "regime_label",
-        "timeframe_agreement",
-    }
-    assert {"user_key", "asset_type", "sector", *regime_columns}.issubset(trade_columns)
-    assert {"user_key", "approved", "risk_decision_json", *regime_columns}.issubset(alert_columns)
-    assert trade_row == ("default", "stock", "Unclassified", "unknown", "Unknown")
-    assert alert_row == ("default", 1, None, "unknown", "Unknown")
+from app import models  # noqa: F401
+from app.config import settings
+from app.database import Base
+from app.migration_state import validate_schema
 
 
-def test_legacy_closed_trades_backfill_attribution_columns(tmp_path) -> None:
-    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-closed.db'}")
+SERVICE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _config() -> Config:
+    return Config(str(SERVICE_ROOT / "alembic.ini"))
+
+
+def _upgrade(database_path: Path) -> None:
+    original_url = settings.DATABASE_URL
+    settings.DATABASE_URL = f"sqlite+aiosqlite:///{database_path}"
+    try:
+        command.upgrade(_config(), "head")
+    finally:
+        settings.DATABASE_URL = original_url
+
+
+def _check(database_path: Path) -> None:
+    original_url = settings.DATABASE_URL
+    settings.DATABASE_URL = f"sqlite+aiosqlite:///{database_path}"
+    try:
+        command.check(_config())
+    finally:
+        settings.DATABASE_URL = original_url
+
+
+def _downgrade(database_path: Path) -> None:
+    original_url = settings.DATABASE_URL
+    settings.DATABASE_URL = f"sqlite+aiosqlite:///{database_path}"
+    try:
+        command.downgrade(_config(), "base")
+    finally:
+        settings.DATABASE_URL = original_url
+
+
+def _schema_digest(database_path: Path) -> str:
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT type, name, COALESCE(sql, '') FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+    return hashlib.sha256(repr(rows).encode()).hexdigest()
+
+
+def _create_legacy_fixture(database_path: Path) -> None:
+    engine = create_engine(f"sqlite:///{database_path}")
     with engine.begin() as connection:
         connection.execute(text(
             "CREATE TABLE trades ("
-            "id INTEGER PRIMARY KEY, ticker VARCHAR(20) NOT NULL, quantity FLOAT, "
-            "status VARCHAR(10), pnl FLOAT)"
+            "id INTEGER PRIMARY KEY, ticker VARCHAR(20) NOT NULL, "
+            "quantity FLOAT, status VARCHAR(10), pnl FLOAT)"
         ))
         connection.execute(text(
             "INSERT INTO trades (ticker, quantity, status, pnl) VALUES "
             "('AAPL', 10, 'CLOSED', 120), ('BTC', 5, 'OPEN', NULL)"
         ))
-        _migrate_existing_tables(connection)
-
-        columns = {column["name"] for column in inspect(connection).get_columns("trades")}
-        rows = connection.execute(text(
-            "SELECT ticker, realized_quantity, gross_pnl, costs_total, strategy_name, "
-            "signal_confidence, excursion_status FROM trades ORDER BY id"
-        )).all()
-
-    assert {
-        "strategy_name",
-        "strategy_version",
-        "timeframe",
-        "signal_confidence",
-        "signal_context_json",
-        "execution_context_json",
-        "planned_entry_price",
-        "planned_exit_price",
-        "planned_quantity",
-        "entry_fees",
-        "entry_slippage",
-        "entry_costs_allocated",
-        "exit_fees_total",
-        "exit_slippage_total",
-        "costs_total",
-        "realized_quantity",
-        "gross_pnl",
-        "mfe_usd",
-        "mae_usd",
-        "mfe_pct",
-        "mae_pct",
-        "excursion_status",
-    }.issubset(columns)
-    assert rows[0] == ("AAPL", 10, 120, 0, None, None, "not_calculated")
-    assert rows[1] == ("BTC", 0, None, 0, None, None, "not_calculated")
-
-
-def test_legacy_action_item_and_preference_tables_are_migrated(tmp_path) -> None:
-    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-actions.db'}")
-    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE alert_logs ("
+            "id INTEGER PRIMARY KEY, ticker VARCHAR(20) NOT NULL)"
+        ))
+        connection.execute(text(
+            "INSERT INTO alert_logs (ticker) VALUES ('AAPL')"
+        ))
         connection.execute(text(
             "CREATE TABLE action_items ("
             "id INTEGER PRIMARY KEY, source_key VARCHAR(200) NOT NULL)"
         ))
         connection.execute(text(
-            "CREATE TABLE dashboard_preferences (id INTEGER PRIMARY KEY, user_key VARCHAR(120))"
+            "INSERT INTO action_items (source_key) VALUES ('earnings:AAPL')"
         ))
-        connection.execute(text("INSERT INTO action_items (source_key) VALUES ('earnings:AAPL')"))
-        connection.execute(text("INSERT INTO dashboard_preferences (user_key) VALUES ('default')"))
-        _migrate_existing_tables(connection)
-
-        inspector = inspect(connection)
-        action_columns = {column["name"] for column in inspector.get_columns("action_items")}
-        preference_columns = {column["name"] for column in inspector.get_columns("dashboard_preferences")}
-        indexes = {index["name"] for index in inspector.get_indexes("action_items")}
-        action_row = connection.execute(text(
-            "SELECT user_key, status, severity, category, is_mandatory, source_active FROM action_items"
-        )).one()
-        preference_row = connection.execute(text(
-            "SELECT user_key, widgets_json, mode, layouts_json FROM dashboard_preferences"
-        )).one()
-
-    assert {
-        "user_key",
-        "source_type",
-        "category",
-        "severity",
-        "is_mandatory",
-        "title",
-        "message",
-        "ticker",
-        "trade_id",
-        "order_id",
-        "context_id",
-        "deep_link_tab",
-        "deep_link_json",
-        "payload_json",
-        "payload_hash",
-        "status",
-        "source_active",
-        "snoozed_until",
-        "first_seen_at",
-        "last_seen_at",
-        "updated_at",
-        "acknowledged_at",
-        "snoozed_at",
-        "resolved_at",
-    }.issubset(action_columns)
-    assert {"widgets_json", "mode", "layouts_json", "updated_at"}.issubset(preference_columns)
-    assert "uq_action_item_source" in indexes
-    assert action_row == ("default", "open", "info", "operations", 0, 1)
-    assert preference_row == ("default", "[]", "detailed", "{}")
-
-
-def test_legacy_paper_order_table_receives_lifecycle_columns(tmp_path) -> None:
-    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-paper.db'}")
-    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE TABLE dashboard_preferences ("
+            "id INTEGER PRIMARY KEY, user_key VARCHAR(120))"
+        ))
+        connection.execute(text(
+            "INSERT INTO dashboard_preferences (user_key) VALUES ('default')"
+        ))
         connection.execute(text(
             "CREATE TABLE paper_orders ("
-            "id INTEGER PRIMARY KEY, idempotency_key VARCHAR(80), ticker VARCHAR(20) NOT NULL, "
-            "side VARCHAR(10), order_type VARCHAR(20), status VARCHAR(20), quantity FLOAT)"
+            "id INTEGER PRIMARY KEY, idempotency_key VARCHAR(80), "
+            "ticker VARCHAR(20) NOT NULL, side VARCHAR(10), "
+            "order_type VARCHAR(20), status VARCHAR(20), quantity FLOAT)"
         ))
         connection.execute(text(
             "INSERT INTO paper_orders "
             "(idempotency_key, ticker, side, order_type, status, quantity) "
             "VALUES ('legacy-1', 'AAPL', 'BUY', 'market', 'submitted', 5)"
         ))
-        _migrate_existing_tables(connection)
-
-        columns = {column["name"] for column in inspect(connection).get_columns("paper_orders")}
-        row = connection.execute(text(
-            "SELECT ticker, asset_type, role, filled_quantity, triggered, time_in_force, "
-            "reserved_cash, filled_notional FROM paper_orders"
-        )).one()
-
-    assert {
-        "role",
-        "asset_type",
-        "filled_quantity",
-        "limit_price",
-        "stop_price",
-        "trail_percent",
-        "trail_amount",
-        "trail_reference_price",
-        "effective_stop_price",
-        "triggered",
-        "triggered_at",
-        "time_in_force",
-        "expires_at",
-        "reference_price",
-        "reserved_cash",
-        "reservation_price",
-        "average_fill_price",
-        "filled_notional",
-        "fees_total",
-        "slippage_total",
-        "parent_id",
-        "oco_group",
-        "trade_id",
-        "last_candle_at",
-        "reject_reason",
-        "cancel_reason",
-        "created_at",
-        "updated_at",
-    }.issubset(columns)
-    assert row == ("AAPL", "stock", "standalone", 0, 0, "gtc", 0, 0)
-
-
-def test_legacy_user_owned_rows_receive_default_scope_and_indexes(tmp_path) -> None:
-    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-user-scope.db'}")
-    with engine.begin() as connection:
         connection.execute(text(
-            "CREATE TABLE portfolio (id INTEGER PRIMARY KEY, balance FLOAT NOT NULL)"
-        ))
-        connection.execute(text(
-            "CREATE TABLE trade_executions (id INTEGER PRIMARY KEY, trade_id INTEGER NOT NULL)"
+            "CREATE TABLE portfolio ("
+            "id INTEGER PRIMARY KEY, balance FLOAT NOT NULL)"
         ))
         connection.execute(text(
             "INSERT INTO portfolio (balance) VALUES (10000), (20000)"
         ))
         connection.execute(text(
+            "CREATE TABLE trade_executions ("
+            "id INTEGER PRIMARY KEY, trade_id INTEGER NOT NULL)"
+        ))
+        connection.execute(text(
             "INSERT INTO trade_executions (trade_id) VALUES (1)"
         ))
+    engine.dispose()
 
-        _migrate_existing_tables(connection)
 
+def test_empty_database_upgrades_to_head_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "empty.db"
+
+    _upgrade(database_path)
+    first_digest = _schema_digest(database_path)
+    _upgrade(database_path)
+
+    assert _schema_digest(database_path) == first_digest
+    _check(database_path)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone() == ("0001_portfolio",)
+
+
+def test_current_unversioned_schema_is_adopted_without_data_loss(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "current-like.db"
+    engine = create_engine(f"sqlite:///{database_path}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO portfolio "
+            "(user_key, balance, equity, peak_equity) "
+            "VALUES ('alice', 12345, 12500, 13000)"
+        ))
+    engine.dispose()
+
+    _upgrade(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT user_key, balance, equity, peak_equity FROM portfolio"
+        ).fetchall() == [("alice", 12345.0, 12500.0, 13000.0)]
+        assert connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone() == ("0001_portfolio",)
+
+
+def test_legacy_schema_upgrades_with_record_reconciliation(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "legacy.db"
+    _create_legacy_fixture(database_path)
+
+    _upgrade(database_path)
+
+    engine = create_engine(f"sqlite:///{database_path}")
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        trade_columns = {
+            column["name"] for column in inspector.get_columns("trades")
+        }
+        trade_rows = connection.execute(text(
+            "SELECT ticker, user_key, asset_type, sector, "
+            "realized_quantity, gross_pnl, costs_total, excursion_status "
+            "FROM trades ORDER BY id"
+        )).all()
+        alert_row = connection.execute(text(
+            "SELECT user_key, approved, risk_decision_json, "
+            "market_regime, regime_label FROM alert_logs"
+        )).one()
+        action_row = connection.execute(text(
+            "SELECT user_key, status, severity, category, "
+            "is_mandatory, source_active FROM action_items"
+        )).one()
+        preference_row = connection.execute(text(
+            "SELECT user_key, widgets_json, mode, layouts_json "
+            "FROM dashboard_preferences"
+        )).one()
+        paper_row = connection.execute(text(
+            "SELECT ticker, user_key, asset_type, role, filled_quantity, "
+            "triggered, time_in_force, reserved_cash, filled_notional "
+            "FROM paper_orders"
+        )).one()
         portfolio_rows = connection.execute(text(
             "SELECT balance, user_key FROM portfolio ORDER BY id"
         )).all()
         execution_row = connection.execute(text(
             "SELECT trade_id, user_key FROM trade_executions"
         )).one()
-        inspector = inspect(connection)
-        portfolio_indexes = {index["name"] for index in inspector.get_indexes("portfolio")}
-        execution_indexes = {index["name"] for index in inspector.get_indexes("trade_executions")}
+        action_indexes = {
+            index["name"]
+            for index in inspector.get_indexes("action_items")
+        }
+        execution_indexes = {
+            index["name"]
+            for index in inspector.get_indexes("trade_executions")
+        }
+    engine.dispose()
 
+    assert {
+        "market_regime",
+        "volatility_regime",
+        "breadth_regime",
+        "risk_regime",
+        "regime_label",
+        "timeframe_agreement",
+        "strategy_name",
+        "gross_pnl",
+        "realized_quantity",
+        "excursion_status",
+    }.issubset(trade_columns)
+    assert trade_rows == [
+        (
+            "AAPL",
+            "default",
+            "stock",
+            "Unclassified",
+            10,
+            120,
+            0,
+            "not_calculated",
+        ),
+        (
+            "BTC",
+            "default",
+            "stock",
+            "Unclassified",
+            0,
+            None,
+            0,
+            "not_calculated",
+        ),
+    ]
+    assert alert_row == (
+        "default",
+        1,
+        None,
+        "unknown",
+        "Unknown",
+    )
+    assert action_row == (
+        "default",
+        "open",
+        "info",
+        "operations",
+        0,
+        1,
+    )
+    assert preference_row == ("default", "[]", "detailed", "{}")
+    assert paper_row == (
+        "AAPL",
+        "default",
+        "stock",
+        "standalone",
+        0,
+        0,
+        "gtc",
+        0,
+        0,
+    )
     assert portfolio_rows == [(10000, "default")]
     assert execution_row == (1, "default")
-    assert "uq_portfolio_user_key" in portfolio_indexes
+    assert "uq_action_item_source" in action_indexes
     assert "ix_trade_executions_user_key" in execution_indexes
+
+
+def test_destructive_downgrade_requires_restore(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "rollback.db"
+    _upgrade(database_path)
+
+    with pytest.raises(RuntimeError, match="verified pre-migration backup"):
+        _downgrade(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone() == ("0001_portfolio",)
+
+
+def test_schema_validation_is_read_only_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    migrated_path = tmp_path / "migrated.db"
+    _upgrade(migrated_path)
+    migrated_digest = _schema_digest(migrated_path)
+    migrated_engine = create_async_engine(
+        f"sqlite+aiosqlite:///{migrated_path}"
+    )
+    asyncio.run(validate_schema(migrated_engine))
+    asyncio.run(validate_schema(migrated_engine))
+    asyncio.run(migrated_engine.dispose())
+    assert _schema_digest(migrated_path) == migrated_digest
+
+    legacy_path = tmp_path / "unversioned.db"
+    with sqlite3.connect(legacy_path) as connection:
+        connection.execute("CREATE TABLE sentinel (id INTEGER PRIMARY KEY)")
+        connection.execute("INSERT INTO sentinel VALUES (1)")
+    legacy_digest = _schema_digest(legacy_path)
+    legacy_engine = create_async_engine(
+        f"sqlite+aiosqlite:///{legacy_path}"
+    )
+    with pytest.raises(RuntimeError, match="current=unversioned"):
+        asyncio.run(validate_schema(legacy_engine))
+    asyncio.run(legacy_engine.dispose())
+    assert _schema_digest(legacy_path) == legacy_digest

@@ -18,6 +18,8 @@ COMMANDS = (
     "backup",
     "verify-backup",
     "restore",
+    "migrate",
+    "migration-status",
     "upgrade",
     "verify",
 )
@@ -315,6 +317,50 @@ class ManageCommandTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("pre-upgrade backup failed", result.stderr)
         self.assertNotIn("git pull --ff-only", self.log_file.read_text())
+
+    def test_migrate_requires_verified_backup_before_schema_changes(self) -> None:
+        shutil.copy2(self.temp_dir / ".env.example", self.temp_dir / ".env")
+        backup_dir = self.temp_dir / "migration-backup"
+
+        result = self.run_manage(
+            "migrate",
+            "--backup-dir",
+            str(backup_dir),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.log_file.read_text()
+        verify_position = log.index("/tool.py verify")
+        migration_position = log.index(
+            "compose run --rm --no-deps data-ingestion alembic upgrade head"
+        )
+        self.assertLess(verify_position, migration_position)
+        self.assertIn(
+            "compose run --rm --no-deps quant-engine alembic upgrade head",
+            log,
+        )
+        self.assertIn(
+            "compose run --rm --no-deps portfolio-engine alembic upgrade head",
+            log,
+        )
+
+    def test_migration_status_checks_all_service_heads(self) -> None:
+        shutil.copy2(self.temp_dir / ".env.example", self.temp_dir / ".env")
+
+        result = self.run_manage("migration-status")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.log_file.read_text()
+        for service in (
+            "data-ingestion",
+            "quant-engine",
+            "portfolio-engine",
+        ):
+            self.assertIn(
+                "compose run --rm --no-deps "
+                f"{service} alembic current --check-heads",
+                log,
+            )
 
     def test_upgrade_can_explicitly_override_failed_backup(self) -> None:
         shutil.copy2(self.temp_dir / ".env.example", self.temp_dir / ".env")

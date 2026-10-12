@@ -46,7 +46,11 @@ chmod 600 "$ENV_FILE"
 
 "${COMPOSE[@]}" config --quiet
 "${COMPOSE[@]}" config --format json >"$ARTIFACT_DIR/compose.json"
-"${COMPOSE[@]}" up --detach --build --wait --wait-timeout 180
+"${COMPOSE[@]}" build
+for service in data-ingestion quant-engine portfolio-engine; do
+  "${COMPOSE[@]}" run --rm --no-deps "$service" alembic upgrade head
+done
+"${COMPOSE[@]}" up --detach --wait --wait-timeout 180
 
 "${COMPOSE[@]}" exec -T data-ingestion python - <<'PY'
 import httpx

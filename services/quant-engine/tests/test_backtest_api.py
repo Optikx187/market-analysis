@@ -7,6 +7,7 @@ import pandas as pd
 
 from app import main
 from app.backtest_store import BacktestStore
+from tests.migration_helpers import migrate_database
 
 
 def make_candles(length: int = 340) -> pd.DataFrame:
@@ -25,7 +26,9 @@ def make_candles(length: int = 340) -> pd.DataFrame:
 def test_backtest_api_returns_and_persists_walk_forward_result(
     monkeypatch, tmp_path: Path,
 ) -> None:
-    store = BacktestStore(str(tmp_path / "runs.db"))
+    database_path = tmp_path / "runs.db"
+    migrate_database(database_path)
+    store = BacktestStore(str(database_path))
     monkeypatch.setattr(main, "_backtest_store", store)
     monkeypatch.setattr(main, "_require_eligible_data", AsyncMock())
     monkeypatch.setattr(main, "fetch_candles_from_service_a", AsyncMock(return_value=make_candles()))

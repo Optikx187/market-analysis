@@ -21,6 +21,7 @@ from app.backtesting import (
     run_walk_forward_backtest,
 )
 from app.config import settings
+from app.migration_state import validate_schema
 from app.opportunities import OpportunityInput, build_blocked_opportunity, build_opportunity
 from app.regimes import (
     classify_breadth,
@@ -73,6 +74,7 @@ def _is_market_hours() -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _scanner_task
+    validate_schema(settings.BACKTEST_DATABASE_PATH)
     _scan_state["enabled"] = settings.SCAN_ENABLED
     _scan_state["interval_minutes"] = settings.SCAN_INTERVAL_MINUTES
     _scan_state["market_hours_only"] = settings.MARKET_HOURS_ONLY
