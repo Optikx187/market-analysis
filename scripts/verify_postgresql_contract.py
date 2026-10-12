@@ -80,16 +80,21 @@ def wait_for_postgresql(container_name: str, timeout_seconds: float = 60.0) -> N
                 "docker",
                 "exec",
                 container_name,
-                "pg_isready",
+                "psql",
+                "-X",
+                "--tuples-only",
+                "--no-align",
                 "--username",
                 "postgres",
                 "--dbname",
                 "contract",
+                "--command",
+                "SELECT 1",
             ],
             check=False,
         )
         last_output = f"{result.stdout}\n{result.stderr}".strip()
-        if result.returncode == 0:
+        if result.returncode == 0 and result.stdout.strip() == "1":
             return
         time.sleep(1)
     raise ContractVerificationError(
