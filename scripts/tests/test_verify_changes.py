@@ -107,6 +107,7 @@ class ClassifierTest(unittest.TestCase):
                 "run_management": False,
                 "run_compose": False,
                 "run_docs": True,
+                "run_postgres_contract": False,
                 "high_risk": False,
             },
         )
@@ -130,6 +131,30 @@ class ClassifierTest(unittest.TestCase):
         )
         self.assertTrue(shared_plan["run_compose"])
         self.assertTrue(shared_plan["high_risk"])
+
+    def test_postgresql_contract_selects_database_and_broad_contract_checks(self) -> None:
+        selected = verify_changes.classify_paths(
+            ["contracts/postgresql/schema.sql"]
+        )
+        plan = verify_changes.ci_plan(selected)
+
+        self.assertIn("postgres-contract", selected)
+        self.assertEqual(
+            plan["backend_services"],
+            list(verify_changes.BACKEND_SERVICES),
+        )
+        self.assertTrue(plan["run_compose"])
+        self.assertTrue(plan["run_postgres_contract"])
+        self.assertTrue(plan["high_risk"])
+
+        docs_plan = verify_changes.ci_plan(
+            verify_changes.classify_paths(
+                ["docs/architecture/postgresql/adr-0003-financial-precision.md"]
+            )
+        )
+        self.assertTrue(docs_plan["run_docs"])
+        self.assertTrue(docs_plan["run_postgres_contract"])
+        self.assertFalse(docs_plan["high_risk"])
 
     def test_representative_hosted_ci_path_matrix(self) -> None:
         cases = {

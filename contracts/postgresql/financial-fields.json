@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "source_models": [
+    "services/data-ingestion/app/models.py",
+    "services/portfolio-engine/app/models.py"
+  ],
+  "domains": {
+    "price": {
+      "postgresql": "NUMERIC(30,12)",
+      "unit": "quote currency per asset unit",
+      "legacy_conversion": "decimal_text",
+      "rounding": "ROUND_HALF_UP"
+    },
+    "quantity": {
+      "postgresql": "NUMERIC(38,18)",
+      "unit": "asset units",
+      "legacy_conversion": "decimal_text",
+      "rounding": "ROUND_HALF_UP unless venue lot sizing requires toward-zero"
+    },
+    "money": {
+      "postgresql": "NUMERIC(38,12)",
+      "unit": "declared currency",
+      "legacy_conversion": "decimal_text",
+      "rounding": "ROUND_HALF_UP; currency minor unit applies at ledger posting"
+    },
+    "ratio": {
+      "postgresql": "NUMERIC(24,12)",
+      "unit": "fraction where 1 equals 100 percent",
+      "legacy_conversion": "percentage_points_divide_by_100",
+      "rounding": "ROUND_HALF_UP"
+    },
+    "score": {
+      "postgresql": "NUMERIC(18,8)",
+      "unit": "percentage points from 0 through 100",
+      "legacy_conversion": "decimal_text",
+      "rounding": "ROUND_HALF_UP"
+    }
+  },
+  "legacy_float_fields": {
+    "price": [
+      "candles.open",
+      "candles.high",
+      "candles.low",
+      "candles.close",
+      "price_alerts.threshold",
+      "trades.entry_price",
+      "trades.exit_price",
+      "trades.stop_loss",
+      "trades.target_price",
+      "trades.trailing_stop",
+      "trades.planned_entry_price",
+      "trades.planned_exit_price",
+      "trade_executions.price",
+      "paper_orders.limit_price",
+      "paper_orders.stop_price",
+      "paper_orders.trail_amount",
+      "paper_orders.trail_reference_price",
+      "paper_orders.effective_stop_price",
+      "paper_orders.reference_price",
+      "paper_orders.reservation_price",
+      "paper_orders.average_fill_price",
+      "paper_order_fills.price",
+      "alert_logs.trigger_price",
+      "alert_logs.stop_loss",
+      "alert_logs.target_price",
+      "live_orders.limit_price",
+      "live_orders.stop_price",
+      "live_orders.reference_price",
+      "live_orders.average_fill_price",
+      "live_order_fills.price"
+    ],
+    "quantity": [
+      "candles.volume",
+      "trades.quantity",
+      "trades.planned_quantity",
+      "trades.realized_quantity",
+      "trade_executions.quantity",
+      "paper_orders.quantity",
+      "paper_orders.filled_quantity",
+      "paper_order_fills.quantity",
+      "live_orders.quantity",
+      "live_orders.filled_quantity",
+      "live_order_fills.quantity"
+    ],
+    "money": [
+      "trades.entry_fees",
+      "trades.entry_slippage",
+      "trades.entry_costs_allocated",
+      "trades.exit_fees_total",
+      "trades.exit_slippage_total",
+      "trades.costs_total",
+      "trades.gross_pnl",
+      "trades.mfe_usd",
+      "trades.mae_usd",
+      "trades.pnl",
+      "trade_executions.fees",
+      "trade_executions.slippage",
+      "trade_executions.entry_costs_allocated",
+      "trade_executions.gross_pnl",
+      "trade_executions.net_pnl",
+      "trade_journals.net_pnl",
+      "paper_orders.reserved_cash",
+      "paper_orders.filled_notional",
+      "paper_orders.fees_total",
+      "paper_orders.slippage_total",
+      "paper_order_fills.fees",
+      "paper_order_fills.slippage",
+      "portfolio.balance",
+      "portfolio.equity",
+      "portfolio.total_pnl",
+      "portfolio.peak_equity",
+      "equity_snapshots.equity",
+      "equity_snapshots.balance",
+      "alert_logs.optimal_size_usd",
+      "live_orders.estimated_notional"
+    ],
+    "ratio": [
+      "trades.mfe_pct",
+      "trades.mae_pct",
+      "trades.pnl_pct",
+      "paper_orders.trail_percent",
+      "portfolio.max_drawdown",
+      "alert_logs.kelly_pct"
+    ],
+    "score": [
+      "trades.timeframe_agreement",
+      "trades.signal_confidence",
+      "alert_logs.timeframe_agreement"
+    ]
+  }
+}
