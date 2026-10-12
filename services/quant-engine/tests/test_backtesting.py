@@ -6,6 +6,7 @@ import pytest
 
 from app import backtesting
 from app.backtest_store import BacktestStore
+from tests.migration_helpers import migrate_database
 from app.backtesting import (
     ExecutionCosts,
     StrategyParameters,
@@ -182,7 +183,9 @@ def test_result_contains_sample_splits_sensitivity_regimes_and_eligibility() -> 
 
 
 def test_backtest_store_persists_strategy_request_and_result(tmp_path: Path) -> None:
-    store = BacktestStore(str(tmp_path / "backtests.db"))
+    database_path = tmp_path / "backtests.db"
+    migrate_database(database_path)
+    store = BacktestStore(str(database_path))
     result: dict[str, object] = {
         "ticker": "BTC",
         "alert_eligibility": {"eligible": True, "reasons": []},

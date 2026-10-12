@@ -59,7 +59,9 @@ Data :8000   Quant :8001   Portfolio :8002   Notifications :8003
 
 Docker Compose starts the services in this order:
 
-1. portfolio engine initializes its database, encrypted credential store, and live-trading control;
+1. each persistent service validates that its database is at the expected
+   migration revision, then portfolio-engine initializes its live-trading
+   control;
 2. data ingestion waits for portfolio health;
 3. notification gateway and quant engine start after their dependencies;
 4. frontend starts after backend services are available.
@@ -240,11 +242,19 @@ multi-worker profile data remain isolated in their own named volumes.
 | Restart | `./manage restart` | `.\manage.ps1 restart` |
 | Status | `./manage status` | `.\manage.ps1 status` |
 | Logs | `./manage logs` | `.\manage.ps1 logs` |
+| Database revision status | `./manage migration-status` | `.\manage.ps1 migration-status` |
+| Back up and migrate | `./manage migrate` | `.\manage.ps1 migrate` |
 | Verify | `./manage verify` | `.\manage.ps1 verify` |
 
 The stop, restart, backup, and upgrade paths preserve named data volumes. Do
 not run `docker compose down --volumes` unless you intentionally want to
 delete the databases.
+
+`start` and `restart` never change a database schema. Data-ingestion,
+quant-engine, and portfolio-engine fail closed when their database is missing
+an Alembic revision or is not at the revision expected by the running image.
+Check all three stores with `migration-status`; use `migrate`, not `start`, to
+apply revisions.
 
 ## Backup, restore, and upgrade
 
@@ -299,7 +309,7 @@ separate stopped Compose project:
 ```
 
 Upgrade a clean checkout with a pre-upgrade backup, fast-forward pull, image
-rebuild, startup, and readiness verification:
+rebuild, database migration, startup, and readiness verification:
 
 ```bash
 ./manage upgrade
@@ -312,6 +322,24 @@ rebuild, startup, and readiness verification:
 A failed or unreconciled backup stops the upgrade before Git or containers are
 changed. `--allow-backup-failure` is an explicit emergency override and should
 only be used when another tested recovery point is already available.
+
+Apply pending database revisions without updating application code:
+
+```bash
+./manage migrate
+./manage migration-status
+```
+
+```powershell
+.\manage.ps1 migrate
+.\manage.ps1 migration-status
+```
+
+`migrate` creates and verifies a backup before stopping the running services
+and applying each service-owned migration. A migration failure leaves the
+services stopped so an operator can inspect logs or restore the verified
+backup. Baseline downgrades intentionally refuse to drop tables; rollback is
+the prior application revision plus the matching pre-migration backup.
 
 The logical Compose volumes are:
 

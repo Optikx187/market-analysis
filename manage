@@ -43,6 +43,8 @@ Commands:
   backup    Stop services briefly and archive all persistent volumes
   verify-backup  Validate backup checksums, schemas, and record counts
   restore   Restore persistent volumes from a backup directory
+  migrate   Create a verified backup and upgrade all database schemas
+  migration-status  Show each database's current migration revision
   upgrade   Back up, fast-forward Git, rebuild, and verify
   verify    Validate Compose and service readiness
   help      Show this help
@@ -125,6 +127,23 @@ Stops the application, replaces all three persistent volumes from a backup
 created by "./manage backup", and starts the restored deployment by default.
 Use --project-name with --no-start to restore into an isolated Compose project.
 Legacy backups without checksums require the explicit --allow-legacy override.
+EOF
+      ;;
+    migrate)
+      cat <<'EOF'
+Usage: ./manage migrate [--backup-dir DIRECTORY]
+
+Creates and verifies a backup, stops running services, upgrades every
+service-owned database to its migration head, and restarts the prior
+deployment. Services remain stopped if a migration fails.
+EOF
+      ;;
+    migration-status)
+      cat <<'EOF'
+Usage: ./manage migration-status
+
+Reports the current Alembic revision for data-ingestion, quant-engine, and
+portfolio-engine, and fails if any database is not at its configured head.
 EOF
       ;;
     upgrade)
@@ -332,7 +351,10 @@ install_command() {
     info "Installation configuration is ready. Secrets were written to .env without being displayed."
     return
   fi
-  compose up --build -d
+  compose build
+  backup_command
+  apply_migrations
+  compose up -d
   wait_for_services
   info "Dashboard: $(public_url)"
 }
@@ -530,6 +552,31 @@ restart_services() {
   [[ $# -eq 0 ]] || compose start "$@"
 }
 
+migration_command() {
+  local service="$1"
+  shift
+  compose run --rm --no-deps "$service" alembic "$@"
+}
+
+apply_migrations() {
+  local running_output service
+  running_output="$(compose ps --services --status running)"
+  local -a running_services=()
+  if [[ -n "$running_output" ]]; then
+    while IFS= read -r service; do
+      [[ -z "$service" ]] || running_services+=("$service")
+    done <<<"$running_output"
+  fi
+  [[ "${#running_services[@]}" -eq 0 ]] || compose stop "${running_services[@]}"
+  migration_command data-ingestion upgrade head
+  migration_command quant-engine upgrade head
+  migration_command portfolio-engine upgrade head
+  if [[ "${#running_services[@]}" -gt 0 ]]; then
+    compose up -d
+    wait_for_services
+  fi
+}
+
 backup_command() {
   local backup_dir="${1:-$ROOT_DIR/backups/$(date -u +%Y%m%dT%H%M%SZ)}"
   [[ $# -le 1 ]] || fail "Usage: ./manage backup [DIRECTORY]"
@@ -595,6 +642,41 @@ verify_backup_command() {
   backup_dir="$(cd "$backup_dir" && pwd)"
   preflight
   verify_backup_manifest "$backup_dir"
+}
+
+migrate_command() {
+  local backup_dir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --backup-dir)
+        [[ $# -ge 2 ]] || fail "--backup-dir requires a value."
+        backup_dir="$2"
+        shift 2
+        ;;
+      *)
+        fail "Usage: ./manage migrate [--backup-dir DIRECTORY]"
+        ;;
+    esac
+  done
+  preflight
+  validate_compose
+  compose build data-ingestion quant-engine portfolio-engine
+  if [[ -n "$backup_dir" ]]; then
+    backup_command "$backup_dir"
+  else
+    backup_command
+  fi
+  apply_migrations
+  info "Database migrations are at head."
+}
+
+migration_status_command() {
+  [[ $# -eq 0 ]] || fail "Usage: ./manage migration-status"
+  preflight
+  validate_compose
+  migration_command data-ingestion current --check-heads
+  migration_command quant-engine current --check-heads
+  migration_command portfolio-engine current --check-heads
 }
 
 restore_command() {
@@ -753,6 +835,7 @@ upgrade_command() {
   fi
   git pull --ff-only
   compose build --pull
+  apply_migrations
   compose up -d
   wait_for_services
   info "Upgrade completed. Dashboard: $(public_url)"
@@ -814,6 +897,12 @@ main() {
       ;;
     restore)
       restore_command "$@"
+      ;;
+    migrate)
+      migrate_command "$@"
+      ;;
+    migration-status)
+      migration_status_command "$@"
       ;;
     upgrade)
       upgrade_command "$@"

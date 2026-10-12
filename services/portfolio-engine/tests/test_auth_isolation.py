@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app import main
 from app.auth import decode_token, reset_current_user_key, set_current_user_key
 from app.config import settings
-from app.database import Base, _migrate_existing_tables, get_db
+from app.database import Base, get_db
 from app.models import Portfolio
 
 
@@ -32,7 +32,6 @@ def auth_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Tes
     async def create_tables() -> None:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
-            await connection.run_sync(_migrate_existing_tables)
 
     async def override_get_db():
         async with session_factory() as session:
@@ -204,7 +203,6 @@ def test_concurrent_portfolio_creation_keeps_one_row_per_user(tmp_path: Path) ->
         session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
-            await connection.run_sync(_migrate_existing_tables)
 
         async def load_portfolio() -> int:
             token = set_current_user_key("alice")

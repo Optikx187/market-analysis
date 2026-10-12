@@ -5,7 +5,8 @@ $BinDir = Join-Path $TempRoot "bin"
 $CommandLog = Join-Path $TempRoot "commands.log"
 $Commands = @(
     "install", "start", "stop", "restart", "status", "logs",
-    "backup", "verify-backup", "restore", "upgrade", "verify"
+    "backup", "verify-backup", "restore", "migrate", "migration-status",
+    "upgrade", "verify"
 )
 
 function Assert-True([bool]$Condition, [string]$Message) {
@@ -111,7 +112,13 @@ exit 0
     Assert-True ($envContents.Contains("AUTH_ENABLED=true")) "Authentication was not enabled."
     Assert-True ($envContents.Contains("CREDENTIAL_ENCRYPTION_KEYS=mock-fernet-secret")) "Secret was not generated."
     $commandLogContents = Get-Content $CommandLog -Raw
-    Assert-True ($commandLogContents.Contains("compose up --build -d")) "Install did not start Compose."
+    Assert-True ($commandLogContents.Contains("compose build")) "Install did not build Compose."
+    Assert-True (
+        $commandLogContents.Contains(
+            "compose run --rm --no-deps data-ingestion alembic upgrade head"
+        )
+    ) "Install did not migrate data-ingestion."
+    Assert-True ($commandLogContents.Contains("compose up -d")) "Install did not start Compose."
 
     $backupDir = Join-Path $TempRoot "backup"
     $backup = Invoke-Manage @("backup", $backupDir)
@@ -189,6 +196,41 @@ exit 0
     Assert-True (
         $legacyAllowed.Output.Contains("legacy backup")
     ) "Legacy restore omitted its reconciliation warning."
+
+    Set-Content -Path $CommandLog -Value "" -Encoding utf8NoBOM
+    $migrationBackup = Join-Path $TempRoot "migration-backup"
+    $migration = Invoke-Manage @(
+        "migrate", "--backup-dir", $migrationBackup
+    )
+    Assert-True (
+        $migration.ExitCode -eq 0
+    ) "Database migration failed: $($migration.Output)"
+    $commandLogContents = Get-Content $CommandLog -Raw
+    $verifyPosition = $commandLogContents.IndexOf("/tool.py verify")
+    $migrationPosition = $commandLogContents.IndexOf(
+        "compose run --rm --no-deps data-ingestion alembic upgrade head"
+    )
+    Assert-True (
+        $verifyPosition -ge 0 -and $verifyPosition -lt $migrationPosition
+    ) "Database migration did not verify its backup first."
+
+    Set-Content -Path $CommandLog -Value "" -Encoding utf8NoBOM
+    $migrationStatus = Invoke-Manage @("migration-status")
+    Assert-True (
+        $migrationStatus.ExitCode -eq 0
+    ) "Migration status failed: $($migrationStatus.Output)"
+    $commandLogContents = Get-Content $CommandLog -Raw
+    foreach ($service in @(
+        "data-ingestion",
+        "quant-engine",
+        "portfolio-engine"
+    )) {
+        Assert-True (
+            $commandLogContents.Contains(
+                "compose run --rm --no-deps $service alembic current --check-heads"
+            )
+        ) "Migration status omitted $service."
+    }
 
     Set-Content -Path $CommandLog -Value "" -Encoding utf8NoBOM
     $env:MOCK_ARCHIVE_FAIL = "1"

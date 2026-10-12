@@ -3,6 +3,7 @@ import datetime
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Optional
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,7 +15,7 @@ from app import main
 from app.brokers.alpaca import AlpacaBroker
 from app.brokers.base import BrokerAccount, BrokerAsset, BrokerError, BrokerOrder, BrokerPosition
 from app.config import settings
-from app.database import Base, _migrate_existing_tables, get_db
+from app.database import Base, get_db
 from app.models import LiveExecutionAudit, LiveTradingControl
 
 ACK_PHRASE = settings.LIVE_ACK_PHRASE
@@ -175,7 +176,6 @@ def _service(database_path, monkeypatch, broker: FakeBroker) -> Iterator[TestCli
         setup_engine = create_async_engine(url)
         async with setup_engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
-            await connection.run_sync(_migrate_existing_tables)
         await setup_engine.dispose()
 
     async def override_get_db():
@@ -193,6 +193,7 @@ def _service(database_path, monkeypatch, broker: FakeBroker) -> Iterator[TestCli
     asyncio.run(prepare())
     monkeypatch.setattr(main, "_fetch_candles", fake_candles)
     monkeypatch.setattr(main, "_get_json", fake_get_json)
+    monkeypatch.setattr(main, "validate_schema", AsyncMock())
     monkeypatch.setattr(main.datetime, "datetime", FrozenDatetime)
     monkeypatch.setattr(settings, "LIVE_OPERATOR_TOKEN", OPERATOR_TOKEN)
     monkeypatch.setattr(main, "async_session", session_factory)

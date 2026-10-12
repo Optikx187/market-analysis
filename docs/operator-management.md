@@ -41,8 +41,10 @@ Set-Location market-analysis
 
 Installation performs Docker and Compose preflight checks, copies
 `.env.example` when needed, generates required encryption and operator secrets
-without displaying them, validates Compose, builds the images, starts the
-services, and waits for internal readiness.
+without displaying them, validates Compose, builds migration-capable images,
+creates and verifies a recovery point, upgrades all three service-owned
+databases to their configured heads, starts the services, and waits for
+internal readiness.
 
 Provider and notification credentials are optional for installation. Add them
 later through **Settings → Credentials**. Live trading remains disabled.
@@ -128,12 +130,77 @@ volumes.
 | Status and URL | `./manage status` | `.\manage.ps1 status` |
 | All logs | `./manage logs` | `.\manage.ps1 logs` |
 | One service | `./manage logs quant-engine --follow` | `.\manage.ps1 logs quant-engine --follow` |
+| Database revision status | `./manage migration-status` | `.\manage.ps1 migration-status` |
+| Back up and migrate | `./manage migrate` | `.\manage.ps1 migrate` |
 | Verify a backup | `./manage verify-backup /path/to/backup` | `.\manage.ps1 verify-backup C:\path\to\backup` |
 | Validate configuration | `./manage verify --config-only` | `.\manage.ps1 verify --config-only` |
 | Validate running services | `./manage verify` | `.\manage.ps1 verify` |
 
 Each subcommand supports `--help`. Failures return a nonzero exit code and name
 the corrective action or follow-up command.
+
+## Database migrations
+
+Data-ingestion, quant-engine, and portfolio-engine each own an independent
+Alembic revision history and SQLite volume. Application startup only validates
+the revision table; it never creates tables, adds columns, or repairs indexes
+while accepting requests.
+
+Report current and expected heads:
+
+```bash
+./manage migration-status
+```
+
+```powershell
+.\manage.ps1 migration-status
+```
+
+The command returns a nonzero status if any store is unversioned, stale, or
+ahead of the image. To apply pending revisions:
+
+```bash
+./manage migrate
+```
+
+```powershell
+.\manage.ps1 migrate
+```
+
+The migration workflow:
+
+1. creates a backup of all three named volumes;
+2. verifies archive checksums, SQLite integrity, schemas, and record counts;
+3. stops the services that were running;
+4. applies `alembic upgrade head` independently in data-ingestion,
+   quant-engine, and portfolio-engine;
+5. restarts and verifies the prior deployment after all revisions succeed.
+
+Use `--backup-dir DIRECTORY` to retain the pre-migration recovery point at a
+specific path. If a revision fails, services remain stopped. Do not bypass the
+failure by using `start`; inspect the migration output and restore the verified
+backup when the failure cannot be corrected safely.
+
+Baseline revisions adopt both empty databases and existing unversioned SQLite
+databases. Portfolio migration reconciliation adds historical fields, assigns
+the default user scope to legacy rows, deduplicates legacy portfolio rows,
+backfills closed-trade attribution values, and preserves paper-order,
+action-item, dashboard, alert, and live-execution records.
+
+### Supported migration states
+
+| Database state | Operator result |
+| --- | --- |
+| Empty named volume | Baseline creates the current schema and records its head revision. |
+| Existing unversioned current schema | Baseline adopts the schema without replacing records. |
+| Legacy pre-user-scope / pre-attribution schema | Baseline adds compatibility fields and reconciles documented legacy values. |
+| Already at the configured head | Upgrade is idempotent and leaves records and schema unchanged. |
+| Missing or stale revision at service startup | Service fails closed with the current and expected revisions. |
+| Destructive downgrade request | Revision refuses the downgrade and directs the operator to restore the verified backup. |
+
+The baseline compatibility tests use deterministic local fixtures and fake
+provider boundaries. They do not call market-data providers, notification
+channels, brokers, or live-trading endpoints.
 
 ## Backup and restore
 
@@ -240,8 +307,9 @@ The supported upgrade command requires a clean Git worktree:
 ```
 
 It creates a backup, runs `git pull --ff-only`, rebuilds with refreshed base
-images, starts the services, and verifies readiness. It never deletes named
-volumes. A failed or unreconciled backup stops the upgrade before `git pull`.
+images, applies all database revisions before startup, starts the services,
+and verifies readiness. It never deletes named volumes. A failed or
+unreconciled backup stops the upgrade before `git pull`.
 The emergency `--allow-backup-failure` override is available only for cases
 where another tested recovery point already exists.
 
@@ -251,6 +319,13 @@ If verification fails:
 2. Check out the prior tested Git revision.
 3. Run the matching restore command with the pre-upgrade backup.
 4. Verify the restored deployment before reopening remote access.
+
+Migration baselines intentionally reject `alembic downgrade base` because
+dropping service tables would destroy records. The supported rollback is
+restore-based: stop the deployment, check out the prior application revision,
+restore the verified pre-migration backup, and verify that revision before
+reopening access. Preserve the matching credential-encryption keys with the
+backup.
 
 The previous manual workflow remains available: copy `.env.example` to `.env`,
 generate the required secrets, run `docker compose config`, and then run

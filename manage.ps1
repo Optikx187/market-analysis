@@ -69,6 +69,8 @@ Commands:
   backup    Stop services briefly and archive all persistent volumes
   verify-backup  Validate backup checksums, schemas, and record counts
   restore   Restore persistent volumes from a backup directory
+  migrate   Create a verified backup and upgrade all database schemas
+  migration-status  Show each database's current migration revision
   upgrade   Back up, fast-forward Git, rebuild, and verify
   verify    Validate Compose and service readiness
   help      Show this help
@@ -110,6 +112,12 @@ printing them, validates Docker Compose, and starts the application.
         }
         "restore" {
             "Usage: .\manage.ps1 restore DIRECTORY [--no-start] [--project-name NAME] [--allow-legacy]"
+        }
+        "migrate" {
+            "Usage: .\manage.ps1 migrate [--backup-dir DIRECTORY]"
+        }
+        "migration-status" {
+            "Usage: .\manage.ps1 migration-status"
         }
         "upgrade" {
             "Usage: .\manage.ps1 upgrade [--allow-backup-failure]"
@@ -358,7 +366,10 @@ function Install-App([string[]]$Arguments) {
         Write-Output "Installation configuration is ready. Secrets were written to .env without being displayed."
         return
     }
-    Invoke-Compose -Arguments @("up", "--build", "-d")
+    Invoke-Compose -Arguments @("build")
+    Backup-App @()
+    Invoke-Migrations
+    Invoke-Compose -Arguments @("up", "-d")
     Wait-ForServiceReadiness
     Write-Output "Dashboard: $(Get-PublicUrl)"
 }
@@ -440,6 +451,32 @@ function Get-VolumeName([string]$Service, [string]$Target) {
     $volume = & docker inspect $containerId --format $format
     if ($LASTEXITCODE -ne 0) { Fail "Unable to inspect the $Service data volume." }
     return ("$volume").Trim()
+}
+
+function Invoke-MigrationCommand(
+    [string]$Service,
+    [string[]]$Arguments
+) {
+    Invoke-Compose -Arguments (
+        @("run", "--rm", "--no-deps", $Service, "alembic") + $Arguments
+    )
+}
+
+function Invoke-Migrations {
+    $runningServices = @(
+        Get-ComposeOutput -Arguments @("ps", "--services", "--status", "running") |
+            Where-Object { -not [string]::IsNullOrWhiteSpace("$_") }
+    )
+    if ($runningServices.Count -gt 0) {
+        Invoke-Compose -Arguments (@("stop") + $runningServices)
+    }
+    Invoke-MigrationCommand -Service "data-ingestion" -Arguments @("upgrade", "head")
+    Invoke-MigrationCommand -Service "quant-engine" -Arguments @("upgrade", "head")
+    Invoke-MigrationCommand -Service "portfolio-engine" -Arguments @("upgrade", "head")
+    if ($runningServices.Count -gt 0) {
+        Invoke-Compose -Arguments @("up", "-d")
+        Wait-ForServiceReadiness
+    }
 }
 
 function Export-Volume([string]$Volume, [string]$BackupDir, [string]$FileName) {
@@ -625,6 +662,53 @@ function Test-BackupApp([string[]]$Arguments) {
     Test-BackupManifest -BackupDir $backupDir
 }
 
+function Update-DatabaseSchema([string[]]$Arguments) {
+    $backupDir = ""
+    for ($index = 0; $index -lt $Arguments.Count; $index++) {
+        if ($Arguments[$index] -ne "--backup-dir") {
+            Fail "Usage: .\manage.ps1 migrate [--backup-dir DIRECTORY]"
+        }
+        if ($index + 1 -ge $Arguments.Count) {
+            Fail "--backup-dir requires a value."
+        }
+        $index++
+        $backupDir = $Arguments[$index]
+    }
+    Invoke-Preflight
+    Test-ComposeConfig
+    Invoke-Compose -Arguments @(
+        "build",
+        "data-ingestion",
+        "quant-engine",
+        "portfolio-engine"
+    )
+    if ([string]::IsNullOrWhiteSpace($backupDir)) {
+        Backup-App @()
+    }
+    else {
+        Backup-App @($backupDir)
+    }
+    Invoke-Migrations
+    Write-Output "Database migrations are at head."
+}
+
+function Show-MigrationStatus([string[]]$Arguments) {
+    if ($Arguments.Count -ne 0) {
+        Fail "Usage: .\manage.ps1 migration-status"
+    }
+    Invoke-Preflight
+    Test-ComposeConfig
+    Invoke-MigrationCommand `
+        -Service "data-ingestion" `
+        -Arguments @("current", "--check-heads")
+    Invoke-MigrationCommand `
+        -Service "quant-engine" `
+        -Arguments @("current", "--check-heads")
+    Invoke-MigrationCommand `
+        -Service "portfolio-engine" `
+        -Arguments @("current", "--check-heads")
+}
+
 function Restore-App([string[]]$Arguments) {
     if ($Arguments.Count -lt 1) {
         Fail "Usage: .\manage.ps1 restore DIRECTORY [--no-start] [--project-name NAME] [--allow-legacy]"
@@ -807,6 +891,7 @@ function Update-App([string[]]$Arguments) {
     }
     Invoke-Checked -File "git" -Arguments @("pull", "--ff-only")
     Invoke-Compose -Arguments @("build", "--pull")
+    Invoke-Migrations
     Invoke-Compose -Arguments @("up", "-d")
     Wait-ForServiceReadiness
     Write-Output "Upgrade completed. Dashboard: $(Get-PublicUrl)"
@@ -854,6 +939,8 @@ try {
         "backup" { Backup-App $CommandArgs }
         "verify-backup" { Test-BackupApp $CommandArgs }
         "restore" { Restore-App $CommandArgs }
+        "migrate" { Update-DatabaseSchema $CommandArgs }
+        "migration-status" { Show-MigrationStatus $CommandArgs }
         "upgrade" { Update-App $CommandArgs }
         "verify" { Test-App $CommandArgs }
         default { Fail "Unknown command '$Command'. Run '.\manage.ps1 help'." }

@@ -3,40 +3,20 @@
 import json
 import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
 from uuid import uuid4
+
+from app.migration_state import validate_schema
 
 
 class BacktestStore:
     def __init__(self, database_path: str) -> None:
         self.database_path = database_path
-        Path(database_path).parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+        validate_schema(database_path)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
         return connection
-
-    def _initialize(self) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS backtest_runs (
-                    run_id TEXT PRIMARY KEY,
-                    ticker TEXT NOT NULL,
-                    strategy_version TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    request_json TEXT NOT NULL,
-                    result_json TEXT NOT NULL,
-                    alert_eligible INTEGER NOT NULL
-                )
-                """
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_backtest_runs_ticker_created "
-                "ON backtest_runs(ticker, created_at DESC)"
-            )
 
     def save(
         self,

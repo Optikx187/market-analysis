@@ -16,7 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.credentials import get_provider_credentials
-from app.database import get_db, init_db, async_session
+from app.database import async_session, get_db
+from app.migration_state import validate_schema
 from app.models import Asset, AssetType, Candle, PriceAlert
 from app.data_quality import DataQualityReport, assess_data_quality
 from app.fake_market import fake_quote
@@ -271,7 +272,7 @@ async def _backfill_all_assets():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
+    await validate_schema()
     asyncio.create_task(initial_fetch())
     asyncio.create_task(_health_check_loop())
     yield
