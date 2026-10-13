@@ -24,6 +24,7 @@ jobs:
       run_management: ${{ steps.plan.outputs.run_management }}
       run_compose: ${{ steps.plan.outputs.run_compose }}
       run_docs: ${{ steps.plan.outputs.run_docs }}
+      run_postgres_contract: ${{ steps.plan.outputs.run_postgres_contract }}
       high_risk: ${{ steps.plan.outputs.high_risk }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -58,6 +59,7 @@ jobs:
               "run_management": str(plan["run_management"]).lower(),
               "run_compose": str(plan["run_compose"]).lower(),
               "run_docs": str(plan["run_docs"]).lower(),
+              "run_postgres_contract": str(plan["run_postgres_contract"]).lower(),
               "high_risk": str(plan["high_risk"]).lower(),
           }
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
@@ -247,6 +249,16 @@ jobs:
           name: verification-docs
           path: artifacts/verification/
           if-no-files-found: error
+
+  postgres-contract:
+    name: PostgreSQL 16 contract
+    if: needs.classify.outputs.run_postgres_contract == 'true'
+    needs: classify
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify durable-state contract
+        run: python scripts/verify_postgresql_contract.py
 
   images:
     name: Image / ${{ matrix.service }}

@@ -25,7 +25,14 @@ BACKEND_SERVICES = (
     "portfolio-engine",
     "notification-gateway",
 )
-SERVICE_NAMES = (*BACKEND_SERVICES, "frontend", "management", "compose", "docs")
+SERVICE_NAMES = (
+    *BACKEND_SERVICES,
+    "frontend",
+    "management",
+    "compose",
+    "docs",
+    "postgres-contract",
+)
 CORE_JOBS = (
     "repository",
     "management",
@@ -39,6 +46,7 @@ CORE_JOBS = (
 FULL_JOBS = (
     *CORE_JOBS,
     "docs",
+    "postgres-contract",
     "image-data-ingestion",
     "image-quant-engine",
     "image-portfolio-engine",
@@ -237,6 +245,11 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
             "Validate repository-local documentation links.",
             (command(PYTHON, "scripts/check_docs.py"),),
         ),
+        "postgres-contract": Job(
+            "postgres-contract",
+            "Validate the durable-state DDL against isolated PostgreSQL 16.",
+            (command(PYTHON, "scripts/verify_postgresql_contract.py"),),
+        ),
         **{
             f"image-{service}": Job(
                 f"image-{service}",
@@ -294,6 +307,8 @@ def jobs_for_path(path: str) -> set[str]:
     parts = Path(path).parts
     filename = Path(path).name
 
+    if path.startswith("docs/architecture/postgresql/"):
+        return jobs | {"docs", "postgres-contract"}
     if path == "README.md" or path.startswith(("docs/", "deploy/README", ".agents/")):
         return jobs | {"docs"}
     if path in {"manage", "manage.ps1", "verify-changes", "verify-changes.ps1"}:
@@ -312,6 +327,8 @@ def jobs_for_path(path: str) -> set[str]:
         return jobs | {"compose"}
     if path.startswith((".github/", ".gitlab/")):
         return jobs | set(CORE_JOBS)
+    if path.startswith("contracts/postgresql/"):
+        return jobs | standard_service_jobs() | {"compose", "postgres-contract"}
     if path.startswith(("shared/", "schemas/", "contracts/")):
         return jobs | standard_service_jobs() | {"compose"}
     if "migrations" in parts or filename in {"alembic.ini", "migration.sql"}:
@@ -354,6 +371,7 @@ def ci_plan(selected_jobs: Iterable[str]) -> dict[str, object]:
         "run_management": "management" in selected,
         "run_compose": "compose" in selected,
         "run_docs": "docs" in selected,
+        "run_postgres_contract": "postgres-contract" in selected,
         "high_risk": "compose" in selected
         or any(name.startswith("image-") for name in selected),
     }

@@ -1040,6 +1040,10 @@ The in-application Help & Docs workspace contains additional beginner-oriented e
 market-analysis/
 ├── docker-compose.yml
 ├── .env.example
+├── contracts/
+│   └── postgresql/
+├── docs/
+│   └── architecture/
 ├── scripts/
 │   └── setup.py
 └── services/
@@ -1048,6 +1052,23 @@ market-analysis/
     ├── portfolio-engine/
     ├── notification-gateway/
     └── frontend/
+```
+
+## Architecture contracts
+
+The accepted
+[PostgreSQL durable-state contract](docs/architecture/postgresql/README.md)
+defines logical schema ownership, UUID and external-identifier rules, tenant
+keys, canonical instrument identity, UTC timestamps, exact financial decimals,
+rounding, candle uniqueness, indexes, retention, and Aurora-compatible
+partitioning. It is a design/prototype boundary; current services continue to
+use their versioned SQLite stores until the service conversion tickets land.
+
+Validate the non-runtime DDL prototype against an isolated PostgreSQL 16
+container:
+
+```bash
+python scripts/verify_postgresql_contract.py
 ```
 
 ## Production-readiness roadmap

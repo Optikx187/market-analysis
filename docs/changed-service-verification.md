@@ -40,7 +40,7 @@ Use `--base-ref REF` after the mode to compare against another ref. Use
 
 Supported service names are `data-ingestion`, `quant-engine`,
 `portfolio-engine`, `notification-gateway`, `frontend`, `management`,
-`compose`, and `docs`.
+`compose`, `docs`, and `postgres-contract`.
 
 ## Path mapping
 
@@ -55,6 +55,8 @@ Every selected tier includes the repository whitespace check.
 | `services/frontend/**` | TypeScript and production build |
 | Service `requirements.txt`, `package*.json`, or `Dockerfile` | Service checks plus that container image build |
 | `shared/**`, `schemas/**`, or `contracts/**` | All service checks plus Compose |
+| `contracts/postgresql/**` | All service checks, Compose, and isolated PostgreSQL 16 contract verification |
+| `docs/architecture/postgresql/**` | Documentation and isolated PostgreSQL 16 contract verification |
 | Any migration directory or migration configuration | All backend checks plus Compose |
 | `docker-compose*.yml`, `deploy/compose.*`, or `.env.example` | Compose profile rendering; `.env.example` also runs management tests |
 | `manage`, `manage.ps1`, `verify-changes*`, or ordinary `scripts/**` | Management and verification-tool tests |
@@ -93,6 +95,8 @@ and a nightly schedule.
 - superseded runs for the same pull request or ref are canceled;
 - backend services, frontend, management, documentation, changed images, and
   Compose smoke run as independent jobs;
+- PostgreSQL contract changes run exact-decimal, DDL, uniqueness, UTC, and
+  query-plan checks in an isolated PostgreSQL 16 container;
 - the PowerShell entry point is exercised on a hosted Windows runner when
   management tooling changes and during manual or nightly runs;
 - Python and npm caches are keyed by each requirements file or lockfile;
