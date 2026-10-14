@@ -1061,8 +1061,9 @@ The accepted
 defines logical schema ownership, UUID and external-identifier rules, tenant
 keys, canonical instrument identity, UTC timestamps, exact financial decimals,
 rounding, candle uniqueness, indexes, retention, and Aurora-compatible
-partitioning. It is a design/prototype boundary; current services continue to
-use their versioned SQLite stores until the service conversion tickets land.
+partitioning. Data ingestion can now use the PostgreSQL market-data adapter;
+the remaining services continue to use their versioned SQLite stores until
+their service conversion tickets land.
 
 Validate the non-runtime DDL prototype against an isolated PostgreSQL 16
 container:
@@ -1070,6 +1071,52 @@ container:
 ```bash
 python scripts/verify_postgresql_contract.py
 ```
+
+For a fresh PostgreSQL-backed market-data deployment, initialize `.env`, set
+`MARKET_DATA_POSTGRES_PASSWORD`, start PostgreSQL, migrate every service-owned
+database, and then start the overlay:
+
+```bash
+./manage install --no-start
+docker compose \
+  -f docker-compose.yml \
+  -f deploy/compose.single-node.yml \
+  -f deploy/compose.postgresql.yml \
+  up -d postgresql
+docker compose \
+  -f docker-compose.yml \
+  -f deploy/compose.single-node.yml \
+  -f deploy/compose.postgresql.yml \
+  build
+docker compose \
+  -f docker-compose.yml \
+  -f deploy/compose.single-node.yml \
+  -f deploy/compose.postgresql.yml \
+  run --rm --no-deps data-ingestion python -m alembic upgrade head
+docker compose \
+  -f docker-compose.yml \
+  -f deploy/compose.single-node.yml \
+  -f deploy/compose.postgresql.yml \
+  run --rm --no-deps quant-engine python -m alembic upgrade head
+docker compose \
+  -f docker-compose.yml \
+  -f deploy/compose.single-node.yml \
+  -f deploy/compose.postgresql.yml \
+  run --rm --no-deps portfolio-engine python -m alembic upgrade head
+docker compose \
+  -f docker-compose.yml \
+  -f deploy/compose.single-node.yml \
+  -f deploy/compose.postgresql.yml \
+  up -d
+```
+
+This sets `MARKET_DATA_STORAGE_BACKEND=postgresql`, starts PostgreSQL 16, and
+mounts the existing SQLite data-ingestion volume read-only. It does not import
+legacy candles. Keep that source volume intact until the separate import and
+reconciliation workflow is complete. Without the overlay, the explicit
+`sqlite-transition` backend remains active. Existing installations must remain
+on that transition backend until their SQLite watchlist and candle import has
+passed reconciliation.
 
 ## Production-readiness roadmap
 

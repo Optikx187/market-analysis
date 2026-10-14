@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pandas as pd
@@ -74,3 +75,27 @@ def test_stock_four_hour_uses_real_hourly_bars(monkeypatch: pytest.MonkeyPatch) 
     assert len(result) == 1
     assert result.iloc[0]["open"] == 100.0
     assert result.iloc[0]["close"] == 102.0
+
+
+def test_incremental_refresh_passes_required_provider_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_after = datetime(2025, 1, 15, tzinfo=timezone.utc)
+    fetch_binance = AsyncMock(return_value=candle_frame())
+    monkeypatch.setattr(ingestion, "fetch_historical_binance", fetch_binance)
+
+    asyncio.run(
+        ingestion.fetch_historical(
+            "BTC",
+            AssetType.CRYPTO,
+            "1d",
+            start_after=start_after,
+        )
+    )
+
+    fetch_binance.assert_awaited_once_with(
+        "BTCUSDT",
+        "1d",
+        1000,
+        start_after=start_after,
+    )

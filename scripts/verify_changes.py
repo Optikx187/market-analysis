@@ -132,7 +132,7 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
         ),
         "data-ingestion": Job(
             "data-ingestion",
-            "Run data-ingestion tests with reserved provider boundaries.",
+            "Run data-ingestion tests and PostgreSQL market-data verification.",
             (
                 command(
                     PYTHON,
@@ -147,6 +147,7 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
                         "MARKET_DATA_MODE": "live",
                     },
                 ),
+                command(PYTHON, "scripts/verify_postgresql_market_data.py"),
             ),
         ),
         "quant-engine": Job(
@@ -235,6 +236,16 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
                     "deploy/compose.multi-worker.yml",
                     "--profile",
                     "multi-worker",
+                    "config",
+                    "--quiet",
+                ),
+                command(
+                    "docker",
+                    "compose",
+                    "-f",
+                    "docker-compose.yml",
+                    "-f",
+                    "deploy/compose.postgresql.yml",
                     "config",
                     "--quiet",
                 ),

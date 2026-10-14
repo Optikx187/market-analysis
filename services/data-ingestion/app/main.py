@@ -21,7 +21,7 @@ from app.migration_state import validate_schema
 from app.models import Asset, AssetType, Candle, PriceAlert
 from app.data_quality import DataQualityReport, assess_data_quality
 from app.fake_market import fake_quote
-from app.ingestion import refresh_asset_data, load_candles
+from app.ingestion import candle_count, load_candles, refresh_asset_data
 from app.ingestion import get_binance_symbol, get_crypto_name, CRYPTO_NAMES
 
 CRYPTO_NAMES_SET = set(CRYPTO_NAMES.keys())
@@ -114,6 +114,19 @@ async def _all_data_quality(
     assets = result.scalars().all()
     if not assets:
         return []
+    if settings.MARKET_DATA_STORAGE_BACKEND.strip().lower() == "postgresql":
+        reports = []
+        for asset in assets:
+            frame = await load_candles(db, asset.ticker, interval)
+            reports.append(
+                assess_data_quality(
+                    asset.ticker,
+                    asset.asset_type,
+                    frame,
+                    interval,
+                )
+            )
+        return reports
 
     rows_by_ticker: dict[str, list[dict[str, object]]] = {
         asset.ticker: [] for asset in assets
@@ -381,10 +394,7 @@ async def get_all_candle_counts(db: AsyncSession = Depends(get_db)):
     assets = result.scalars().all()
     counts: dict[str, int] = {}
     for asset in assets:
-        count_result = await db.execute(
-            select(Candle.id).where(Candle.ticker == asset.ticker, Candle.interval == "1d")
-        )
-        counts[asset.ticker] = len(count_result.all())
+        counts[asset.ticker] = await candle_count(db, asset.ticker, "1d")
     return counts
 
 

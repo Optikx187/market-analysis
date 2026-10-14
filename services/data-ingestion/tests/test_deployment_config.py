@@ -42,3 +42,27 @@ def test_allowed_origins_are_explicit() -> None:
         "https://market.lab.example",
         "https://admin.lab.example",
     ]
+
+
+def test_postgresql_backend_requires_postgresql_url() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="requires a PostgreSQL DATABASE_URL",
+    ):
+        Settings(
+            MARKET_DATA_STORAGE_BACKEND="postgresql",
+            DATABASE_URL="sqlite+aiosqlite:///market.db",
+            _env_file=None,
+        )
+
+
+def test_sqlite_transition_backend_is_explicit() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="requires an async SQLite DATABASE_URL",
+    ):
+        Settings(
+            MARKET_DATA_STORAGE_BACKEND="sqlite-transition",
+            DATABASE_URL="postgresql+asyncpg://database/market",
+            _env_file=None,
+        )

@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./data_ingestion.db"
+    MARKET_DATA_STORAGE_BACKEND: str = "sqlite-transition"
     QUANT_ENGINE_URL: str = "http://quant-engine:8001"
     PORTFOLIO_ENGINE_URL: str = "http://portfolio-engine:8002"
     INTERNAL_SERVICE_TOKEN: str = ""
@@ -30,8 +31,26 @@ class Settings(BaseSettings):
     def validate_deployment_profile(self) -> "Settings":
         profile = self.DEPLOYMENT_PROFILE.strip().lower()
         mode = self.MARKET_DATA_MODE.strip().lower()
+        storage_backend = self.MARKET_DATA_STORAGE_BACKEND.strip().lower()
         if mode not in {"live", "fake"}:
             raise ValueError("MARKET_DATA_MODE must be 'live' or 'fake'")
+        if storage_backend not in {"postgresql", "sqlite-transition"}:
+            raise ValueError(
+                "MARKET_DATA_STORAGE_BACKEND must be 'postgresql' "
+                "or 'sqlite-transition'"
+            )
+        if storage_backend == "postgresql" and not self.DATABASE_URL.startswith(
+            ("postgresql+asyncpg://", "postgresql://")
+        ):
+            raise ValueError(
+                "postgresql market-data storage requires a PostgreSQL DATABASE_URL"
+            )
+        if storage_backend == "sqlite-transition" and not self.DATABASE_URL.startswith(
+            "sqlite+aiosqlite://"
+        ):
+            raise ValueError(
+                "sqlite-transition market-data storage requires an async SQLite DATABASE_URL"
+            )
         if profile == "sandbox":
             if mode != "fake":
                 raise ValueError("sandbox requires MARKET_DATA_MODE=fake")
