@@ -6,6 +6,7 @@ services:
       - "8000"
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/data_ingestion.db
+      - MARKET_DATA_STORAGE_BACKEND=sqlite-transition
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-}
       - DEPLOYMENT_PROFILE=${DEPLOYMENT_PROFILE:-single-node}
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost:3000}
