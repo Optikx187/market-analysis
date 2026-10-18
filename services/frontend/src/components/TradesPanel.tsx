@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchRegime, fetchTrades, logManualTrade, type Trade } from "@/lib/api";
+import { fetchRegime, fetchTrades, logManualTrade, type EntityId, type Trade } from "@/lib/api";
 import { notifyTradesChanged } from "@/lib/tradeEvents";
 import type { DeepLinkFocus } from "@/lib/deepLink";
 
@@ -20,7 +20,7 @@ export default function TradesPanel({
 }) {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [focusedTicker, setFocusedTicker] = useState<string | null>(null);
-  const [focusedTradeId, setFocusedTradeId] = useState<number | null>(null);
+  const [focusedTradeId, setFocusedTradeId] = useState<EntityId | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ ticker: "", direction: "BUY", asset_type: "stock", entry_price: "", quantity: "", stop_loss: "", target_price: "" });
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);

@@ -7,7 +7,7 @@ Always combine one overlay with the root `docker-compose.yml`.
 | `compose.single-node.yml` | Explicit form of the supported default deployment |
 | `compose.sandbox.yml` | Offline-safe deterministic market, paper-broker, and notification boundaries |
 | `compose.multi-worker.yml` | Remote-lab topology with private stateless quant workers |
-| `compose.postgresql.yml` | PostgreSQL 16 market-data adapter and shared candle store |
+| `compose.postgresql.yml` | PostgreSQL 16 market-data and portfolio adapters |
 
 Use a stable, unique Compose project name (`-p`) for each concurrent
 deployment. This isolates containers, networks, and volumes.
@@ -67,8 +67,14 @@ docker compose \
 For the remote-lab topology, combine `compose.multi-worker.yml` and
 `compose.postgresql.yml`. The root configuration deliberately declares
 `MARKET_DATA_STORAGE_BACKEND=sqlite-transition`; that explicit compatibility
-mode preserves the existing `data-ingestion-db` volume until the separate
-historical import and reconciliation stage completes. The PostgreSQL overlay
-mounts that SQLite source read-only and does not import, delete, or rewrite it.
-Existing deployments must stay on `sqlite-transition` until that separate
-import has passed reconciliation.
+mode preserves the existing `data-ingestion-db` and `portfolio-db` volumes
+until the separate import and reconciliation stage completes. The PostgreSQL
+overlay switches both services to PostgreSQL, mounts both SQLite sources
+read-only, and does not import, delete, or rewrite them. Existing deployments
+must stay on `sqlite-transition` until the separate import proves exact candle,
+cash, equity, order, fill, reservation, and P&L reconciliation.
+
+If a fresh target migration fails, stop the overlay, drop the incomplete
+`portfolio` schema, rerun the service migrations, and replay deterministic
+tests. Do not clean or restore over either source SQLite volume. Historical
+import/cutover remains issue #94.

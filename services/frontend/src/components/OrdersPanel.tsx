@@ -17,6 +17,7 @@ import {
   type PaperOrderFilters,
   type PaperOrderType,
   type PaperReconciliation,
+  type EntityId,
 } from "@/lib/api";
 import { notifyTradesChanged } from "@/lib/tradeEvents";
 import type { DeepLinkFocus } from "@/lib/deepLink";
@@ -251,8 +252,8 @@ function OrderDetail({ order }: { order: PaperOrder }) {
 export default function OrdersPanel({ focus }: { focus?: DeepLinkFocus }) {
   const [mode, setMode] = useState<PaperMode | null>(null);
   const [orders, setOrders] = useState<PaperOrder[]>([]);
-  const [details, setDetails] = useState<Record<number, PaperOrder>>({});
-  const [expanded, setExpanded] = useState<number | null>(null);
+  const [details, setDetails] = useState<Record<string, PaperOrder>>({});
+  const [expanded, setExpanded] = useState<EntityId | null>(null);
   const [filters, setFilters] = useState<PaperOrderFilters>({});
   const [reconciliation, setReconciliation] = useState<PaperReconciliation | null>(null);
   const [orderForm, setOrderForm] = useState(emptyOrderForm);
@@ -291,21 +292,21 @@ export default function OrdersPanel({ focus }: { focus?: DeepLinkFocus }) {
     if (focus.orderId == null) return;
     setExpanded(focus.orderId);
     fetchPaperOrder(focus.orderId)
-      .then((detail) => { setDetails((current) => ({ ...current, [detail.id]: detail })); })
+      .then((detail) => { setDetails((current) => ({ ...current, [String(detail.id)]: detail })); })
       .catch(() => {});
   }, [focus]);
 
-  const refresh = async (orderId?: number) => {
+  const refresh = async (orderId?: EntityId) => {
     await loadOrders();
     const target = orderId ?? expanded;
     if (target != null) {
       const detail = await fetchPaperOrder(target);
-      setDetails((current) => ({ ...current, [target]: detail }));
+      setDetails((current) => ({ ...current, [String(target)]: detail }));
     }
     if (reconciliation) setReconciliation(await fetchPaperReconciliation());
   };
 
-  const toggleExpanded = async (orderId: number) => {
+  const toggleExpanded = async (orderId: EntityId) => {
     if (expanded === orderId) {
       setExpanded(null);
       return;
@@ -313,7 +314,7 @@ export default function OrdersPanel({ focus }: { focus?: DeepLinkFocus }) {
     setExpanded(orderId);
     try {
       const detail = await fetchPaperOrder(orderId);
-      setDetails((current) => ({ ...current, [orderId]: detail }));
+      setDetails((current) => ({ ...current, [String(orderId)]: detail }));
     } catch (error) {
       setMessage({ type: "error", text: apiErrorMessage(error, "Failed to load order detail.") });
     }
@@ -769,9 +770,9 @@ export default function OrdersPanel({ focus }: { focus?: DeepLinkFocus }) {
             </tbody>
           </table>
 
-          {expanded != null && details[expanded] && (
+          {expanded != null && details[String(expanded)] && (
             <div className="mt-3">
-              <OrderDetail order={details[expanded]} />
+              <OrderDetail order={details[String(expanded)]} />
             </div>
           )}
         </div>

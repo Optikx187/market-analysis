@@ -3,6 +3,7 @@ import axios from "axios";
 const api = axios.create({ baseURL: "/api" });
 const AUTH_TOKEN_KEY = "market_analysis_auth_token";
 const AUTH_USERNAME_KEY = "market_analysis_auth_username";
+export type EntityId = number | string;
 
 const browserStorage = (): Storage | null => (
   typeof window === "undefined" ? null : window.sessionStorage
@@ -25,7 +26,7 @@ export interface AuthSession {
 
 export interface AuthResponse {
   token: string;
-  user_id: number;
+  user_id: EntityId;
   username: string;
 }
 
@@ -180,7 +181,7 @@ export interface RiskProfile {
 }
 
 export interface Trade {
-  id: number;
+  id: EntityId;
   ticker: string;
   direction: string;
   entry_price: number;
@@ -328,7 +329,7 @@ export interface RiskDecision {
 }
 
 export interface AlertLog {
-  id: number;
+  id: EntityId;
   ticker: string;
   direction: string;
   status: string;
@@ -554,7 +555,7 @@ export interface CloseTradeInput {
   note?: string;
 }
 
-export const closeTrade = (tradeId: number, exitPrice: number, options: CloseTradeInput = {}) =>
+export const closeTrade = (tradeId: EntityId, exitPrice: number, options: CloseTradeInput = {}) =>
   api
     .post<Trade>(`/trades/${tradeId}/close`, { exit_price: exitPrice, ...options })
     .then((r) => r.data);
@@ -624,8 +625,8 @@ export interface ConfidenceBand {
 }
 
 export interface TradeExecution {
-  id: number;
-  trade_id: number;
+  id: EntityId;
+  trade_id: EntityId;
   kind: string;
   price: number;
   quantity: number;
@@ -639,7 +640,7 @@ export interface TradeExecution {
 }
 
 export interface AttributedTrade {
-  id: number;
+  id: EntityId;
   ticker: string;
   direction: string;
   status: string;
@@ -675,7 +676,7 @@ export interface AttributedTrade {
 }
 
 export interface TradeJournalEntry {
-  trade_id: number;
+  trade_id: EntityId;
   ticker: string;
   strategy_name: string | null;
   outcome: string;
@@ -700,7 +701,7 @@ export interface AttributionResponse {
 export const fetchAttribution = (filters: AttributionFilters = {}) =>
   api.get<AttributionResponse>("/attribution", { params: filters }).then((r) => r.data);
 
-export const fetchTradeJournal = (tradeId: number) =>
+export const fetchTradeJournal = (tradeId: EntityId) =>
   api.get<TradeJournalEntry>(`/trades/${tradeId}/journal`).then((r) => r.data);
 
 export const attributionExportUrl = (format: "json" | "csv", filters: AttributionFilters = {}) => {
@@ -736,19 +737,19 @@ export const PAPER_ORDER_TYPES = [
 export type PaperOrderType = (typeof PAPER_ORDER_TYPES)[number];
 
 export interface PaperOrderFill {
-  id: number;
+  id: EntityId;
   quantity: number;
   price: number;
   fees: number;
   slippage: number;
   notional: number;
   candle_timestamp: string | null;
-  trade_id: number | null;
+  trade_id: EntityId | null;
   created_at: string | null;
 }
 
 export interface PaperOrderEvent {
-  id: number;
+  id: EntityId;
   event_type: string;
   from_status: string | null;
   to_status: string | null;
@@ -758,7 +759,7 @@ export interface PaperOrderEvent {
 }
 
 export interface PaperOrder {
-  id: number;
+  id: EntityId;
   idempotency_key: string;
   ticker: string;
   asset_type: string;
@@ -787,9 +788,9 @@ export interface PaperOrder {
   fees_total: number;
   slippage_total: number;
   costs_total: number;
-  parent_id: number | null;
+  parent_id: EntityId | null;
   oco_group: string | null;
-  trade_id: number | null;
+  trade_id: EntityId | null;
   last_candle_at: string | null;
   reject_reason: string | null;
   cancel_reason: string | null;
@@ -864,7 +865,7 @@ export interface PaperProcessInput {
   ticker: string;
   candles?: PaperCandleInput[];
   interval?: string;
-  order_id?: number;
+  order_id?: EntityId;
 }
 
 export interface PaperProcessResponse {
@@ -902,13 +903,13 @@ export const fetchPaperMode = () =>
 export const fetchPaperOrders = (filters: PaperOrderFilters = {}) =>
   api.get<PaperOrderListResponse>("/paper-orders", { params: filters }).then((r) => r.data);
 
-export const fetchPaperOrder = (orderId: number) =>
+export const fetchPaperOrder = (orderId: EntityId) =>
   api.get<PaperOrder>(`/paper-orders/${orderId}`).then((r) => r.data);
 
 export const createPaperOrder = (payload: PaperOrderInput) =>
   api.post<PaperOrder>("/paper-orders", payload).then((r) => r.data);
 
-export const cancelPaperOrder = (orderId: number, reason?: string) =>
+export const cancelPaperOrder = (orderId: EntityId, reason?: string) =>
   api.post<PaperOrder>(`/paper-orders/${orderId}/cancel`, { reason }).then((r) => r.data);
 
 export const processPaperOrders = (payload: PaperProcessInput) =>
@@ -948,7 +949,7 @@ export interface LiveCheck {
 }
 
 export interface LiveOrderFill {
-  id: number;
+  id: EntityId;
   broker_fill_id: string;
   quantity: number;
   price: number;
@@ -957,8 +958,8 @@ export interface LiveOrderFill {
 }
 
 export interface LiveAuditEntry {
-  id: number;
-  order_id: number | null;
+  id: EntityId;
+  order_id: EntityId | null;
   event_type: string;
   actor: string;
   message: string;
@@ -968,7 +969,7 @@ export interface LiveAuditEntry {
 }
 
 export interface LiveOrder {
-  id: number;
+  id: EntityId;
   mode: string;
   idempotency_key: string;
   client_order_id: string;
@@ -1032,7 +1033,7 @@ export interface LiveCancelAllResponse extends LiveModeStatus {
   requested: number;
   canceled: number;
   failed: number;
-  results: { order_id: number; canceled: boolean; error: string | null }[];
+  results: { order_id: EntityId; canceled: boolean; error: string | null }[];
 }
 
 export const fetchLiveStatus = () =>
@@ -1085,10 +1086,10 @@ export const submitLiveOrder = (
 export const fetchLiveOrders = (operatorToken: string) =>
   api.get<LiveOrderListResponse>("/live-orders", liveOperatorConfig(operatorToken)).then((r) => r.data);
 
-export const fetchLiveOrder = (operatorToken: string, orderId: number) =>
+export const fetchLiveOrder = (operatorToken: string, orderId: EntityId) =>
   api.get<LiveOrder>(`/live-orders/${orderId}`, liveOperatorConfig(operatorToken)).then((r) => r.data);
 
-export const cancelLiveOrder = (operatorToken: string, orderId: number, reason?: string) =>
+export const cancelLiveOrder = (operatorToken: string, orderId: EntityId, reason?: string) =>
   api.post<LiveOrder>(
     `/live-orders/${orderId}/cancel`,
     { reason },
@@ -1110,7 +1111,7 @@ export const reconcileLiveOrders = (operatorToken: string) =>
   ).then((r) => r.data);
 
 export const verifyLiveAudit = (operatorToken: string) =>
-  api.get<{ entries: number; intact: boolean; broken_entry_id: number | null }>(
+  api.get<{ entries: number; intact: boolean; broken_entry_id: EntityId | null }>(
     "/live-orders/audit/verify",
     liveOperatorConfig(operatorToken),
   ).then((r) => r.data);
@@ -1358,13 +1359,13 @@ export interface ActionItemDeepLink {
   tab: string;
   ticker?: string;
   opportunity_id?: string;
-  trade_id?: number;
-  order_id?: number;
+  trade_id?: EntityId;
+  order_id?: EntityId;
   section?: string;
 }
 
 export interface ActionItem {
-  id: number;
+  id: EntityId;
   source_key: string;
   source_type: string;
   category: ActionItemCategory;
@@ -1373,8 +1374,8 @@ export interface ActionItem {
   title: string;
   message: string;
   ticker: string | null;
-  trade_id: number | null;
-  order_id: number | null;
+  trade_id: EntityId | null;
+  order_id: EntityId | null;
   context_id: string | null;
   deep_link: ActionItemDeepLink;
   payload: Record<string, unknown>;
@@ -1421,16 +1422,16 @@ export const fetchActionItems = (filters: ActionItemFilters = {}) =>
 export const refreshActionItems = (filters: ActionItemFilters = {}) =>
   api.post<ActionItemListResponse>("/action-items/refresh", null, { params: filters }).then((r) => r.data);
 
-export const acknowledgeActionItem = (id: number) =>
+export const acknowledgeActionItem = (id: EntityId) =>
   api.post<ActionItem>(`/action-items/${id}/acknowledge`).then((r) => r.data);
 
-export const snoozeActionItem = (id: number, minutes: number) =>
+export const snoozeActionItem = (id: EntityId, minutes: number) =>
   api.post<ActionItem>(`/action-items/${id}/snooze`, { minutes }).then((r) => r.data);
 
-export const resolveActionItem = (id: number) =>
+export const resolveActionItem = (id: EntityId) =>
   api.post<ActionItem>(`/action-items/${id}/resolve`).then((r) => r.data);
 
-export const reopenActionItem = (id: number) =>
+export const reopenActionItem = (id: EntityId) =>
   api.post<ActionItem>(`/action-items/${id}/reopen`).then((r) => r.data);
 
 // Issue #50: per-user dashboard layout preferences

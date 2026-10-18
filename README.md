@@ -1061,9 +1061,12 @@ The accepted
 defines logical schema ownership, UUID and external-identifier rules, tenant
 keys, canonical instrument identity, UTC timestamps, exact financial decimals,
 rounding, candle uniqueness, indexes, retention, and Aurora-compatible
-partitioning. Data ingestion can now use the PostgreSQL market-data adapter;
-the remaining services continue to use their versioned SQLite stores until
-their service conversion tickets land.
+partitioning. Data ingestion and portfolio-engine can now use PostgreSQL
+adapters. Portfolio balances, trades, orders, fills, journals, equity/risk
+snapshots, and audit records use tenant-scoped UUIDv7 identities, UTC
+timestamps, and exact `NUMERIC` values in PostgreSQL. Quant-engine and
+notification-gateway continue to use their current stores until their service
+conversion tickets land.
 
 Validate the non-runtime DDL prototype against an isolated PostgreSQL 16
 container:
@@ -1072,7 +1075,7 @@ container:
 python scripts/verify_postgresql_contract.py
 ```
 
-For a fresh PostgreSQL-backed market-data deployment, initialize `.env`, set
+For a fresh PostgreSQL-backed durable-state deployment, initialize `.env`, set
 `MARKET_DATA_POSTGRES_PASSWORD`, start PostgreSQL, migrate every service-owned
 database, and then start the overlay:
 
@@ -1110,13 +1113,21 @@ docker compose \
   up -d
 ```
 
-This sets `MARKET_DATA_STORAGE_BACKEND=postgresql`, starts PostgreSQL 16, and
-mounts the existing SQLite data-ingestion volume read-only. It does not import
-legacy candles. Keep that source volume intact until the separate import and
-reconciliation workflow is complete. Without the overlay, the explicit
-`sqlite-transition` backend remains active. Existing installations must remain
-on that transition backend until their SQLite watchlist and candle import has
-passed reconciliation.
+This sets both `MARKET_DATA_STORAGE_BACKEND=postgresql` and
+`PORTFOLIO_STORAGE_BACKEND=postgresql`, starts PostgreSQL 16, and mounts the
+existing data-ingestion and portfolio SQLite volumes read-only. It does not
+import legacy candles or financial state. Keep both sources intact until issue
+#94's import and reconciliation workflow reports exact row counts, balances,
+reservations, fills, and P&L. A failed target migration can be cleaned by
+dropping the new `portfolio` schema and replaying migrations against an empty
+target; never modify the source SQLite files. Without the overlay, both
+services remain in explicit `sqlite-transition` mode.
+
+Run the isolated PostgreSQL portfolio contract directly with:
+
+```bash
+python scripts/verify_postgresql_portfolio.py
+```
 
 ## Production-readiness roadmap
 
