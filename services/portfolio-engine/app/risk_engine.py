@@ -170,6 +170,8 @@ def evaluate_breakers(
     limits: RiskLimits,
     now: datetime | None = None,
 ) -> BreakerState:
+    equity = float(equity)
+    peak_equity = float(peak_equity)
     evaluation_time = _as_utc(now or datetime.now(timezone.utc))
     day_start = datetime.combine(evaluation_time.date(), time.min, tzinfo=timezone.utc)
     week_start = day_start - timedelta(days=day_start.weekday())
@@ -221,6 +223,7 @@ def calculate_portfolio_risk(
     equity: float,
     limits: RiskLimits,
 ) -> dict[str, object]:
+    equity = float(equity)
     denominator = max(equity, 1.0)
     position_rows = [
         {
@@ -352,6 +355,8 @@ def evaluate_proposed_position(
     intent: str = "increase",
     now: datetime | None = None,
 ) -> dict[str, object]:
+    equity = float(equity)
+    peak_equity = float(peak_equity)
     breakers = evaluate_breakers(closed_trades, equity, peak_equity, limits, now)
     before = calculate_portfolio_risk(current_positions, equity, limits)
     if intent == "reduce":

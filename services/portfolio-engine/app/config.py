@@ -1,4 +1,5 @@
 import os
+import uuid
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -8,6 +9,8 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./portfolio.db"
+    PORTFOLIO_STORAGE_BACKEND: str = "sqlite-transition"
+    PORTFOLIO_TENANT_ID: str = "00000000-0000-7000-8000-000000000001"
     INITIAL_BALANCE: float = 10_000.0
     QUANT_ENGINE_URL: str = "http://quant-engine:8001"
     DATA_INGESTION_URL: str = "http://data-ingestion:8000"
@@ -68,6 +71,29 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_deployment_profile(self) -> "Settings":
+        storage_backend = self.PORTFOLIO_STORAGE_BACKEND.strip().lower()
+        if storage_backend not in {"postgresql", "sqlite-transition"}:
+            raise ValueError(
+                "PORTFOLIO_STORAGE_BACKEND must be 'postgresql' "
+                "or 'sqlite-transition'"
+            )
+        if storage_backend == "postgresql":
+            if not self.DATABASE_URL.startswith(
+                ("postgresql+asyncpg://", "postgresql://")
+            ):
+                raise ValueError(
+                    "postgresql portfolio storage requires a PostgreSQL DATABASE_URL"
+                )
+            try:
+                uuid.UUID(self.PORTFOLIO_TENANT_ID)
+            except ValueError as exc:
+                raise ValueError(
+                    "PORTFOLIO_TENANT_ID must be a UUID for PostgreSQL storage"
+                ) from exc
+        elif not self.DATABASE_URL.startswith("sqlite+aiosqlite://"):
+            raise ValueError(
+                "sqlite-transition portfolio storage requires an async SQLite DATABASE_URL"
+            )
         if self.DEPLOYMENT_PROFILE.strip().lower() != "sandbox":
             return self
         if self.LIVE_TRADING_ENABLED:

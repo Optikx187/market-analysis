@@ -167,7 +167,7 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
         ),
         "portfolio-engine": Job(
             "portfolio-engine",
-            "Run portfolio, risk, paper-order, and guarded-live tests.",
+            "Run portfolio tests and PostgreSQL transaction verification.",
             (
                 command(
                     PYTHON,
@@ -178,6 +178,7 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
                     cwd="services/portfolio-engine",
                     environment=pytest_environment,
                 ),
+                command(PYTHON, "scripts/verify_postgresql_portfolio.py"),
             ),
         ),
         "notification-gateway": Job(

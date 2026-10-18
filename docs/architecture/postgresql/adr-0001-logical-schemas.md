@@ -54,6 +54,7 @@ implicit.
 | `paper_order_fills` | `portfolio.paper_order_fills` |
 | `paper_order_events` | Future `portfolio.paper_order_events` append-only lifecycle records |
 | `equity_snapshots` | `portfolio.equity_snapshots` |
+| `risk_snapshots` | `portfolio.risk_snapshots` |
 | `alert_logs` | Future `portfolio.trade_alerts`, retaining risk decision and research lineage |
 | `action_items` | Future `portfolio.action_items`, tenant/user scoped |
 | `dashboard_preferences` | Future `portfolio.dashboard_preferences`, tenant/user scoped |

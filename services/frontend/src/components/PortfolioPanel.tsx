@@ -15,6 +15,7 @@ import {
   type PortfolioRisk,
   type Trade,
   type ReplyTradesResponse,
+  type EntityId,
 } from "@/lib/api";
 import { notifyTradesChanged } from "@/lib/tradeEvents";
 
@@ -45,7 +46,7 @@ export default function PortfolioPanel() {
   const [tradeSubmitting, setTradeSubmitting] = useState(false);
 
   // Close trade
-  const [closingTradeId, setClosingTradeId] = useState<number | null>(null);
+  const [closingTradeId, setClosingTradeId] = useState<EntityId | null>(null);
   const [exitPrice, setExitPrice] = useState("");
   const [exitQuantity, setExitQuantity] = useState("");
   const [exitFees, setExitFees] = useState("");
@@ -126,7 +127,7 @@ export default function PortfolioPanel() {
     setCloseError(null);
   };
 
-  const handleCloseTrade = async (tradeId: number) => {
+  const handleCloseTrade = async (tradeId: EntityId) => {
     const price = parseFloat(exitPrice);
     if (isNaN(price) || price <= 0) {
       setCloseError("Enter an exit price greater than 0.");

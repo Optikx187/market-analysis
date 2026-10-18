@@ -37,5 +37,20 @@ services:
       portfolio-engine:
         condition: service_healthy
 
+  portfolio-engine:
+    environment:
+      PORTFOLIO_STORAGE_BACKEND: postgresql
+      PORTFOLIO_TENANT_ID: ${PORTFOLIO_TENANT_ID:-00000000-0000-7000-8000-000000000001}
+      DATABASE_URL: >-
+        postgresql+asyncpg://${MARKET_DATA_POSTGRES_USER:-market_analysis}:${MARKET_DATA_POSTGRES_PASSWORD:-market-analysis-local}@postgresql:5432/${MARKET_DATA_POSTGRES_DB:-market_analysis}
+    volumes:
+      - type: volume
+        source: portfolio-db
+        target: /app/data
+        read_only: true
+    depends_on:
+      postgresql:
+        condition: service_healthy
+
 volumes:
   market-data-postgresql:

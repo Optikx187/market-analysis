@@ -133,7 +133,11 @@ def test_empty_database_upgrades_to_head_and_is_idempotent(
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0001_portfolio",)
+        ).fetchone() == ("0002_portfolio",)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM pragma_table_info('portfolio') "
+            "WHERE name = 'tenant_id'"
+        ).fetchone() == (1,)
 
 
 def test_current_unversioned_schema_is_adopted_without_data_loss(
@@ -158,7 +162,7 @@ def test_current_unversioned_schema_is_adopted_without_data_loss(
         ).fetchall() == [("alice", 12345.0, 12500.0, 13000.0)]
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0001_portfolio",)
+        ).fetchone() == ("0002_portfolio",)
 
 
 def test_legacy_schema_upgrades_with_record_reconciliation(
@@ -292,7 +296,7 @@ def test_destructive_downgrade_requires_restore(
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0001_portfolio",)
+        ).fetchone() == ("0002_portfolio",)
 
 
 def test_schema_validation_is_read_only_and_fails_closed(

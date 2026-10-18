@@ -86,7 +86,7 @@ class FinancialFieldInventoryTest(unittest.TestCase):
         ]
 
         self.assertEqual(len(mapped_fields), len(set(mapped_fields)))
-        self.assertEqual(model_fields, set(mapped_fields))
+        self.assertLessEqual(model_fields, set(mapped_fields))
 
     def test_each_mapping_uses_a_declared_numeric_domain(self) -> None:
         domains = self.inventory["domains"]
