@@ -22,9 +22,12 @@ The repository supports portable Docker Compose profiles for a private
 workstation, deterministic sandbox, single remote-lab host, and a
 multi-worker-ready topology.
 
-The current release is **not yet horizontally scalable**:
+The current release is **not yet horizontally scalable**, although market
+data, research history, and portfolio state now have feature-gated PostgreSQL
+adapters:
 
-- market data, portfolio state, and backtests use separate SQLite databases;
+- SQLite remains the default transition backend until source import and
+  reconciliation are operator-approved;
 - scanner scheduling, deduplication, and some notification state are held in process memory;
 - durable scheduled-work distribution still requires leases and a broker;
 - watchlists, market data, and price alerts are shared rather than tenant-scoped;
@@ -39,9 +42,9 @@ Do not run multiple active application clusters against copies of the same SQLit
 | Service | Network port | Responsibility | Durable state |
 | --- | ---: | --- | --- |
 | Frontend | `3000` | React dashboard and nginx API proxy | Browser session state |
-| Data ingestion | `8000` | Assets, OHLCV candles, quotes, data quality, price alerts, earnings | SQLite named volume |
-| Quant engine | `8001` | Signals, regimes, scanner, opportunity ranking, backtests | SQLite backtest named volume plus in-memory scanner state |
-| Portfolio engine | `8002` | Portfolio, risk, trades, paper/live orders, users, settings, encrypted credentials | SQLite named volume |
+| Data ingestion | `8000` | Assets, OHLCV candles, quotes, data quality, price alerts, earnings | SQLite transition volume or PostgreSQL `market_data` schema |
+| Quant engine | `8001` | Signals, regimes, scanner, opportunity ranking, backtests | SQLite transition volume or PostgreSQL `research` schema; referenced artifact volume; in-memory scanner state |
+| Portfolio engine | `8002` | Portfolio, risk, trades, paper/live orders, users, settings, encrypted credentials | SQLite transition volume or PostgreSQL `portfolio` schema |
 | Notification gateway | `8003` | Discord, Telegram, Slack, email, SMS, Telegram commands | Credentials from portfolio engine; some runtime state is in memory |
 
 ```text
@@ -1061,12 +1064,15 @@ The accepted
 defines logical schema ownership, UUID and external-identifier rules, tenant
 keys, canonical instrument identity, UTC timestamps, exact financial decimals,
 rounding, candle uniqueness, indexes, retention, and Aurora-compatible
-partitioning. Data ingestion and portfolio-engine can now use PostgreSQL
-adapters. Portfolio balances, trades, orders, fills, journals, equity/risk
-snapshots, and audit records use tenant-scoped UUIDv7 identities, UTC
-timestamps, and exact `NUMERIC` values in PostgreSQL. Quant-engine and
-notification-gateway continue to use their current stores until their service
-conversion tickets land.
+partitioning. Data ingestion, quant-engine research history, and
+portfolio-engine can now use PostgreSQL adapters. Research runs use
+tenant-scoped UUIDv7 identities, immutable module/strategy versions,
+deterministic input-data lineage, UTC timestamps, and explicit retention
+classes. Oversized backtest results are stored in checksum-verified artifact
+files and referenced from bounded PostgreSQL rows. Portfolio balances, trades,
+orders, fills, journals, equity/risk snapshots, and audit records use exact
+`NUMERIC` values in PostgreSQL. Notification-gateway remains on its current
+store until its conversion ticket lands.
 
 Validate the non-runtime DDL prototype against an isolated PostgreSQL 16
 container:
@@ -1113,21 +1119,50 @@ docker compose \
   up -d
 ```
 
-This sets both `MARKET_DATA_STORAGE_BACKEND=postgresql` and
-`PORTFOLIO_STORAGE_BACKEND=postgresql`, starts PostgreSQL 16, and mounts the
-existing data-ingestion and portfolio SQLite volumes read-only. It does not
-import legacy candles or financial state. Keep both sources intact until issue
-#94's import and reconciliation workflow reports exact row counts, balances,
-reservations, fills, and P&L. A failed target migration can be cleaned by
-dropping the new `portfolio` schema and replaying migrations against an empty
-target; never modify the source SQLite files. Without the overlay, both
-services remain in explicit `sqlite-transition` mode.
+This sets `MARKET_DATA_STORAGE_BACKEND=postgresql`,
+`RESEARCH_STORAGE_BACKEND=postgresql`, and
+`PORTFOLIO_STORAGE_BACKEND=postgresql`; starts PostgreSQL 16; mounts all three
+source SQLite volumes read-only; and gives research artifacts a separate
+writable volume. It does not import legacy candles, backtests, or financial
+state. Keep every source intact until issue #94's import and reconciliation
+workflow reports exact row counts, keys, lineage, balances, reservations,
+fills, and P&L. A failed target migration can be cleaned by dropping the new
+service-owned schema and replaying migrations against an empty target; never
+modify the source SQLite files. Without the overlay, all three services remain
+in explicit `sqlite-transition` mode.
+
+The shared cluster keeps independent Alembic state:
+`alembic_version` for data ingestion,
+`alembic_version_research` for quant-engine, and
+`alembic_version_portfolio` for portfolio-engine. This prevents one service's
+revision from being interpreted as another service's migration head.
 
 Run the isolated PostgreSQL portfolio contract directly with:
 
 ```bash
 python scripts/verify_postgresql_portfolio.py
 ```
+
+Run the isolated PostgreSQL research contract directly with:
+
+```bash
+python scripts/verify_postgresql_research.py
+```
+
+Validate all three service migration chains against one shared PostgreSQL 16
+database with:
+
+```bash
+python scripts/verify_postgresql_shared_migrations.py
+```
+
+`BACKTEST_INLINE_RESULT_MAX_BYTES` bounds the JSON kept in a research row.
+Larger results are written atomically under `BACKTEST_ARTIFACT_DIRECTORY` and
+referenced by URI, SHA-256, media type, and byte size. API reads verify the
+artifact size and checksum before returning the original compatible result.
+Eligible evidence defaults to seven-year retention; non-actionable ad-hoc
+research defaults to two years. Issue #95 owns automated maintenance and
+retention execution.
 
 ## Production-readiness roadmap
 

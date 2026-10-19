@@ -1,6 +1,4 @@
 from logging.config import fileConfig
-from pathlib import Path
-
 from alembic import context
 from sqlalchemy import create_engine, pool
 
@@ -8,11 +6,19 @@ from app.config import settings
 
 
 config = context.config
-database_path = Path(settings.BACKTEST_DATABASE_PATH).resolve()
-config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path}")
+config.set_main_option(
+    "sqlalchemy.url",
+    settings.research_database_url.replace("%", "%%"),
+)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+
+def version_table_options() -> dict[str, str]:
+    if settings.research_database_url.startswith("postgresql"):
+        return {"version_table": "alembic_version_research"}
+    return {}
 
 
 def run_migrations_offline() -> None:
@@ -21,6 +27,7 @@ def run_migrations_offline() -> None:
         target_metadata=None,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        **version_table_options(),
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -32,7 +39,11 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=None)
+        context.configure(
+            connection=connection,
+            target_metadata=None,
+            **version_table_options(),
+        )
         with context.begin_transaction():
             context.run_migrations()
 

@@ -62,12 +62,12 @@ implicit.
 | `live_orders` | `portfolio.live_orders` |
 | `live_order_fills` | `portfolio.live_order_fills` |
 | `live_execution_audit` | Future `portfolio.live_execution_audit` plus security events in `operations.audit_events` |
-| `backtest_runs` SQLite store | `research.backtest_runs` |
+| `backtest_runs` SQLite store | `research.backtest_runs`; oversized result payloads use `research.backtest_artifacts` references |
 
 The future-table labels are part of this contract even where the executable
-prototype omits low-volume detail tables. Issues #91 through #93 must add them
-to their service-owned migrations before importing the corresponding SQLite
-records.
+prototype omits low-volume detail tables. Issues #91 through #93 added the
+current market-data, research, and portfolio tables to service-owned
+migrations. Issue #94 owns source import and reconciliation.
 
 ## Relationships
 
@@ -146,7 +146,7 @@ must not infer billing status from missing rows or hard-coded tiers.
 - Cross-schema foreign keys are allowed for stable roots such as tenant, user,
   and instrument IDs, but services must not use them as permission to perform
   cross-owner writes.
-- SQLite remains the supported local sandbox store until the service conversion
-  tickets land.
+- SQLite remains the default local sandbox and transition store until issue
+  #94 proves source-to-target import and reconciliation.
 - Consolidating into one Aurora cluster does not imply one application role or
   one schema owner.

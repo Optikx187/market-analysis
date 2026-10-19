@@ -17,6 +17,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    if op.get_bind().dialect.name == "postgresql":
+        return
     inspector = inspect(op.get_bind())
     if "backtest_runs" not in inspector.get_table_names():
         op.create_table(

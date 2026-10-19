@@ -1,8 +1,8 @@
-import sqlite3
 from pathlib import Path
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from sqlalchemy import create_engine, inspect, text
 
 
 def expected_revision() -> str:
@@ -15,26 +15,45 @@ def expected_revision() -> str:
     return revision
 
 
-def current_revision(database_path: str) -> str | None:
-    path = Path(database_path)
-    if not path.is_file():
-        return None
-    with sqlite3.connect(path) as connection:
-        version_table = connection.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type = 'table' AND name = 'alembic_version'"
-        ).fetchone()
-        if version_table is None:
+def _database_url(database_url_or_path: str) -> str:
+    if "://" in database_url_or_path:
+        if database_url_or_path.startswith("postgresql://"):
+            return database_url_or_path.replace(
+                "postgresql://",
+                "postgresql+psycopg://",
+                1,
+            )
+        return database_url_or_path
+    return f"sqlite:///{Path(database_url_or_path).resolve()}"
+
+
+def current_revision(database_url_or_path: str) -> str | None:
+    database_url = _database_url(database_url_or_path)
+    if database_url.startswith("sqlite:///"):
+        path = Path(database_url.removeprefix("sqlite:///"))
+        if not path.is_file():
             return None
-        row = connection.execute(
-            "SELECT version_num FROM alembic_version"
-        ).fetchone()
-    return str(row[0]) if row is not None else None
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as connection:
+            version_table = (
+                "alembic_version_research"
+                if connection.dialect.name == "postgresql"
+                else "alembic_version"
+            )
+            if version_table not in inspect(connection).get_table_names():
+                return None
+            revision = connection.execute(
+                text(f"SELECT version_num FROM {version_table}")
+            ).scalar_one_or_none()
+        return str(revision) if revision is not None else None
+    finally:
+        engine.dispose()
 
 
-def validate_schema(database_path: str) -> None:
+def validate_schema(database_url_or_path: str) -> None:
     expected = expected_revision()
-    current = current_revision(database_path)
+    current = current_revision(database_url_or_path)
     if current != expected:
         current_label = current or "unversioned"
         raise RuntimeError(

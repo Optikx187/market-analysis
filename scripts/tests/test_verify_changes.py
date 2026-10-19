@@ -66,6 +66,7 @@ class ClassifierTest(unittest.TestCase):
                 "portfolio-engine",
                 "notification-gateway",
                 "compose",
+                "postgres-contract",
             ],
         )
 
@@ -155,6 +156,12 @@ class ClassifierTest(unittest.TestCase):
         self.assertTrue(docs_plan["run_docs"])
         self.assertTrue(docs_plan["run_postgres_contract"])
         self.assertFalse(docs_plan["high_risk"])
+        migration_plan = verify_changes.ci_plan(
+            verify_changes.classify_paths(
+                ["scripts/verify_postgresql_shared_migrations.py"]
+            )
+        )
+        self.assertTrue(migration_plan["run_postgres_contract"])
 
     def test_representative_hosted_ci_path_matrix(self) -> None:
         cases = {

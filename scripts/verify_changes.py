@@ -152,7 +152,7 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
         ),
         "quant-engine": Job(
             "quant-engine",
-            "Run quant-engine tests.",
+            "Run quant-engine tests and PostgreSQL research verification.",
             (
                 command(
                     PYTHON,
@@ -163,6 +163,7 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
                     cwd="services/quant-engine",
                     environment=pytest_environment,
                 ),
+                command(PYTHON, "scripts/verify_postgresql_research.py"),
             ),
         ),
         "portfolio-engine": Job(
@@ -259,8 +260,14 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
         ),
         "postgres-contract": Job(
             "postgres-contract",
-            "Validate the durable-state DDL against isolated PostgreSQL 16.",
-            (command(PYTHON, "scripts/verify_postgresql_contract.py"),),
+            "Validate durable DDL and shared service migrations on PostgreSQL 16.",
+            (
+                command(PYTHON, "scripts/verify_postgresql_contract.py"),
+                command(
+                    PYTHON,
+                    "scripts/verify_postgresql_shared_migrations.py",
+                ),
+            ),
         ),
         **{
             f"image-{service}": Job(
@@ -329,6 +336,8 @@ def jobs_for_path(path: str) -> set[str]:
         return jobs | {"management", "docs"}
     if path == "scripts/verify_changes.py":
         return jobs | set(CORE_JOBS)
+    if path == "scripts/verify_postgresql_shared_migrations.py":
+        return jobs | {"postgres-contract"}
     if path == "scripts/ci_sandbox_smoke.sh":
         return jobs | {"management", "compose"}
     if path.startswith("scripts/"):
@@ -344,7 +353,10 @@ def jobs_for_path(path: str) -> set[str]:
     if path.startswith(("shared/", "schemas/", "contracts/")):
         return jobs | standard_service_jobs() | {"compose"}
     if "migrations" in parts or filename in {"alembic.ini", "migration.sql"}:
-        return jobs | set(BACKEND_SERVICES) | {"compose"}
+        return jobs | set(BACKEND_SERVICES) | {
+            "compose",
+            "postgres-contract",
+        }
     if path.startswith("services/frontend/"):
         jobs.add("frontend")
         if filename in {"Dockerfile", ".dockerignore", "package.json", "package-lock.json"}:

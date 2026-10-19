@@ -47,6 +47,12 @@ services:
       - PORTFOLIO_ENGINE_URL=http://portfolio-engine:8002
       - NOTIFICATION_GATEWAY_URL=http://notification-gateway:8003
       - BACKTEST_DATABASE_PATH=/app/data/backtests.db
+      - RESEARCH_STORAGE_BACKEND=sqlite-transition
+      - RESEARCH_DATABASE_URL=sqlite:////app/data/backtests.db
+      - RESEARCH_TENANT_ID=${RESEARCH_TENANT_ID:-00000000-0000-7000-8000-000000000001}
+      - RESEARCH_USER_KEY=${RESEARCH_USER_KEY:-default}
+      - BACKTEST_ARTIFACT_DIRECTORY=/app/data/artifacts
+      - BACKTEST_INLINE_RESULT_MAX_BYTES=${BACKTEST_INLINE_RESULT_MAX_BYTES:-262144}
       - DEPLOYMENT_PROFILE=${DEPLOYMENT_PROFILE:-single-node}
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost:3000}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}

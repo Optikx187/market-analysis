@@ -17,6 +17,7 @@ to duplicate them in every service.
 | Latest/range candles | `(instrument_id, interval, bucket_start DESC)` including OHLCV/source fields |
 | Provider ingestion audit | `(provider_id, ingested_at DESC)` |
 | Tenant research history | `(tenant_id, analysis_definition_id, created_at DESC)` |
+| Tenant backtest history | `(tenant_id, user_key, ticker, created_at DESC, run_id DESC)` |
 | User portfolio lookup | unique `(tenant_id, user_id, name)` |
 | Open paper/live orders | partial `(tenant_id, user_id, created_at DESC)` for active statuses |
 | Broker reconciliation | unique `(broker_code, broker_order_id)` when broker ID exists |
