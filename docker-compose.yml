@@ -6,6 +6,7 @@ services:
       - "8000"
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/data_ingestion.db
+      - MARKET_DATA_STORAGE_BACKEND=sqlite-transition
       - INTERNAL_SERVICE_TOKEN=${INTERNAL_SERVICE_TOKEN:-}
       - DEPLOYMENT_PROFILE=${DEPLOYMENT_PROFILE:-single-node}
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost:3000}
@@ -68,6 +69,8 @@ services:
       - "8002"
     environment:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/portfolio.db
+      - PORTFOLIO_STORAGE_BACKEND=sqlite-transition
+      - PORTFOLIO_TENANT_ID=${PORTFOLIO_TENANT_ID:-00000000-0000-7000-8000-000000000001}
       - QUANT_ENGINE_URL=http://quant-engine:8001
       - DATA_INGESTION_URL=http://data-ingestion:8000
       - HOST_ENV_PATH=/workspace/.env

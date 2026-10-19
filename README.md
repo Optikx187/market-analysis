@@ -1061,14 +1061,72 @@ The accepted
 defines logical schema ownership, UUID and external-identifier rules, tenant
 keys, canonical instrument identity, UTC timestamps, exact financial decimals,
 rounding, candle uniqueness, indexes, retention, and Aurora-compatible
-partitioning. It is a design/prototype boundary; current services continue to
-use their versioned SQLite stores until the service conversion tickets land.
+partitioning. Data ingestion and portfolio-engine can now use PostgreSQL
+adapters. Portfolio balances, trades, orders, fills, journals, equity/risk
+snapshots, and audit records use tenant-scoped UUIDv7 identities, UTC
+timestamps, and exact `NUMERIC` values in PostgreSQL. Quant-engine and
+notification-gateway continue to use their current stores until their service
+conversion tickets land.
 
 Validate the non-runtime DDL prototype against an isolated PostgreSQL 16
 container:
 
 ```bash
 python scripts/verify_postgresql_contract.py
+```
+
+For a fresh PostgreSQL-backed durable-state deployment, initialize `.env`, set
+`MARKET_DATA_POSTGRES_PASSWORD`, start PostgreSQL, migrate every service-owned
+database, and then start the overlay:
+
+```bash
+./manage install --no-start
+docker compose \
+  -f docker-compose.yml \
+  -f deploy/compose.single-node.yml \
+  -f deploy/compose.postgresql.yml \
+  up -d postgresql
+docker compose \
+  -f docker-compose.yml \
+  -f deploy/compose.single-node.yml \
+  -f deploy/compose.postgresql.yml \
+  build
+docker compose \
+  -f docker-compose.yml \
+  -f deploy/compose.single-node.yml \
+  -f deploy/compose.postgresql.yml \
+  run --rm --no-deps data-ingestion python -m alembic upgrade head
+docker compose \
+  -f docker-compose.yml \
+  -f deploy/compose.single-node.yml \
+  -f deploy/compose.postgresql.yml \
+  run --rm --no-deps quant-engine python -m alembic upgrade head
+docker compose \
+  -f docker-compose.yml \
+  -f deploy/compose.single-node.yml \
+  -f deploy/compose.postgresql.yml \
+  run --rm --no-deps portfolio-engine python -m alembic upgrade head
+docker compose \
+  -f docker-compose.yml \
+  -f deploy/compose.single-node.yml \
+  -f deploy/compose.postgresql.yml \
+  up -d
+```
+
+This sets both `MARKET_DATA_STORAGE_BACKEND=postgresql` and
+`PORTFOLIO_STORAGE_BACKEND=postgresql`, starts PostgreSQL 16, and mounts the
+existing data-ingestion and portfolio SQLite volumes read-only. It does not
+import legacy candles or financial state. Keep both sources intact until issue
+#94's import and reconciliation workflow reports exact row counts, balances,
+reservations, fills, and P&L. A failed target migration can be cleaned by
+dropping the new `portfolio` schema and replaying migrations against an empty
+target; never modify the source SQLite files. Without the overlay, both
+services remain in explicit `sqlite-transition` mode.
+
+Run the isolated PostgreSQL portfolio contract directly with:
+
+```bash
+python scripts/verify_postgresql_portfolio.py
 ```
 
 ## Production-readiness roadmap

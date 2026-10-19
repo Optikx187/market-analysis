@@ -9,7 +9,9 @@ import math
 import os
 import stat
 import tempfile
+import uuid
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 
 from app.config import settings
 from app.credential_store import (
@@ -28,11 +31,22 @@ from app.credential_store import (
     CredentialConfigurationError,
     CredentialDecryptionError,
 )
-from app.database import async_session, get_db
+from app.database import acquire_idempotency_lock, async_session, get_db
+from app.financial import (
+    POSTGRESQL_STORAGE,
+    money_add,
+    money_decimal,
+    money_product,
+    money_subtract,
+    price_decimal,
+    quantity_decimal,
+    uuid7,
+)
 from app.migration_state import validate_schema
 from app.models import (
     Trade, TradeStatus, SignalDirection, Portfolio, EquitySnapshot, AlertLog, CredentialSecret, User,
     TradeExecution, TradeJournal, ExecutionKind, PaperOrder, PaperOrderEvent, PaperOrderFill,
+    RiskSnapshot,
     ActionItem, DashboardPreference, LiveTradingControl, LiveOrder, LiveOrderFill,
     LiveExecutionAudit, _utc_now,
 )
@@ -71,7 +85,7 @@ logger = logging.getLogger(__name__)
 
 
 class TradeResponse(BaseModel):
-    id: int
+    id: int | uuid.UUID
     ticker: str
     direction: str
     entry_price: float
@@ -169,7 +183,7 @@ class SignalDecision(BaseModel):
 
 
 class AlertLogResponse(BaseModel):
-    id: int
+    id: int | uuid.UUID
     ticker: str
     direction: str
     status: str
@@ -198,6 +212,7 @@ class CredentialSaveRequest(BaseModel):
 
 
 POSITION_SIZE_PCT = 0.02
+EntityId = int | uuid.UUID
 
 PROVIDER_KEYS = {
     "binance": ["BINANCE_API_KEY", "BINANCE_API_SECRET"],
@@ -215,6 +230,15 @@ PROVIDER_KEYS = {
 }
 
 LOSS_TOLERANCE_KEY = "LOSS_TOLERANCE_PCT"
+
+
+def _parse_entity_id(value: object) -> EntityId:
+    try:
+        if POSTGRESQL_STORAGE:
+            return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+        return int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, "Invalid resource identifier") from exc
 
 
 def _provider_for_key(key: str) -> str:
@@ -268,15 +292,47 @@ async def _save_secret(
 
 
 async def get_or_create_portfolio(db: AsyncSession) -> Portfolio:
-    result = await db.execute(select(Portfolio).limit(1))
+    query = select(Portfolio).limit(1)
+    if POSTGRESQL_STORAGE:
+        query = query.with_for_update()
+    result = await db.execute(query)
     portfolio = result.scalar_one_or_none()
     if portfolio is not None:
         return portfolio
 
+    if POSTGRESQL_STORAGE:
+        tenant_id = uuid.UUID(settings.PORTFOLIO_TENANT_ID)
+        user_key = current_user_key() or DEFAULT_USER_KEY
+        await db.execute(
+            postgresql_insert(Portfolio)
+            .values(
+                id=uuid7(),
+                tenant_id=tenant_id,
+                user_key=user_key,
+                balance=money_decimal(settings.INITIAL_BALANCE),
+                equity=money_decimal(settings.INITIAL_BALANCE),
+                peak_equity=money_decimal(settings.INITIAL_BALANCE),
+                total_pnl=money_decimal(0),
+                win_count=0,
+                loss_count=0,
+                max_drawdown=0,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    Portfolio.tenant_id,
+                    Portfolio.user_key,
+                ]
+            )
+        )
+        result = await db.execute(
+            select(Portfolio).limit(1).with_for_update()
+        )
+        return result.scalar_one()
+
     portfolio = Portfolio(
-        balance=settings.INITIAL_BALANCE,
-        equity=settings.INITIAL_BALANCE,
-        peak_equity=settings.INITIAL_BALANCE,
+        balance=float(money_decimal(settings.INITIAL_BALANCE)),
+        equity=float(money_decimal(settings.INITIAL_BALANCE)),
+        peak_equity=float(money_decimal(settings.INITIAL_BALANCE)),
     )
     db.add(portfolio)
     try:
@@ -285,7 +341,10 @@ async def get_or_create_portfolio(db: AsyncSession) -> Portfolio:
         return portfolio
     except IntegrityError:
         await db.rollback()
-        result = await db.execute(select(Portfolio).limit(1))
+        retry_query = select(Portfolio).limit(1)
+        if POSTGRESQL_STORAGE:
+            retry_query = retry_query.with_for_update()
+        result = await db.execute(retry_query)
         return result.scalar_one()
 
 
@@ -385,14 +444,23 @@ async def _risk_context(
 async def _portfolio_risk_status(db: AsyncSession) -> dict[str, object]:
     portfolio, positions, closed_trades, _ = await _risk_context(db)
     limits = _risk_limits()
-    snapshot = calculate_portfolio_risk(positions, portfolio.equity, limits)
+    snapshot = calculate_portfolio_risk(
+        positions,
+        float(portfolio.equity),
+        limits,
+    )
     snapshot["breaker"] = evaluate_breakers(
         closed_trades,
-        portfolio.equity,
-        portfolio.peak_equity,
+        float(portfolio.equity),
+        float(portfolio.peak_equity),
         limits,
     ).as_dict(limits)
     snapshot["equity"] = round(portfolio.equity, 2)
+    db.add(RiskSnapshot(
+        equity=portfolio.equity,
+        snapshot_json=json.dumps(snapshot, sort_keys=True, default=str),
+    ))
+    await db.commit()
     return snapshot
 
 
@@ -485,6 +553,12 @@ async def _initialize_credential_store() -> None:
 async def _initialize_live_control() -> None:
     """Create exactly one fail-closed control row before requests can race."""
     async with async_session() as db:
+        await acquire_idempotency_lock(
+            db,
+            "live-control",
+            "tenant",
+            settings.PORTFOLIO_TENANT_ID,
+        )
         controls = (
             await db.execute(select(LiveTradingControl).order_by(LiveTradingControl.id))
         ).scalars().all()
@@ -976,10 +1050,14 @@ async def log_manual_trade(payload: ManualTradeInput, db: AsyncSession = Depends
         status=TradeStatus.OPEN,
     )
     db.add(trade)
-    position_cost = payload.entry_price * payload.quantity
-    if position_cost > portfolio.balance:
+    position_cost = money_product(
+        payload.quantity,
+        payload.entry_price,
+        authorize_debit=True,
+    )
+    if money_decimal(position_cost) > money_decimal(portfolio.balance):
         raise HTTPException(400, f"Insufficient balance: need ${position_cost:,.2f} but only ${portfolio.balance:,.2f} available")
-    portfolio.balance -= position_cost
+    portfolio.balance = money_subtract(portfolio.balance, position_cost)
     await db.commit()
     await db.refresh(trade)
     db.add(TradeExecution(
@@ -1013,10 +1091,23 @@ async def _recompute_portfolio_equity(
     """Equity is cash plus capital locked in open positions plus paper reservations."""
     result = await db.execute(select(Trade).where(Trade.status == TradeStatus.OPEN))
     locked = sum(
-        position.entry_price * (position.quantity - (position.realized_quantity or 0.0))
-        for position in result.scalars().all()
+        (
+            money_decimal(
+                money_product(
+                    quantity_decimal(position.quantity)
+                    - quantity_decimal(position.realized_quantity or 0.0),
+                    position.entry_price,
+                )
+            )
+            for position in result.scalars().all()
+        ),
+        money_decimal(0),
     )
-    portfolio.equity = portfolio.balance + locked + await _reserved_paper_cash(db)
+    portfolio.equity = money_add(
+        portfolio.balance,
+        locked,
+        await _reserved_paper_cash(db),
+    )
     if portfolio.equity > portfolio.peak_equity:
         portfolio.peak_equity = portfolio.equity
     drawdown = (
@@ -1045,13 +1136,18 @@ async def _apply_position_exit(
     Manual closes and paper-order exit fills share this path so cash, costs and
     performance records are written exactly once per realized unit.
     """
-    remaining = trade.quantity - (trade.realized_quantity or 0.0)
+    remaining_decimal = quantity_decimal(trade.quantity) - quantity_decimal(
+        trade.realized_quantity or 0.0
+    )
+    remaining = float(remaining_decimal)
     if quantity is not None:
         if quantity <= 0:
             raise HTTPException(400, "Exit quantity must be positive")
         if quantity > remaining + 1e-9:
             raise HTTPException(400, f"Exit quantity exceeds the remaining {remaining:g} units")
-        close_quantity = min(quantity, remaining)
+        close_quantity = float(
+            quantity_decimal(min(quantity, remaining), reduce_only=True)
+        )
     else:
         close_quantity = remaining
     is_final_exit = abs(remaining - close_quantity) <= 1e-9
@@ -1077,14 +1173,23 @@ async def _apply_position_exit(
         costs,
     )
 
-    trade.exit_price = exit_price
-    trade.realized_quantity = (trade.realized_quantity or 0.0) + close_quantity
-    trade.entry_costs_allocated = (trade.entry_costs_allocated or 0.0) + costs.entry_costs_allocated
-    trade.exit_fees_total = (trade.exit_fees_total or 0.0) + fees
-    trade.exit_slippage_total = (trade.exit_slippage_total or 0.0) + slippage
-    trade.costs_total = (trade.costs_total or 0.0) + costs.total
-    trade.gross_pnl = (trade.gross_pnl or 0.0) + gross_pnl
-    trade.pnl = (trade.pnl or 0.0) + net_pnl
+    trade.exit_price = float(price_decimal(exit_price))
+    trade.realized_quantity = float(
+        quantity_decimal(trade.realized_quantity or 0.0)
+        + quantity_decimal(close_quantity)
+    )
+    trade.entry_costs_allocated = money_add(
+        trade.entry_costs_allocated or 0.0,
+        costs.entry_costs_allocated,
+    )
+    trade.exit_fees_total = money_add(trade.exit_fees_total or 0.0, fees)
+    trade.exit_slippage_total = money_add(
+        trade.exit_slippage_total or 0.0,
+        slippage,
+    )
+    trade.costs_total = money_add(trade.costs_total or 0.0, costs.total)
+    trade.gross_pnl = money_add(trade.gross_pnl or 0.0, gross_pnl)
+    trade.pnl = money_add(trade.pnl or 0.0, net_pnl)
     trade.pnl_pct = round((trade.pnl / (trade.entry_price * trade.quantity)) * 100, 2)
     db.add(TradeExecution(
         trade_id=trade.id,
@@ -1103,8 +1208,12 @@ async def _apply_position_exit(
         trade.closed_at = datetime.datetime.now(datetime.timezone.utc)
 
     portfolio = await get_or_create_portfolio(db)
-    portfolio.balance += trade.entry_price * close_quantity + net_pnl
-    portfolio.total_pnl += net_pnl
+    portfolio.balance = money_add(
+        portfolio.balance,
+        money_product(close_quantity, trade.entry_price),
+        net_pnl,
+    )
+    portfolio.total_pnl = money_add(portfolio.total_pnl or 0.0, net_pnl)
     if is_final_exit:
         if trade.pnl >= 0:
             portfolio.win_count += 1
@@ -1123,12 +1232,14 @@ class CloseTradeInput(BaseModel):
 
 
 @app.post("/api/trades/{trade_id}/close", response_model=TradeResponse)
-async def close_trade(trade_id: int, payload: CloseTradeInput, db: AsyncSession = Depends(get_db)):
+async def close_trade(trade_id: str, payload: CloseTradeInput, db: AsyncSession = Depends(get_db)):
     """Close all or part of an open trade, calculating net realized P&L after costs.
 
     Omitting ``quantity`` closes the entire remaining position.
     """
-    result = await db.execute(select(Trade).where(Trade.id == trade_id))
+    result = await db.execute(
+        select(Trade).where(Trade.id == _parse_entity_id(trade_id))
+    )
     trade = result.scalar_one_or_none()
     if trade is None:
         raise HTTPException(404, "Trade not found")
@@ -1463,8 +1574,11 @@ async def export_attribution(
 
 
 @app.get("/api/trades/{trade_id}/journal")
-async def trade_journal(trade_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(TradeJournal).where(TradeJournal.trade_id == trade_id))
+async def trade_journal(trade_id: str, db: AsyncSession = Depends(get_db)):
+    parsed_trade_id = _parse_entity_id(trade_id)
+    result = await db.execute(
+        select(TradeJournal).where(TradeJournal.trade_id == parsed_trade_id)
+    )
     row = result.scalar_one_or_none()
     if row is None:
         raise HTTPException(404, "No journal entry for this trade yet")
@@ -1481,9 +1595,12 @@ async def trade_journal(trade_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @app.get("/api/trades/{trade_id}/executions")
-async def trade_executions(trade_id: int, db: AsyncSession = Depends(get_db)):
-    executions = (await _trade_executions(db, [trade_id])).get(trade_id, [])
-    return {"trade_id": trade_id, "executions": executions}
+async def trade_executions(trade_id: str, db: AsyncSession = Depends(get_db)):
+    parsed_trade_id = _parse_entity_id(trade_id)
+    executions = (
+        await _trade_executions(db, [parsed_trade_id])
+    ).get(parsed_trade_id, [])
+    return {"trade_id": parsed_trade_id, "executions": executions}
 
 
 PAPER_MODE = {
@@ -1495,11 +1612,11 @@ PAPER_MODE = {
 
 class PaperCandleInput(BaseModel):
     timestamp: datetime.datetime
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float = 0.0
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal = Decimal(0)
 
 
 class PaperOrderCreateRequest(BaseModel):
@@ -1507,15 +1624,15 @@ class PaperOrderCreateRequest(BaseModel):
     ticker: str
     side: str
     order_type: str
-    quantity: float
+    quantity: Decimal
     asset_type: str = "stock"
-    limit_price: Optional[float] = None
-    stop_price: Optional[float] = None
-    trail_percent: Optional[float] = None
-    trail_amount: Optional[float] = None
-    reference_price: Optional[float] = None
-    take_profit_price: Optional[float] = None
-    stop_loss_price: Optional[float] = None
+    limit_price: Optional[Decimal] = None
+    stop_price: Optional[Decimal] = None
+    trail_percent: Optional[Decimal] = None
+    trail_amount: Optional[Decimal] = None
+    reference_price: Optional[Decimal] = None
+    take_profit_price: Optional[Decimal] = None
+    stop_loss_price: Optional[Decimal] = None
     time_in_force: str = "gtc"
     expires_at: Optional[datetime.datetime] = None
 
@@ -1528,7 +1645,7 @@ class PaperOrderProcessRequest(BaseModel):
     ticker: str
     candles: list[PaperCandleInput] = Field(default_factory=list)
     interval: Optional[str] = None
-    order_id: Optional[int] = None
+    order_id: Optional[int | uuid.UUID] = None
     spread_pct: Optional[float] = None
     slippage_pct: Optional[float] = None
     participation_pct: Optional[float] = None
@@ -1538,6 +1655,10 @@ class PaperOrderProcessRequest(BaseModel):
 def _naive_utc(value: Optional[datetime.datetime]) -> Optional[datetime.datetime]:
     if value is None:
         return None
+    if POSTGRESQL_STORAGE:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=datetime.timezone.utc)
+        return value.astimezone(datetime.timezone.utc)
     if value.tzinfo is not None:
         return value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
     return value
@@ -1586,12 +1707,20 @@ def _paper_audit(
     return event
 
 
-async def _paper_order(db: AsyncSession, order_id: int) -> Optional[PaperOrder]:
-    result = await db.execute(select(PaperOrder).where(PaperOrder.id == order_id))
+async def _paper_order(
+    db: AsyncSession,
+    order_id: EntityId,
+    *,
+    for_update: bool = False,
+) -> Optional[PaperOrder]:
+    query = select(PaperOrder).where(PaperOrder.id == order_id)
+    if for_update and POSTGRESQL_STORAGE:
+        query = query.with_for_update()
+    result = await db.execute(query)
     return result.scalar_one_or_none()
 
 
-async def _paper_children(db: AsyncSession, parent_id: int) -> list[PaperOrder]:
+async def _paper_children(db: AsyncSession, parent_id: EntityId) -> list[PaperOrder]:
     result = await db.execute(
         select(PaperOrder).where(PaperOrder.parent_id == parent_id).order_by(PaperOrder.id)
     )
@@ -1611,10 +1740,13 @@ async def _release_paper_reservation(
     if quantity is None:
         released = reserved
     else:
-        released = min(reserved, quantity * (order.reservation_price or 0.0))
-    order.reserved_cash = round(reserved - released, 6)
-    portfolio.balance = round(portfolio.balance + released, 6)
-    return round(released, 6)
+        released = min(
+            reserved,
+            money_product(quantity, order.reservation_price or 0.0),
+        )
+    order.reserved_cash = money_subtract(reserved, released)
+    portfolio.balance = money_add(portfolio.balance, released)
+    return float(money_decimal(released))
 
 
 async def _paper_open_positions(db: AsyncSession, ticker: str) -> list[Trade]:
@@ -1655,7 +1787,7 @@ async def _paper_sellable_quantity(
     ticker: str,
     *,
     oco_group: Optional[str] = None,
-    order_id: Optional[int] = None,
+    order_id: Optional[EntityId] = None,
 ) -> float:
     """Open long quantity minus what other working sell orders already claim."""
     open_quantity = sum(trade.remaining_quantity for trade in await _paper_open_positions(db, ticker))
@@ -1852,6 +1984,9 @@ async def create_paper_order(
     key = payload.idempotency_key.strip()
     if not key:
         raise HTTPException(400, "An idempotency key is required so retries cannot duplicate orders")
+    actor = current_user_key() or DEFAULT_USER_KEY
+    await acquire_idempotency_lock(db, "paper-order", actor, key)
+    portfolio = await get_or_create_portfolio(db)
     existing = (
         await db.execute(select(PaperOrder).where(PaperOrder.idempotency_key == key))
     ).scalar_one_or_none()
@@ -1888,7 +2023,6 @@ async def create_paper_order(
             "A buy market or trailing order needs a reference_price so buying power can be reserved",
         )
 
-    portfolio = await get_or_create_portfolio(db)
     order = PaperOrder(
         idempotency_key=key,
         ticker=ticker,
@@ -1897,16 +2031,32 @@ async def create_paper_order(
         order_type=order_type,
         role=paper.ENTRY if order_type == paper.BRACKET else paper.STANDALONE,
         status=paper.PENDING,
-        quantity=paper.round_quantity(payload.quantity),
+        quantity=float(quantity_decimal(payload.quantity)),
         filled_quantity=0.0,
-        limit_price=payload.limit_price,
-        stop_price=payload.stop_price,
+        limit_price=(
+            float(price_decimal(payload.limit_price))
+            if payload.limit_price is not None
+            else None
+        ),
+        stop_price=(
+            float(price_decimal(payload.stop_price))
+            if payload.stop_price is not None
+            else None
+        ),
         trail_percent=payload.trail_percent,
         trail_amount=payload.trail_amount,
         time_in_force=time_in_force,
         expires_at=_naive_utc(payload.expires_at),
-        reference_price=payload.reference_price,
-        reservation_price=reservation_price,
+        reference_price=(
+            float(price_decimal(payload.reference_price))
+            if payload.reference_price is not None
+            else None
+        ),
+        reservation_price=(
+            float(price_decimal(reservation_price))
+            if reservation_price is not None
+            else None
+        ),
         reserved_cash=0.0,
     )
     db.add(order)
@@ -1929,8 +2079,12 @@ async def create_paper_order(
     )
 
     if side == paper.BUY:
-        reserve = round(order.quantity * (reservation_price or 0.0), 6)
-        if reserve > portfolio.balance + 1e-9:
+        reserve = money_product(
+            order.quantity,
+            reservation_price or 0.0,
+            authorize_debit=True,
+        )
+        if money_decimal(reserve) > money_decimal(portfolio.balance):
             order.reject_reason = (
                 f"Insufficient buying power: need ${reserve:,.2f} but only "
                 f"${portfolio.balance:,.2f} is available"
@@ -1945,7 +2099,7 @@ async def create_paper_order(
             )
             await db.commit()
             return await _paper_order_detail(db, order)
-        portfolio.balance = round(portfolio.balance - reserve, 6)
+        portfolio.balance = money_subtract(portfolio.balance, reserve)
         order.reserved_cash = reserve
         _paper_audit(
             db,
@@ -2061,16 +2215,16 @@ async def list_paper_orders(
 
 
 @app.get("/api/paper-orders/{order_id}")
-async def get_paper_order(order_id: int, db: AsyncSession = Depends(get_db)):
-    order = await _paper_order(db, order_id)
+async def get_paper_order(order_id: str, db: AsyncSession = Depends(get_db)):
+    order = await _paper_order(db, _parse_entity_id(order_id))
     if order is None:
         raise HTTPException(404, "Paper order not found")
     return await _paper_order_detail(db, order)
 
 
 @app.get("/api/paper-orders/{order_id}/audit")
-async def paper_order_audit(order_id: int, db: AsyncSession = Depends(get_db)):
-    order = await _paper_order(db, order_id)
+async def paper_order_audit(order_id: str, db: AsyncSession = Depends(get_db)):
+    order = await _paper_order(db, _parse_entity_id(order_id))
     if order is None:
         raise HTTPException(404, "Paper order not found")
     detail = await _paper_order_detail(db, order)
@@ -2078,8 +2232,8 @@ async def paper_order_audit(order_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @app.get("/api/paper-orders/{order_id}/fills")
-async def paper_order_fills(order_id: int, db: AsyncSession = Depends(get_db)):
-    order = await _paper_order(db, order_id)
+async def paper_order_fills(order_id: str, db: AsyncSession = Depends(get_db)):
+    order = await _paper_order(db, _parse_entity_id(order_id))
     if order is None:
         raise HTTPException(404, "Paper order not found")
     detail = await _paper_order_detail(db, order)
@@ -2114,12 +2268,16 @@ async def _cancel_paper_order(
 
 @app.post("/api/paper-orders/{order_id}/cancel")
 async def cancel_paper_order(
-    order_id: int,
+    order_id: str,
     payload: PaperOrderCancelRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """Cancel a working order. Cancelling an already cancelled order is a no-op."""
-    order = await _paper_order(db, order_id)
+    order = await _paper_order(
+        db,
+        _parse_entity_id(order_id),
+        for_update=True,
+    )
     if order is None:
         raise HTTPException(404, "Paper order not found")
     if order.status == paper.CANCELED:
@@ -2148,7 +2306,7 @@ async def _cancel_oco_siblings(
     db: AsyncSession,
     order: PaperOrder,
     portfolio: Portfolio,
-) -> list[int]:
+) -> list[EntityId]:
     """One exit child filling cancels its siblings so a position cannot exit twice."""
     if not order.oco_group:
         return []
@@ -2161,7 +2319,7 @@ async def _cancel_oco_siblings(
             )
         )
     ).scalars().all()
-    canceled: list[int] = []
+    canceled: list[EntityId] = []
     for sibling in siblings:
         if sibling.status in paper.TERMINAL_STATUSES:
             continue
@@ -2180,8 +2338,8 @@ async def _activate_bracket_children(
     db: AsyncSession,
     parent: PaperOrder,
     candle_timestamp: datetime.datetime,
-) -> list[int]:
-    activated: list[int] = []
+) -> list[EntityId]:
+    activated: list[EntityId] = []
     for child in await _paper_children(db, parent.id):
         if child.status != paper.PENDING:
             continue
@@ -2229,7 +2387,8 @@ async def _paper_entry_position(
                 "paper_order_id": order.id,
                 "idempotency_key": order.idempotency_key,
                 "order_type": order.order_type,
-            }
+            },
+            default=str,
         ),
         realized_quantity=0.0,
         status=TradeStatus.OPEN,
@@ -2247,10 +2406,17 @@ async def _apply_paper_buy_fill(
 ) -> Optional[dict[str, object]]:
     assert outcome.fill_price is not None
     released = await _release_paper_reservation(db, order, portfolio, outcome.fill_quantity)
-    cost = round(outcome.fill_quantity * outcome.fill_price + outcome.fees, 6)
-    if cost > portfolio.balance + 1e-6:
-        portfolio.balance = round(portfolio.balance - released, 6)
-        order.reserved_cash = round((order.reserved_cash or 0.0) + released, 6)
+    cost = money_add(
+        money_product(
+            outcome.fill_quantity,
+            outcome.fill_price,
+            authorize_debit=True,
+        ),
+        outcome.fees,
+    )
+    if money_decimal(cost) > money_decimal(portfolio.balance):
+        portfolio.balance = money_subtract(portfolio.balance, released)
+        order.reserved_cash = money_add(order.reserved_cash or 0.0, released)
         _paper_audit(
             db,
             order,
@@ -2262,7 +2428,7 @@ async def _apply_paper_buy_fill(
             detail={"required_cash": cost, "available_cash": round(portfolio.balance, 2)},
         )
         return None
-    portfolio.balance = round(portfolio.balance - cost, 6)
+    portfolio.balance = money_subtract(portfolio.balance, cost)
 
     trade: Optional[Trade] = None
     if order.trade_id:
@@ -2273,14 +2439,20 @@ async def _apply_paper_buy_fill(
         trade = await _paper_entry_position(db, order, outcome.fill_price)
         order.trade_id = trade.id
     previous_quantity = trade.quantity or 0.0
-    total_quantity = paper.round_quantity(previous_quantity + outcome.fill_quantity)
+    total_quantity = float(
+        quantity_decimal(previous_quantity)
+        + quantity_decimal(outcome.fill_quantity)
+    )
     trade.entry_price = paper.round_price(
         (trade.entry_price * previous_quantity + outcome.fill_price * outcome.fill_quantity)
         / total_quantity
     )
     trade.quantity = total_quantity
-    trade.entry_fees = round((trade.entry_fees or 0.0) + outcome.fees, 6)
-    trade.entry_slippage = round((trade.entry_slippage or 0.0) + outcome.slippage, 6)
+    trade.entry_fees = money_add(trade.entry_fees or 0.0, outcome.fees)
+    trade.entry_slippage = money_add(
+        trade.entry_slippage or 0.0,
+        outcome.slippage,
+    )
     db.add(TradeExecution(
         trade_id=trade.id,
         kind=ExecutionKind.ENTRY,
@@ -2345,13 +2517,25 @@ async def _apply_paper_fill(
         return None
 
     assert outcome.fill_price is not None
-    order.filled_quantity = paper.round_quantity((order.filled_quantity or 0.0) + quantity)
-    order.filled_notional = round(
-        (order.filled_notional or 0.0) + quantity * outcome.fill_price, 6
+    order.filled_quantity = float(
+        quantity_decimal(order.filled_quantity or 0.0)
+        + quantity_decimal(quantity)
     )
-    order.fees_total = round((order.fees_total or 0.0) + outcome.fees, 6)
-    order.slippage_total = round((order.slippage_total or 0.0) + outcome.slippage, 6)
-    order.average_fill_price = paper.round_price(order.filled_notional / order.filled_quantity)
+    order.filled_notional = money_add(
+        order.filled_notional or 0.0,
+        money_product(quantity, outcome.fill_price),
+    )
+    order.fees_total = money_add(order.fees_total or 0.0, outcome.fees)
+    order.slippage_total = money_add(
+        order.slippage_total or 0.0,
+        outcome.slippage,
+    )
+    order.average_fill_price = float(
+        price_decimal(
+            money_decimal(order.filled_notional)
+            / quantity_decimal(order.filled_quantity)
+        )
+    )
     db.add(PaperOrderFill(
         order_id=order.id,
         quantity=quantity,
@@ -2362,6 +2546,13 @@ async def _apply_paper_fill(
         trade_id=applied.get("trade_id"),
     ))
     complete = order.remaining_quantity <= paper.QUANTITY_EPSILON
+    if complete and order.side == paper.BUY and order.reserved_cash:
+        residual_release = await _release_paper_reservation(
+            db,
+            order,
+            portfolio,
+        )
+        applied["released_reservation_residual"] = residual_release
     _paper_audit(
         db,
         order,
@@ -2424,19 +2615,21 @@ async def _paper_process_candles(
     ticker: str,
     candles: list[paper.Candle],
     config: paper.FillConfig,
-    order_id: Optional[int],
-) -> tuple[list[int], list[int]]:
+    order_id: Optional[EntityId],
+) -> tuple[list[EntityId], list[EntityId]]:
     """Replay candles oldest-first; each candle is applied to an order only once.
 
     Returns the touched order ids and the trades this replay fully closed.
     """
     portfolio = await get_or_create_portfolio(db)
-    touched: list[int] = []
-    closed_trades: list[int] = []
+    touched: list[EntityId] = []
+    closed_trades: list[EntityId] = []
     for candle in candles:
         query = select(PaperOrder).where(PaperOrder.ticker == ticker).order_by(PaperOrder.id)
         if order_id is not None:
             query = query.where(PaperOrder.id == order_id)
+        if POSTGRESQL_STORAGE:
+            query = query.with_for_update()
         orders = (await db.execute(query)).scalars().all()
         for order in orders:
             if order.status not in paper.FILLABLE_STATUSES:
@@ -2466,13 +2659,33 @@ async def _paper_process_candles(
             state = paper.OrderState(
                 side=order.side,
                 order_type=order.order_type,
-                quantity=order.quantity,
-                filled_quantity=order.filled_quantity or 0.0,
-                limit_price=order.limit_price,
-                stop_price=order.stop_price,
-                trail_percent=order.trail_percent,
-                trail_amount=order.trail_amount,
-                trail_reference_price=order.trail_reference_price,
+                quantity=float(order.quantity),
+                filled_quantity=float(order.filled_quantity or 0.0),
+                limit_price=(
+                    float(order.limit_price)
+                    if order.limit_price is not None
+                    else None
+                ),
+                stop_price=(
+                    float(order.stop_price)
+                    if order.stop_price is not None
+                    else None
+                ),
+                trail_percent=(
+                    float(order.trail_percent)
+                    if order.trail_percent is not None
+                    else None
+                ),
+                trail_amount=(
+                    float(order.trail_amount)
+                    if order.trail_amount is not None
+                    else None
+                ),
+                trail_reference_price=(
+                    float(order.trail_reference_price)
+                    if order.trail_reference_price is not None
+                    else None
+                ),
                 triggered=bool(order.triggered),
                 role=order.role,
             )
@@ -2512,7 +2725,7 @@ async def _paper_process_candles(
             if outcome.filled:
                 applied = await _apply_paper_fill(db, order, outcome, candle, portfolio)
                 if applied and applied.get("final_exit"):
-                    closed_trades.append(int(applied["trade_id"]))
+                    closed_trades.append(_parse_entity_id(applied["trade_id"]))
             else:
                 _paper_audit(
                     db,
@@ -2939,7 +3152,11 @@ async def refresh_action_items(
     return {**payload, "refreshed": refreshed}
 
 
-async def _action_item(db: AsyncSession, user_key: str, item_id: int) -> ActionItem:
+async def _action_item(
+    db: AsyncSession,
+    user_key: str,
+    item_id: EntityId,
+) -> ActionItem:
     result = await db.execute(
         select(ActionItem).where(ActionItem.id == item_id, ActionItem.user_key == user_key)
     )
@@ -2950,10 +3167,12 @@ async def _action_item(db: AsyncSession, user_key: str, item_id: int) -> ActionI
 
 
 @app.get("/api/action-items/{item_id}")
-async def get_action_item(item_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+async def get_action_item(item_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     user_key = _action_user_key(request)
     await _expire_action_snoozes(db, user_key)
-    return _action_item_dict(await _action_item(db, user_key, item_id))
+    return _action_item_dict(
+        await _action_item(db, user_key, _parse_entity_id(item_id))
+    )
 
 
 class ActionSnoozeRequest(BaseModel):
@@ -2961,9 +3180,9 @@ class ActionSnoozeRequest(BaseModel):
 
 
 @app.post("/api/action-items/{item_id}/acknowledge")
-async def acknowledge_action_item(item_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+async def acknowledge_action_item(item_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     user_key = _action_user_key(request)
-    item = await _action_item(db, user_key, item_id)
+    item = await _action_item(db, user_key, _parse_entity_id(item_id))
     if not item.source_active:
         raise HTTPException(409, "Inactive action items cannot be acknowledged")
     if item.status != actions.STATUS_ACKNOWLEDGED:
@@ -2976,13 +3195,13 @@ async def acknowledge_action_item(item_id: int, request: Request, db: AsyncSessi
 
 @app.post("/api/action-items/{item_id}/snooze")
 async def snooze_action_item(
-    item_id: int,
+    item_id: str,
     payload: ActionSnoozeRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     user_key = _action_user_key(request)
-    item = await _action_item(db, user_key, item_id)
+    item = await _action_item(db, user_key, _parse_entity_id(item_id))
     if not item.source_active:
         raise HTTPException(409, "Inactive action items cannot be snoozed")
     now = _utc_now()
@@ -2994,9 +3213,9 @@ async def snooze_action_item(
 
 
 @app.post("/api/action-items/{item_id}/resolve")
-async def resolve_action_item(item_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+async def resolve_action_item(item_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     user_key = _action_user_key(request)
-    item = await _action_item(db, user_key, item_id)
+    item = await _action_item(db, user_key, _parse_entity_id(item_id))
     if item.status != actions.STATUS_RESOLVED:
         item.status = actions.STATUS_RESOLVED
         item.resolved_at = _utc_now()
@@ -3006,9 +3225,9 @@ async def resolve_action_item(item_id: int, request: Request, db: AsyncSession =
 
 
 @app.post("/api/action-items/{item_id}/reopen")
-async def reopen_action_item(item_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+async def reopen_action_item(item_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     user_key = _action_user_key(request)
-    item = await _action_item(db, user_key, item_id)
+    item = await _action_item(db, user_key, _parse_entity_id(item_id))
     if item.status != actions.STATUS_OPEN:
         item.status = actions.STATUS_OPEN
         item.resolved_at = None
@@ -3825,6 +4044,12 @@ async def _live_audit(
     order: Optional[LiveOrder] = None,
 ) -> LiveExecutionAudit:
     async with _live_audit_lock:
+        await acquire_idempotency_lock(
+            db,
+            "live-audit",
+            "tenant",
+            settings.PORTFOLIO_TENANT_ID,
+        )
         return await _append_live_audit(
             db,
             event_type=event_type,
@@ -4301,6 +4526,7 @@ async def submit_live_order(
     if not key:
         raise HTTPException(400, "An idempotency key is required so retries cannot duplicate orders")
     actor = _live_user_key(request)
+    await acquire_idempotency_lock(db, "live-order", actor, key)
     existing = (
         await db.execute(select(LiveOrder).where(LiveOrder.idempotency_key == key))
     ).scalar_one_or_none()
@@ -4744,13 +4970,14 @@ async def verify_live_audit_chain(
 
 @app.get("/api/live-orders/{order_id}")
 async def get_live_order(
-    order_id: int,
+    order_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    parsed_order_id = _parse_entity_id(order_id)
     order = (
         await db.execute(select(LiveOrder).where(
-            LiveOrder.id == order_id,
+            LiveOrder.id == parsed_order_id,
             LiveOrder.user_key == _live_user_key(request),
         ))
     ).scalar_one_or_none()
@@ -4761,13 +4988,14 @@ async def get_live_order(
 
 @app.get("/api/live-orders/{order_id}/audit")
 async def live_order_audit(
-    order_id: int,
+    order_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    parsed_order_id = _parse_entity_id(order_id)
     owned = (
         await db.execute(select(LiveOrder.id).where(
-            LiveOrder.id == order_id,
+            LiveOrder.id == parsed_order_id,
             LiveOrder.user_key == _live_user_key(request),
         ))
     ).scalar_one_or_none()
@@ -4776,25 +5004,29 @@ async def live_order_audit(
     entries = (
         await db.execute(
             select(LiveExecutionAudit)
-            .where(LiveExecutionAudit.order_id == order_id)
+            .where(LiveExecutionAudit.order_id == parsed_order_id)
             .order_by(LiveExecutionAudit.id)
         )
     ).scalars().all()
-    return {"order_id": order_id, "entries": [_audit_dict(entry) for entry in entries]}
+    return {
+        "order_id": parsed_order_id,
+        "entries": [_audit_dict(entry) for entry in entries],
+    }
 
 
 @app.post("/api/live-orders/{order_id}/cancel")
 async def cancel_live_order(
-    order_id: int,
+    order_id: str,
     payload: LiveCancelBody,
     request: Request,
     db: AsyncSession = Depends(get_db),
     broker: Optional[BrokerAdapter] = Depends(get_broker),
 ):
     actor = _live_user_key(request)
+    parsed_order_id = _parse_entity_id(order_id)
     order = (
         await db.execute(select(LiveOrder).where(
-            LiveOrder.id == order_id,
+            LiveOrder.id == parsed_order_id,
             LiveOrder.user_key == actor,
         ))
     ).scalar_one_or_none()

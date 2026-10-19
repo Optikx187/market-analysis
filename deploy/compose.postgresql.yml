@@ -1,0 +1,56 @@
+services:
+  postgresql:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${MARKET_DATA_POSTGRES_USER:-market_analysis}
+      POSTGRES_PASSWORD: ${MARKET_DATA_POSTGRES_PASSWORD:-market-analysis-local}
+      POSTGRES_DB: ${MARKET_DATA_POSTGRES_DB:-market_analysis}
+    volumes:
+      - market-data-postgresql:/var/lib/postgresql/data
+    networks:
+      - trading_network
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready
+          --username "$${POSTGRES_USER}"
+          --dbname "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  data-ingestion:
+    environment:
+      MARKET_DATA_STORAGE_BACKEND: postgresql
+      DATABASE_URL: >-
+        postgresql+asyncpg://${MARKET_DATA_POSTGRES_USER:-market_analysis}:${MARKET_DATA_POSTGRES_PASSWORD:-market-analysis-local}@postgresql:5432/${MARKET_DATA_POSTGRES_DB:-market_analysis}
+    volumes:
+      - type: volume
+        source: data-ingestion-db
+        target: /app/data
+        read_only: true
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      portfolio-engine:
+        condition: service_healthy
+
+  portfolio-engine:
+    environment:
+      PORTFOLIO_STORAGE_BACKEND: postgresql
+      PORTFOLIO_TENANT_ID: ${PORTFOLIO_TENANT_ID:-00000000-0000-7000-8000-000000000001}
+      DATABASE_URL: >-
+        postgresql+asyncpg://${MARKET_DATA_POSTGRES_USER:-market_analysis}:${MARKET_DATA_POSTGRES_PASSWORD:-market-analysis-local}@postgresql:5432/${MARKET_DATA_POSTGRES_DB:-market_analysis}
+    volumes:
+      - type: volume
+        source: portfolio-db
+        target: /app/data
+        read_only: true
+    depends_on:
+      postgresql:
+        condition: service_healthy
+
+volumes:
+  market-data-postgresql:

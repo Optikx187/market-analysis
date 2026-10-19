@@ -1,4 +1,4 @@
-import type { ActionItemDeepLink } from "@/lib/api";
+import type { ActionItemDeepLink, EntityId } from "@/lib/api";
 
 /** A deep-link request handed to a panel. `token` changes on every request so a
  * repeated link to the same context still re-focuses the panel. */
@@ -6,8 +6,8 @@ export interface DeepLinkFocus {
   token: number;
   ticker?: string | null;
   opportunityId?: string | null;
-  tradeId?: number | null;
-  orderId?: number | null;
+  tradeId?: EntityId | null;
+  orderId?: EntityId | null;
   section?: string | null;
 }
 

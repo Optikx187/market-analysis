@@ -97,6 +97,47 @@ class DeploymentProfileTest(unittest.TestCase):
         self.assertEqual(worker["environment"]["BACKTEST_DATABASE_PATH"], "/tmp/backtests.db")
         self.assertEqual(worker["deploy"]["replicas"], 2)
 
+    def test_postgresql_uses_shared_storage_and_preserves_sqlite_source(self) -> None:
+        model = self.render("postgresql")
+        self.assert_edge_only(model)
+        services = model["services"]
+        ingestion = services["data-ingestion"]
+        portfolio = services["portfolio-engine"]
+        self.assertEqual(
+            ingestion["environment"]["MARKET_DATA_STORAGE_BACKEND"],
+            "postgresql",
+        )
+        self.assertTrue(
+            ingestion["environment"]["DATABASE_URL"].startswith(
+                "postgresql+asyncpg://"
+            )
+        )
+        source_volume = next(
+            volume
+            for volume in ingestion["volumes"]
+            if volume["source"] == "data-ingestion-db"
+        )
+        self.assertTrue(source_volume["read_only"])
+        self.assertEqual(
+            portfolio["environment"]["PORTFOLIO_STORAGE_BACKEND"],
+            "postgresql",
+        )
+        self.assertTrue(
+            portfolio["environment"]["DATABASE_URL"].startswith(
+                "postgresql+asyncpg://"
+            )
+        )
+        portfolio_source = next(
+            volume
+            for volume in portfolio["volumes"]
+            if volume["source"] == "portfolio-db"
+        )
+        self.assertTrue(portfolio_source["read_only"])
+        self.assertEqual(
+            services["postgresql"]["image"],
+            "postgres:16-alpine",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

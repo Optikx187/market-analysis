@@ -8,6 +8,7 @@ import {
   type AttributionDimension,
   type AttributionFilters,
   type AttributionResponse,
+  type EntityId,
   type AttributedTrade,
   type AttributionGroup,
 } from "@/lib/api";
@@ -57,7 +58,7 @@ export default function AttributionPanel() {
   const [dimension, setDimension] = useState<AttributionDimension>("strategy");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [expandedTrade, setExpandedTrade] = useState<number | null>(null);
+  const [expandedTrade, setExpandedTrade] = useState<EntityId | null>(null);
 
   const load = useCallback(
     (showSpinner: boolean) => {

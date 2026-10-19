@@ -11,6 +11,7 @@ import {
   type ActionItem,
   type ActionItemCounts,
   type ActionItemFilters,
+  type EntityId,
 } from "@/lib/api";
 import { deepLinkLabel } from "@/lib/deepLink";
 
@@ -57,7 +58,7 @@ export default function ActionInbox({ onOpenContext }: { onOpenContext: (item: A
   const [statusView, setStatusView] = useState(UNRESOLVED);
   const [category, setCategory] = useState("");
   const [severity, setSeverity] = useState("");
-  const [busyId, setBusyId] = useState<number | null>(null);
+  const [busyId, setBusyId] = useState<EntityId | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Loading Action Required inbox…");
   const [error, setError] = useState<string | null>(null);
@@ -138,7 +139,7 @@ export default function ActionInbox({ onOpenContext }: { onOpenContext: (item: A
     }
   };
 
-  const runTransition = async (item: ActionItem, action: (id: number) => Promise<ActionItem>, label: string) => {
+  const runTransition = async (item: ActionItem, action: (id: EntityId) => Promise<ActionItem>, label: string) => {
     setBusyId(item.id);
     try {
       await action(item.id);
