@@ -1,6 +1,7 @@
 """Service B — Quantitative Analytics & Risk Engine."""
 
 import asyncio
+import hashlib
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
@@ -56,7 +57,13 @@ _backtest_store: BacktestStore | None = None
 def _get_backtest_store() -> BacktestStore:
     global _backtest_store
     if _backtest_store is None:
-        _backtest_store = BacktestStore(settings.BACKTEST_DATABASE_PATH)
+        _backtest_store = BacktestStore(
+            settings.research_database_url,
+            artifact_directory=settings.BACKTEST_ARTIFACT_DIRECTORY,
+            tenant_id=settings.RESEARCH_TENANT_ID,
+            user_key=settings.RESEARCH_USER_KEY,
+            max_inline_result_bytes=settings.BACKTEST_INLINE_RESULT_MAX_BYTES,
+        )
     return _backtest_store
 
 
@@ -74,7 +81,7 @@ def _is_market_hours() -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _scanner_task
-    validate_schema(settings.BACKTEST_DATABASE_PATH)
+    validate_schema(settings.research_database_url)
     _scan_state["enabled"] = settings.SCAN_ENABLED
     _scan_state["interval_minutes"] = settings.SCAN_INTERVAL_MINUTES
     _scan_state["market_hours_only"] = settings.MARKET_HOURS_ONLY
@@ -241,6 +248,51 @@ async def fetch_candles_from_service_a(ticker: str, interval: str = "1d") -> pd.
     if not data:
         return pd.DataFrame()
     return pd.DataFrame(data)
+
+
+def _frame_lineage(
+    ticker: str,
+    interval: str,
+    frame: pd.DataFrame,
+) -> dict[str, object]:
+    timestamps = (
+        pd.to_datetime(frame["timestamp"], utc=True)
+        if "timestamp" in frame.columns and not frame.empty
+        else pd.Series(dtype="datetime64[ns, UTC]")
+    )
+    serialized = frame.to_json(
+        orient="split",
+        date_format="iso",
+        date_unit="us",
+        double_precision=15,
+    ).encode()
+    return {
+        "ticker": ticker,
+        "interval": interval,
+        "row_count": len(frame),
+        "first_observed_at": (
+            timestamps.min().isoformat() if not timestamps.empty else None
+        ),
+        "last_observed_at": (
+            timestamps.max().isoformat() if not timestamps.empty else None
+        ),
+        "content_sha256": hashlib.sha256(serialized).hexdigest(),
+    }
+
+
+def _backtest_input_lineage(
+    ticker: str,
+    frame: pd.DataFrame,
+    benchmark_frames: dict[str, pd.DataFrame],
+) -> dict[str, object]:
+    return {
+        "source_service": "data-ingestion",
+        "primary": _frame_lineage(ticker, "1d", frame),
+        "benchmarks": [
+            _frame_lineage(symbol, "1d", benchmark_frames[symbol])
+            for symbol in sorted(benchmark_frames)
+        ],
+    }
 
 
 async def _fetch_timeframe_frames(
@@ -1046,6 +1098,11 @@ async def backtest(req: BacktestRequest):
         strategy_version=req.strategy_version,
         request=req.model_dump(mode="json"),
         result=result,
+        input_lineage=_backtest_input_lineage(
+            ticker,
+            frame,
+            benchmark_frames,
+        ),
     )
     stored = store.get(run_id)
     if stored is None:

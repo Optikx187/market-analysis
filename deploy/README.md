@@ -7,7 +7,7 @@ Always combine one overlay with the root `docker-compose.yml`.
 | `compose.single-node.yml` | Explicit form of the supported default deployment |
 | `compose.sandbox.yml` | Offline-safe deterministic market, paper-broker, and notification boundaries |
 | `compose.multi-worker.yml` | Remote-lab topology with private stateless quant workers |
-| `compose.postgresql.yml` | PostgreSQL 16 market-data and portfolio adapters |
+| `compose.postgresql.yml` | PostgreSQL 16 market-data, research, and portfolio adapters |
 
 Use a stable, unique Compose project name (`-p`) for each concurrent
 deployment. This isolates containers, networks, and volumes.
@@ -66,15 +66,22 @@ docker compose \
 
 For the remote-lab topology, combine `compose.multi-worker.yml` and
 `compose.postgresql.yml`. The root configuration deliberately declares
-`MARKET_DATA_STORAGE_BACKEND=sqlite-transition`; that explicit compatibility
-mode preserves the existing `data-ingestion-db` and `portfolio-db` volumes
-until the separate import and reconciliation stage completes. The PostgreSQL
-overlay switches both services to PostgreSQL, mounts both SQLite sources
-read-only, and does not import, delete, or rewrite them. Existing deployments
-must stay on `sqlite-transition` until the separate import proves exact candle,
-cash, equity, order, fill, reservation, and P&L reconciliation.
+all three storage backends as `sqlite-transition`; that explicit compatibility
+mode preserves the existing `data-ingestion-db`, `quant-engine-db`, and
+`portfolio-db` volumes until the separate import and reconciliation stage
+completes. The PostgreSQL overlay switches all three durable services to
+PostgreSQL, mounts every SQLite source read-only, stores oversized research
+artifacts in a separate writable volume, and does not import, delete, or
+rewrite source data. Existing deployments must stay on `sqlite-transition`
+until the separate import proves exact candle, research-run/lineage, cash,
+equity, order, fill, reservation, and P&L reconciliation.
+
+Each service has independent migration state in the shared database:
+`alembic_version`, `alembic_version_research`, and
+`alembic_version_portfolio`. Run every service migration command shown above;
+one service reaching its head does not migrate the other schemas.
 
 If a fresh target migration fails, stop the overlay, drop the incomplete
-`portfolio` schema, rerun the service migrations, and replay deterministic
-tests. Do not clean or restore over either source SQLite volume. Historical
-import/cutover remains issue #94.
+service-owned schema (`market_data`, `research`, or `portfolio`), rerun the
+service migrations, and replay deterministic tests. Do not clean or restore
+over any source SQLite volume. Historical import/cutover remains issue #94.

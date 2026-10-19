@@ -19,10 +19,15 @@ def expected_revision() -> str:
 
 
 def _current_revision(connection: Connection) -> str | None:
-    if "alembic_version" not in inspect(connection).get_table_names():
+    version_table = (
+        "alembic_version_portfolio"
+        if connection.dialect.name == "postgresql"
+        else "alembic_version"
+    )
+    if version_table not in inspect(connection).get_table_names():
         return None
     return connection.execute(
-        text("SELECT version_num FROM alembic_version")
+        text(f"SELECT version_num FROM {version_table}")
     ).scalar_one_or_none()
 
 

@@ -44,3 +44,8 @@ def test_backtest_api_returns_and_persists_walk_forward_result(
     assert history[0]["run_id"] == result["run_id"]
     assert loaded == result
     assert store.latest("BTC") == result
+    assert result["module_key"] == "walk-forward-backtest"
+    assert result["module_version"] == "walk-forward-v1"
+    assert result["input_lineage"]["primary"]["ticker"] == "BTC"
+    assert result["input_lineage"]["primary"]["row_count"] == 340
+    assert len(result["input_lineage"]["primary"]["content_sha256"]) == 64

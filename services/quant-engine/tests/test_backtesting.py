@@ -1,3 +1,5 @@
+import json
+import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -210,3 +212,98 @@ def test_backtest_store_persists_strategy_request_and_result(tmp_path: Path) -> 
         "created_at": stored["created_at"],
         "alert_eligible": True,
     }]
+    assert stored["module_key"] == "walk-forward-backtest"
+    assert stored["module_version"] == "walk-forward-v1"
+
+
+def test_backtest_store_externalizes_large_results_and_verifies_artifacts(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "backtests.db"
+    artifact_directory = tmp_path / "artifacts"
+    migrate_database(database_path)
+    store = BacktestStore(
+        str(database_path),
+        artifact_directory=artifact_directory,
+        max_inline_result_bytes=1024,
+    )
+    result: dict[str, object] = {
+        "ticker": "BTC",
+        "alert_eligibility": {"eligible": True, "reasons": []},
+        "trades": [{"notes": "x" * 5000}],
+    }
+    lineage = {
+        "primary": {
+            "ticker": "BTC",
+            "row_count": 400,
+            "content_sha256": "a" * 64,
+        },
+    }
+
+    run_id = store.save(
+        "BTC",
+        "v2",
+        {"ticker": "BTC"},
+        result,
+        input_lineage=lineage,
+    )
+    stored = store.get(run_id)
+
+    assert stored is not None
+    assert stored["trades"] == result["trades"]
+    assert stored["input_lineage"] == lineage
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT result_json, artifact_manifest_json, retention_class, "
+            "retain_until FROM backtest_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        artifact = connection.execute(
+            "SELECT uri, sha256, byte_size, retain_until "
+            "FROM backtest_artifacts WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+    assert row is not None
+    assert len(row[0].encode()) < 1024
+    manifest = json.loads(row[1])
+    assert manifest[0]["artifact_key"] == "full-result"
+    assert row[2] == "recommendation-evidence"
+    assert artifact is not None
+    assert artifact[0] == manifest[0]["uri"]
+    assert artifact[1] == manifest[0]["sha256"]
+    assert artifact[2] == manifest[0]["byte_size"]
+    assert artifact[3] == row[3]
+
+    Path(artifact[0].removeprefix("file://")).write_text("tampered")
+    with pytest.raises(ValueError, match="size does not match"):
+        store.get(run_id)
+
+
+def test_backtest_store_scopes_history_by_tenant_and_user(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "backtests.db"
+    migrate_database(database_path)
+    alice = BacktestStore(
+        str(database_path),
+        artifact_directory=tmp_path / "alice-artifacts",
+        user_key="alice",
+    )
+    bob = BacktestStore(
+        str(database_path),
+        artifact_directory=tmp_path / "bob-artifacts",
+        user_key="bob",
+    )
+    result = {
+        "ticker": "BTC",
+        "alert_eligibility": {"eligible": False, "reasons": ["fixture"]},
+    }
+
+    alice_run = alice.save("BTC", "v2", {"ticker": "BTC"}, result)
+    bob_run = bob.save("BTC", "v2", {"ticker": "BTC"}, result)
+
+    assert alice.get(alice_run) is not None
+    assert alice.get(bob_run) is None
+    assert bob.get(alice_run) is None
+    assert [item["run_id"] for item in alice.list()] == [alice_run]
+    assert [item["run_id"] for item in bob.list()] == [bob_run]

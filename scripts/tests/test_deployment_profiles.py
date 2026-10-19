@@ -102,6 +102,7 @@ class DeploymentProfileTest(unittest.TestCase):
         self.assert_edge_only(model)
         services = model["services"]
         ingestion = services["data-ingestion"]
+        research = services["quant-engine"]
         portfolio = services["portfolio-engine"]
         self.assertEqual(
             ingestion["environment"]["MARKET_DATA_STORAGE_BACKEND"],
@@ -118,6 +119,29 @@ class DeploymentProfileTest(unittest.TestCase):
             if volume["source"] == "data-ingestion-db"
         )
         self.assertTrue(source_volume["read_only"])
+        self.assertEqual(
+            research["environment"]["RESEARCH_STORAGE_BACKEND"],
+            "postgresql",
+        )
+        self.assertTrue(
+            research["environment"]["RESEARCH_DATABASE_URL"].startswith(
+                "postgresql+psycopg://"
+            )
+        )
+        research_source = next(
+            volume
+            for volume in research["volumes"]
+            if volume["source"] == "quant-engine-db"
+        )
+        self.assertTrue(research_source["read_only"])
+        self.assertTrue(
+            any(
+                volume["source"] == "research-artifacts"
+                and volume["target"] == "/app/artifacts"
+                and not volume.get("read_only", False)
+                for volume in research["volumes"]
+            )
+        )
         self.assertEqual(
             portfolio["environment"]["PORTFOLIO_STORAGE_BACKEND"],
             "postgresql",

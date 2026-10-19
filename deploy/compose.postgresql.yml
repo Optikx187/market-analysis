@@ -37,6 +37,32 @@ services:
       portfolio-engine:
         condition: service_healthy
 
+  quant-engine:
+    environment:
+      RESEARCH_STORAGE_BACKEND: postgresql
+      RESEARCH_DATABASE_URL: >-
+        postgresql+psycopg://${MARKET_DATA_POSTGRES_USER:-market_analysis}:${MARKET_DATA_POSTGRES_PASSWORD:-market-analysis-local}@postgresql:5432/${MARKET_DATA_POSTGRES_DB:-market_analysis}
+      RESEARCH_TENANT_ID: ${RESEARCH_TENANT_ID:-00000000-0000-7000-8000-000000000001}
+      RESEARCH_USER_KEY: ${RESEARCH_USER_KEY:-default}
+      BACKTEST_ARTIFACT_DIRECTORY: /app/artifacts
+    volumes:
+      - type: volume
+        source: quant-engine-db
+        target: /app/data
+        read_only: true
+      - type: volume
+        source: research-artifacts
+        target: /app/artifacts
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      data-ingestion:
+        condition: service_healthy
+      portfolio-engine:
+        condition: service_started
+      notification-gateway:
+        condition: service_started
+
   portfolio-engine:
     environment:
       PORTFOLIO_STORAGE_BACKEND: postgresql
@@ -54,3 +80,4 @@ services:
 
 volumes:
   market-data-postgresql:
+  research-artifacts:

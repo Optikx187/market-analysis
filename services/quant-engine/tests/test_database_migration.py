@@ -76,13 +76,18 @@ def test_empty_database_upgrades_to_head_and_repeats_cleanly(
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0001_backtests",)
+        ).fetchone() == ("0002_research",)
         index_sql = connection.execute(
             "SELECT sql FROM sqlite_master "
             "WHERE type='index' AND name='idx_backtest_runs_ticker_created'"
         ).fetchone()
+        artifact_table = connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='backtest_artifacts'"
+        ).fetchone()
     assert index_sql is not None
     assert "created_at DESC" in index_sql[0]
+    assert artifact_table == ("backtest_artifacts",)
 
 
 def test_legacy_backtest_history_is_preserved(
@@ -105,6 +110,20 @@ def test_legacy_backtest_history_is_preserved(
         "created_at": "2025-01-01T00:00:00+00:00",
         "alert_eligible": True,
     }]
+    with sqlite3.connect(database_path) as connection:
+        metadata = connection.execute(
+            "SELECT tenant_id, user_key, module_key, module_version, "
+            "retention_class, retain_until FROM backtest_runs "
+            "WHERE run_id='legacy-run'"
+        ).fetchone()
+    assert metadata == (
+        "00000000-0000-7000-8000-000000000001",
+        "default",
+        "walk-forward-backtest",
+        "legacy-v1",
+        "legacy-research",
+        "2032-01-01 00:00:00",
+    )
 
 
 def test_destructive_downgrade_requires_verified_restore(
