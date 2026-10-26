@@ -105,3 +105,31 @@ service migrations, and replay deterministic tests. Do not clean or restore
 over any source SQLite volume. Before cutover, rollback is the unchanged
 SQLite profile. For a disposable failed target, drop the four new schemas and
 all three Alembic version tables, rerun migrations, and replay the import.
+
+## PostgreSQL operations
+
+Use the cross-platform management commands rather than raw volume copies:
+
+```text
+postgres-backup [DIRECTORY]
+postgres-restore-drill DIRECTORY
+postgres-status
+postgres-maintain [--table SCHEMA.TABLE]...
+postgres-retention --as-of TIMESTAMP
+```
+
+`postgres-backup` uses a consistent custom-format `pg_dump` and writes a
+checksum/count/revision manifest. `postgres-restore-drill` restores into a
+temporary database, reconciles it, and drops it without touching the active
+database. Retention defaults to dry-run and apply requires the verified backup
+directory mounted read-only with revisions and exact table counts still
+matching the active database. Run backups daily, restore drills monthly, and
+`postgres-status` often enough to alert on growth, dead tuples, long-running
+queries, or the documented 50-million-row/100-GiB partition thresholds.
+
+Back up the separate `research-artifacts` volume with the same recovery set;
+logical PostgreSQL dumps do not include artifact files. For Aurora, use
+automated backups plus continuous point-in-time recovery, cross-account copy
+or export where required, and scheduled restore/failover rehearsals. Do not
+treat an Aurora snapshot as a substitute for tested logical export or
+application-level reconciliation.

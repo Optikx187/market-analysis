@@ -1207,13 +1207,68 @@ Run the production-like import verification directly with:
 python scripts/verify_postgresql_import.py
 ```
 
+### PostgreSQL backup, restore, retention, and maintenance
+
+Create a custom-format logical backup with SHA-256, migration heads, and exact
+table counts:
+
+```bash
+./manage postgres-backup
+./manage postgres-restore-drill backups/postgresql-YYYYMMDDTHHMMSSZ
+```
+
+```powershell
+.\manage.ps1 postgres-backup
+.\manage.ps1 postgres-restore-drill `
+  backups\postgresql-YYYYMMDDTHHMMSSZ
+```
+
+The restore drill creates a randomly named database, restores and reconciles
+it, then removes it. It never overwrites the active database. Retain the dump,
+manifest, `.env`/secret references, research-artifact backup, and matching
+application image digest as one recovery set.
+
+Inspect growth, dead tuples, analyze history, queries running longer than five
+seconds, and partition thresholds:
+
+```bash
+./manage postgres-status
+./manage postgres-maintain
+```
+
+Retention is report-only unless `--apply` and a verified logical backup are
+both supplied. Apply also requires the backup's migration revisions and exact
+table counts to match the active database, so any post-backup write forces a
+fresh backup:
+
+```bash
+./manage postgres-retention --as-of 2030-01-01T00:00:00Z
+./manage postgres-retention --as-of 2030-01-01T00:00:00Z \
+  --apply --archive-directory backups/postgresql-YYYYMMDDTHHMMSSZ
+```
+
+Only `1m`/`5m`/`15m` candles older than 400 days and `1h`/`4h` candles older
+than seven years are eligible. Each policy deletes at most one bounded batch.
+Daily/weekly candles and all trade, order, fill, journal, live-execution,
+credential, and import evidence are outside the deletion code path. Schedule
+logical backups daily and restore drills at least monthly using cron, a
+systemd timer, Windows Task Scheduler, or the cloud scheduler; alert on any
+non-zero exit. Run retention after a successful backup and restore drill.
+
+Run the deterministic recovery/maintenance rehearsal directly with:
+
+```bash
+python scripts/verify_postgresql_operations.py
+```
+
 `BACKTEST_INLINE_RESULT_MAX_BYTES` bounds the JSON kept in a research row.
 Larger results are written atomically under `BACKTEST_ARTIFACT_DIRECTORY` and
 referenced by URI, SHA-256, media type, and byte size. API reads verify the
 artifact size and checksum before returning the original compatible result.
 Eligible evidence defaults to seven-year retention; non-actionable ad-hoc
-research defaults to two years. Issue #95 owns automated maintenance and
-retention execution.
+research defaults to two years; current automated deletion remains
+conservatively limited to eligible candle intervals until recommendation
+evidence relationships and downsampling are implemented.
 
 ## Production-readiness roadmap
 

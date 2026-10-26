@@ -108,6 +108,20 @@ services:
       postgresql:
         condition: service_healthy
 
+  postgresql-operations:
+    profiles:
+      - postgresql
+      - maintenance
+    build: ./tools/postgresql-operations
+    environment:
+      POSTGRES_OPERATIONS_DATABASE_URL: >-
+        postgresql://${MARKET_DATA_POSTGRES_USER:-market_analysis}:${MARKET_DATA_POSTGRES_PASSWORD:-market-analysis-local}@postgresql:5432/${MARKET_DATA_POSTGRES_DB:-market_analysis}
+    networks:
+      - trading_network
+    depends_on:
+      postgresql:
+        condition: service_healthy
+
 volumes:
   market-data-postgresql:
   research-artifacts:

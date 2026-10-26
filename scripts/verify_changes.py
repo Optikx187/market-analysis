@@ -271,6 +271,10 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
                     PYTHON,
                     "scripts/verify_postgresql_import.py",
                 ),
+                command(
+                    PYTHON,
+                    "scripts/verify_postgresql_operations.py",
+                ),
             ),
         ),
         **{
@@ -343,9 +347,16 @@ def jobs_for_path(path: str) -> set[str]:
     if path in {
         "scripts/verify_postgresql_shared_migrations.py",
         "scripts/verify_postgresql_import.py",
+        "scripts/verify_postgresql_operations.py",
     }:
         return jobs | {"postgres-contract"}
     if path.startswith("tools/postgresql-import/"):
+        return jobs | set(BACKEND_SERVICES) | {
+            "management",
+            "compose",
+            "postgres-contract",
+        }
+    if path.startswith("tools/postgresql-operations/"):
         return jobs | set(BACKEND_SERVICES) | {
             "management",
             "compose",

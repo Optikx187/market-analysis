@@ -4,7 +4,6 @@ import subprocess
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -115,6 +114,13 @@ class DeploymentProfileTest(unittest.TestCase):
         )
         runner = services["migration-runner"]
         self.assertFalse(runner.get("ports"))
+        operations = services["postgresql-operations"]
+        self.assertFalse(operations.get("ports"))
+        self.assertTrue(
+            operations["environment"]["POSTGRES_OPERATIONS_DATABASE_URL"].startswith(
+                "postgresql://"
+            )
+        )
         source_mounts = {
             volume["source"]: volume
             for volume in runner["volumes"]
