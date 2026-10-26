@@ -258,7 +258,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Verify durable-state contract
-        run: python scripts/verify_postgresql_contract.py
+        run: |
+          python scripts/verify_postgresql_contract.py
+          python scripts/verify_postgresql_import.py
 
   images:
     name: Image / ${{ matrix.service }}

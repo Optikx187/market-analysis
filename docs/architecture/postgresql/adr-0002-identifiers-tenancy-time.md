@@ -94,10 +94,12 @@ Application queries must include tenant scope even when the primary UUID is
 known. Future row-level security may add defense in depth, but RLS is not a
 substitute for scoped repository methods and service authorization.
 
-The SQLite import ticket creates an explicit default organization and maps
-legacy `user_key`/username values to durable users. It must emit reconciliation
-reports for collisions or orphaned rows rather than selecting an arbitrary
-owner.
+The SQLite import creates an explicit default tenant and maps legacy
+`user_key` values unchanged unless the operator supplies a JSON user mapping.
+Application-generated UUIDv7 target IDs are retained in
+`operations.import_mappings`; valid public research UUIDs are preserved for
+API compatibility. Collisions, changed source rows, orphaned references, and
+unmapped tables block reconciliation rather than selecting an arbitrary owner.
 
 ## Time
 

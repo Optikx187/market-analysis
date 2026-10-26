@@ -6,6 +6,7 @@ $CommandLog = Join-Path $TempRoot "commands.log"
 $Commands = @(
     "install", "start", "stop", "restart", "status", "logs",
     "backup", "verify-backup", "restore", "migrate", "migration-status",
+    "import-postgresql",
     "upgrade", "verify"
 )
 
@@ -29,6 +30,10 @@ try {
     Copy-Item (Join-Path $SourceRoot ".env.example") $TempRoot
     Copy-Item (Join-Path $SourceRoot "docker-compose.yml") $TempRoot
     New-Item -ItemType Directory -Path (Join-Path $TempRoot "scripts") | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $TempRoot "deploy") | Out-Null
+    Copy-Item `
+        (Join-Path $SourceRoot "deploy/compose.postgresql.yml") `
+        (Join-Path $TempRoot "deploy/compose.postgresql.yml")
     Copy-Item `
         (Join-Path $SourceRoot "scripts/backup_manifest.py") `
         (Join-Path $TempRoot "scripts/backup_manifest.py")
@@ -231,6 +236,27 @@ exit 0
             )
         ) "Migration status omitted $service."
     }
+
+    Set-Content -Path $CommandLog -Value "" -Encoding utf8NoBOM
+    $importReport = Join-Path $TempRoot "import-report"
+    $postgresImport = Invoke-Manage @(
+        "import-postgresql",
+        "--report-dir", $importReport,
+        "--accept-deferred", "market.price_alerts"
+    )
+    Assert-True (
+        $postgresImport.ExitCode -eq 0
+    ) "PostgreSQL import dry run failed: $($postgresImport.Output)"
+    $commandLogContents = Get-Content $CommandLog -Raw
+    Assert-True (
+        $commandLogContents.Contains("migration-runner")
+    ) "PostgreSQL import did not run the migration container."
+    Assert-True (
+        $commandLogContents.Contains("--dry-run")
+    ) "PostgreSQL import did not default to dry-run mode."
+    Assert-True (
+        -not $commandLogContents.Contains("--apply")
+    ) "PostgreSQL import dry run unexpectedly applied writes."
 
     Set-Content -Path $CommandLog -Value "" -Encoding utf8NoBOM
     $env:MOCK_ARCHIVE_FAIL = "1"

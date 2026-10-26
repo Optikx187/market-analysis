@@ -233,7 +233,7 @@ def main() -> int:
             ]
         ).stdout.strip().splitlines()
         expected = [
-            "data=0002_data",
+            "data=0003_data",
             "portfolio=0002_portfolio",
             "research=0002_research",
         ]

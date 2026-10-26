@@ -15,6 +15,7 @@ $RootDir = $PSScriptRoot
 $EnvFile = Join-Path $RootDir ".env"
 $EnvExample = Join-Path $RootDir ".env.example"
 $BackupTool = Join-Path $RootDir "scripts/backup_manifest.py"
+$PostgresComposeFile = Join-Path $RootDir "deploy/compose.postgresql.yml"
 $RunningOnWindows = $env:OS -eq "Windows_NT"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
 $VolumeSpecs = @(
@@ -44,6 +45,17 @@ function Invoke-Compose([string[]]$Arguments) {
     Invoke-Checked -File "docker" -Arguments (@("compose") + $Arguments)
 }
 
+function Invoke-PostgresCompose([string[]]$Arguments) {
+    Invoke-Checked -File "docker" -Arguments (
+        @(
+            "compose",
+            "-f", (Join-Path $RootDir "docker-compose.yml"),
+            "-f", $PostgresComposeFile,
+            "--profile", "migration"
+        ) + $Arguments
+    )
+}
+
 function Get-ComposeOutput([string[]]$Arguments) {
     $output = & docker compose @Arguments
     if ($LASTEXITCODE -ne 0) {
@@ -71,6 +83,7 @@ Commands:
   restore   Restore persistent volumes from a backup directory
   migrate   Create a verified backup and upgrade all database schemas
   migration-status  Show each database's current migration revision
+  import-postgresql  Dry-run or apply the SQLite-to-PostgreSQL import
   upgrade   Back up, fast-forward Git, rebuild, and verify
   verify    Validate Compose and service readiness
   help      Show this help
@@ -118,6 +131,17 @@ printing them, validates Docker Compose, and starts the application.
         }
         "migration-status" {
             "Usage: .\manage.ps1 migration-status"
+        }
+        "import-postgresql" {
+            @"
+Usage: .\manage.ps1 import-postgresql [--apply] [--backup-dir DIRECTORY]
+       [--resume RUN_ID] [--accept-deferred STORE.TABLE]
+       [--user-map FILE] [--report-dir DIRECTORY]
+
+Runs read-only validation by default. --apply requires a verified backup,
+imports and reconciles all three stores, and leaves SQLite runtime settings
+unchanged. No automatic cutover is performed.
+"@
         }
         "upgrade" {
             "Usage: .\manage.ps1 upgrade [--allow-backup-failure]"
@@ -709,6 +733,246 @@ function Show-MigrationStatus([string[]]$Arguments) {
         -Arguments @("current", "--check-heads")
 }
 
+function Wait-ForPostgresql {
+    $user = if ([string]::IsNullOrWhiteSpace($env:MARKET_DATA_POSTGRES_USER)) {
+        "market_analysis"
+    }
+    else {
+        $env:MARKET_DATA_POSTGRES_USER
+    }
+    $database = if ([string]::IsNullOrWhiteSpace($env:MARKET_DATA_POSTGRES_DB)) {
+        "market_analysis"
+    }
+    else {
+        $env:MARKET_DATA_POSTGRES_DB
+    }
+    for ($attempt = 1; $attempt -le 60; $attempt++) {
+        & docker compose `
+            -f (Join-Path $RootDir "docker-compose.yml") `
+            -f $PostgresComposeFile `
+            --profile migration `
+            exec -T postgresql pg_isready -U $user -d $database *> $null
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+        Start-Sleep -Seconds 1
+    }
+    Fail "PostgreSQL did not become ready within 60 seconds."
+}
+
+function Invoke-PostgresMigrationCommand(
+    [string]$Service,
+    [string[]]$Arguments
+) {
+    Invoke-PostgresCompose -Arguments (
+        @("run", "--rm", "--no-deps", $Service, "alembic") + $Arguments
+    )
+}
+
+function Import-Postgresql([string[]]$Arguments) {
+    $apply = $false
+    $backupDir = ""
+    $resumeRun = ""
+    $userMapFile = ""
+    $reportDir = ""
+    $acceptedDeferred = [Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt $Arguments.Count; $index++) {
+        switch ($Arguments[$index]) {
+            "--apply" {
+                $apply = $true
+            }
+            "--backup-dir" {
+                if ($index + 1 -ge $Arguments.Count) {
+                    Fail "--backup-dir requires a value."
+                }
+                $index++
+                $backupDir = $Arguments[$index]
+            }
+            "--resume" {
+                if ($index + 1 -ge $Arguments.Count) {
+                    Fail "--resume requires an import run ID."
+                }
+                $index++
+                $resumeRun = $Arguments[$index]
+            }
+            "--accept-deferred" {
+                if ($index + 1 -ge $Arguments.Count) {
+                    Fail "--accept-deferred requires STORE.TABLE."
+                }
+                $index++
+                $acceptedDeferred.Add($Arguments[$index])
+            }
+            "--user-map" {
+                if ($index + 1 -ge $Arguments.Count) {
+                    Fail "--user-map requires a JSON file."
+                }
+                $index++
+                $userMapFile = $Arguments[$index]
+            }
+            "--report-dir" {
+                if ($index + 1 -ge $Arguments.Count) {
+                    Fail "--report-dir requires a directory."
+                }
+                $index++
+                $reportDir = $Arguments[$index]
+            }
+            default {
+                Fail "Unknown import-postgresql option '$($Arguments[$index])'."
+            }
+        }
+    }
+    if (-not $apply -and -not [string]::IsNullOrWhiteSpace($resumeRun)) {
+        Fail "--resume requires --apply."
+    }
+    if (
+        -not [string]::IsNullOrWhiteSpace($userMapFile) -and
+        -not (Test-Path $userMapFile -PathType Leaf)
+    ) {
+        Fail "User mapping file '$userMapFile' does not exist."
+    }
+
+    Invoke-Preflight
+    Test-ComposeConfig
+    if (-not (Test-Path $PostgresComposeFile -PathType Leaf)) {
+        Fail "PostgreSQL Compose overlay is missing."
+    }
+    Invoke-MigrationCommand `
+        -Service "data-ingestion" `
+        -Arguments @("current", "--check-heads")
+    Invoke-MigrationCommand `
+        -Service "quant-engine" `
+        -Arguments @("current", "--check-heads")
+    Invoke-MigrationCommand `
+        -Service "portfolio-engine" `
+        -Arguments @("current", "--check-heads")
+
+    $timestamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
+    if ([string]::IsNullOrWhiteSpace($reportDir)) {
+        $reportDir = Join-Path $RootDir "migration-reports/$timestamp"
+    }
+    New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
+    $reportDir = (Resolve-Path $reportDir).Path
+    Protect-Path -Path $reportDir -Directory $true
+
+    $manifestPath = ""
+    if ($apply) {
+        if ([string]::IsNullOrWhiteSpace($backupDir)) {
+            $backupDir = Join-Path $RootDir "backups/postgresql-import-$timestamp"
+        }
+        Backup-App @($backupDir)
+        $backupDir = (Resolve-Path $backupDir).Path
+        $manifestPath = Join-Path $backupDir "manifest.json"
+        if (-not (Test-Path $manifestPath -PathType Leaf)) {
+            Fail "Verified backup manifest is missing."
+        }
+    }
+
+    $runningServices = @(
+        Get-ComposeOutput -Arguments @(
+            "ps", "--services", "--status", "running"
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") }
+    )
+    if ($runningServices.Count -gt 0) {
+        Invoke-Compose -Arguments (@("stop") + $runningServices)
+    }
+
+    try {
+        Invoke-PostgresCompose -Arguments @(
+            "build",
+            "data-ingestion",
+            "quant-engine",
+            "portfolio-engine",
+            "migration-runner"
+        )
+        Invoke-PostgresCompose -Arguments @("up", "-d", "postgresql")
+        Wait-ForPostgresql
+        Invoke-PostgresMigrationCommand `
+            -Service "data-ingestion" `
+            -Arguments @("upgrade", "head")
+        Invoke-PostgresMigrationCommand `
+            -Service "quant-engine" `
+            -Arguments @("upgrade", "head")
+        Invoke-PostgresMigrationCommand `
+            -Service "portfolio-engine" `
+            -Arguments @("upgrade", "head")
+
+        $runnerArguments = [Collections.Generic.List[string]]::new()
+        $runnerArguments.AddRange([string[]]@(
+            "--market-sqlite", "/sources/market/data_ingestion.db",
+            "--research-sqlite", "/sources/research/backtests.db",
+            "--portfolio-sqlite", "/sources/portfolio/portfolio.db",
+            "--research-source-root", "/sources/research",
+            "--research-target-artifact-root", "/target/research-artifacts",
+            "--research-runtime-artifact-root", "/app/artifacts",
+            "--operator-id", [Environment]::UserName
+        ))
+        if ($apply) {
+            $runnerArguments.Add("--apply")
+            $runnerArguments.Add("--verified-backup-manifest")
+            $runnerArguments.Add("/backup/manifest.json")
+            if (-not [string]::IsNullOrWhiteSpace($resumeRun)) {
+                $runnerArguments.Add("--resume")
+                $runnerArguments.Add($resumeRun)
+            }
+        }
+        else {
+            $runnerArguments.Add("--dry-run")
+        }
+        foreach ($decision in $acceptedDeferred) {
+            $runnerArguments.Add("--accept-deferred")
+            $runnerArguments.Add($decision)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($userMapFile)) {
+            $runnerArguments.Add("--user-map")
+            $runnerArguments.Add(
+                [IO.File]::ReadAllText((Resolve-Path $userMapFile).Path)
+            )
+        }
+        $composeArguments = [Collections.Generic.List[string]]::new()
+        $composeArguments.Add("run")
+        $composeArguments.Add("--rm")
+        if ($apply) {
+            $composeArguments.Add("--volume")
+            $composeArguments.Add("${backupDir}:/backup:ro")
+        }
+        $composeArguments.Add("migration-runner")
+        $composeArguments.AddRange($runnerArguments.ToArray())
+        $dockerArguments = @(
+            "compose",
+            "-f", (Join-Path $RootDir "docker-compose.yml"),
+            "-f", $PostgresComposeFile,
+            "--profile", "migration"
+        ) + $composeArguments.ToArray()
+        $runnerOutput = & docker @dockerArguments
+        $runnerStatus = $LASTEXITCODE
+        $reportPath = Join-Path $reportDir "import-report.json"
+        [IO.File]::WriteAllText(
+            $reportPath,
+            (($runnerOutput -join [Environment]::NewLine) +
+                [Environment]::NewLine),
+            $Utf8NoBom
+        )
+        Protect-Path -Path $reportPath -Directory $false
+        if ($runnerStatus -ne 0) {
+            Fail "Import validation failed. Review $(Join-Path $reportDir 'import-report.json'). SQLite remains active and PostgreSQL cutover is blocked."
+        }
+    }
+    finally {
+        if ($runningServices.Count -gt 0) {
+            Invoke-Compose -Arguments (@("start") + $runningServices)
+        }
+    }
+
+    $reportPath = Join-Path $reportDir "import-report.json"
+    if ($apply) {
+        Write-Output "PostgreSQL import reconciled: $reportPath"
+        Write-Output "Runtime storage remains on SQLite. Cutover was not performed."
+    }
+    else {
+        Write-Output "PostgreSQL import dry run passed: $reportPath"
+    }
+}
+
 function Restore-App([string[]]$Arguments) {
     if ($Arguments.Count -lt 1) {
         Fail "Usage: .\manage.ps1 restore DIRECTORY [--no-start] [--project-name NAME] [--allow-legacy]"
@@ -941,6 +1205,7 @@ try {
         "restore" { Restore-App $CommandArgs }
         "migrate" { Update-DatabaseSchema $CommandArgs }
         "migration-status" { Show-MigrationStatus $CommandArgs }
+        "import-postgresql" { Import-Postgresql $CommandArgs }
         "upgrade" { Update-App $CommandArgs }
         "verify" { Test-App $CommandArgs }
         default { Fail "Unknown command '$Command'. Run '.\manage.ps1 help'." }

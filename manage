@@ -5,6 +5,7 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$ROOT_DIR/.env"
 ENV_EXAMPLE="$ROOT_DIR/.env.example"
 BACKUP_TOOL="$ROOT_DIR/scripts/backup_manifest.py"
+POSTGRES_COMPOSE_FILE="$ROOT_DIR/deploy/compose.postgresql.yml"
 VOLUME_SPECS=(
   "data-ingestion:/app/data:data-ingestion-db.tgz"
   "quant-engine:/app/data:quant-engine-db.tgz"
@@ -26,6 +27,14 @@ compose() {
   docker compose "$@"
 }
 
+postgres_compose() {
+  docker compose \
+    -f "$ROOT_DIR/docker-compose.yml" \
+    -f "$POSTGRES_COMPOSE_FILE" \
+    --profile migration \
+    "$@"
+}
+
 usage() {
   cat <<'EOF'
 Market Analysis operator commands
@@ -45,6 +54,7 @@ Commands:
   restore   Restore persistent volumes from a backup directory
   migrate   Create a verified backup and upgrade all database schemas
   migration-status  Show each database's current migration revision
+  import-postgresql  Dry-run or apply the SQLite-to-PostgreSQL import
   upgrade   Back up, fast-forward Git, rebuild, and verify
   verify    Validate Compose and service readiness
   help      Show this help
@@ -144,6 +154,21 @@ Usage: ./manage migration-status
 
 Reports the current Alembic revision for data-ingestion, quant-engine, and
 portfolio-engine, and fails if any database is not at its configured head.
+EOF
+      ;;
+    import-postgresql)
+      cat <<'EOF'
+Usage: ./manage import-postgresql [--apply] [--backup-dir DIRECTORY]
+       [--resume RUN_ID] [--accept-deferred STORE.TABLE]
+       [--user-map FILE] [--report-dir DIRECTORY]
+
+Runs a read-only dry run by default. It validates all three SQLite stores,
+reports invalid rows and operator decisions, and writes no domain records.
+--apply creates and verifies a backup, freezes the SQLite services, imports
+into PostgreSQL, reconciles counts/keys/financial values, and leaves runtime
+storage settings unchanged. Price alerts currently require the explicit
+"--accept-deferred market.price_alerts" decision and are preserved in the
+operations import ledger. No command in this workflow performs cutover.
 EOF
       ;;
     upgrade)
@@ -679,6 +704,173 @@ migration_status_command() {
   migration_command portfolio-engine current --check-heads
 }
 
+wait_for_postgresql() {
+  local attempt
+  for ((attempt = 1; attempt <= 60; attempt++)); do
+    if postgres_compose exec -T postgresql \
+      pg_isready \
+      -U "${MARKET_DATA_POSTGRES_USER:-market_analysis}" \
+      -d "${MARKET_DATA_POSTGRES_DB:-market_analysis}" \
+      >/dev/null 2>&1; then
+      return
+    fi
+    sleep 1
+  done
+  fail "PostgreSQL did not become ready within 60 seconds."
+}
+
+postgres_migration_command() {
+  local service="$1"
+  shift
+  postgres_compose run --rm --no-deps "$service" alembic "$@"
+}
+
+import_postgresql_command() {
+  local apply=0
+  local backup_dir=""
+  local resume_run=""
+  local user_map_file=""
+  local report_dir=""
+  local -a accepted_deferred=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --apply)
+        apply=1
+        shift
+        ;;
+      --backup-dir)
+        [[ $# -ge 2 ]] || fail "--backup-dir requires a value."
+        backup_dir="$2"
+        shift 2
+        ;;
+      --resume)
+        [[ $# -ge 2 ]] || fail "--resume requires an import run ID."
+        resume_run="$2"
+        shift 2
+        ;;
+      --accept-deferred)
+        [[ $# -ge 2 ]] || fail "--accept-deferred requires STORE.TABLE."
+        accepted_deferred+=("$2")
+        shift 2
+        ;;
+      --user-map)
+        [[ $# -ge 2 ]] || fail "--user-map requires a JSON file."
+        user_map_file="$2"
+        shift 2
+        ;;
+      --report-dir)
+        [[ $# -ge 2 ]] || fail "--report-dir requires a directory."
+        report_dir="$2"
+        shift 2
+        ;;
+      *)
+        fail "Unknown import-postgresql option '$1'."
+        ;;
+    esac
+  done
+  [[ "$apply" -eq 1 || -z "$resume_run" ]] \
+    || fail "--resume requires --apply."
+  [[ -z "$user_map_file" || -f "$user_map_file" ]] \
+    || fail "User mapping file '$user_map_file' does not exist."
+
+  preflight
+  validate_compose
+  [[ -f "$POSTGRES_COMPOSE_FILE" ]] \
+    || fail "PostgreSQL Compose overlay is missing."
+  migration_command data-ingestion current --check-heads
+  migration_command quant-engine current --check-heads
+  migration_command portfolio-engine current --check-heads
+
+  local timestamp manifest_path=""
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  report_dir="${report_dir:-$ROOT_DIR/migration-reports/$timestamp}"
+  mkdir -p "$report_dir"
+  report_dir="$(cd "$report_dir" && pwd)"
+  chmod 700 "$report_dir"
+  if [[ "$apply" -eq 1 ]]; then
+    backup_dir="${backup_dir:-$ROOT_DIR/backups/postgresql-import-$timestamp}"
+    backup_command "$backup_dir"
+    backup_dir="$(cd "$backup_dir" && pwd)"
+    manifest_path="$backup_dir/manifest.json"
+    [[ -f "$manifest_path" ]] || fail "Verified backup manifest is missing."
+  fi
+
+  local running_output service
+  running_output="$(compose ps --services --status running)"
+  local -a running_services=()
+  if [[ -n "$running_output" ]]; then
+    while IFS= read -r service; do
+      [[ -z "$service" ]] || running_services+=("$service")
+    done <<<"$running_output"
+  fi
+  [[ "${#running_services[@]}" -eq 0 ]] \
+    || compose stop "${running_services[@]}"
+
+  import_on_error() {
+    local status=$?
+    trap - ERR
+    restart_services "${running_services[@]}" >/dev/null 2>&1 || true
+    printf 'Error: PostgreSQL import setup failed. SQLite services were restarted when possible.\n' >&2
+    exit "$status"
+  }
+  trap import_on_error ERR
+
+  postgres_compose build \
+    data-ingestion quant-engine portfolio-engine migration-runner
+  postgres_compose up -d postgresql
+  wait_for_postgresql
+  postgres_migration_command data-ingestion upgrade head
+  postgres_migration_command quant-engine upgrade head
+  postgres_migration_command portfolio-engine upgrade head
+
+  local -a runner_args=(
+    --market-sqlite /sources/market/data_ingestion.db
+    --research-sqlite /sources/research/backtests.db
+    --portfolio-sqlite /sources/portfolio/portfolio.db
+    --research-source-root /sources/research
+    --research-target-artifact-root /target/research-artifacts
+    --research-runtime-artifact-root /app/artifacts
+    --operator-id "${USER:-local-operator}"
+  )
+  if [[ "$apply" -eq 1 ]]; then
+    runner_args+=(--apply --verified-backup-manifest /backup/manifest.json)
+    [[ -z "$resume_run" ]] || runner_args+=(--resume "$resume_run")
+  else
+    runner_args+=(--dry-run)
+  fi
+  local decision
+  for decision in "${accepted_deferred[@]}"; do
+    runner_args+=(--accept-deferred "$decision")
+  done
+  if [[ -n "$user_map_file" ]]; then
+    runner_args+=(--user-map "$(cat "$user_map_file")")
+  fi
+
+  local -a volume_args=()
+  if [[ "$apply" -eq 1 ]]; then
+    volume_args+=(--volume "$backup_dir:/backup:ro")
+  fi
+  set +e
+  postgres_compose run --rm "${volume_args[@]}" \
+    migration-runner "${runner_args[@]}" \
+    >"$report_dir/import-report.json"
+  local import_status=$?
+  set -e
+
+  restart_services "${running_services[@]}"
+  trap - ERR
+  chmod 600 "$report_dir/import-report.json"
+  if [[ "$import_status" -ne 0 ]]; then
+    fail "Import validation failed. Review $report_dir/import-report.json. SQLite remains active and PostgreSQL cutover is blocked."
+  fi
+  if [[ "$apply" -eq 1 ]]; then
+    info "PostgreSQL import reconciled: $report_dir/import-report.json"
+    info "Runtime storage remains on SQLite. Cutover was not performed."
+  else
+    info "PostgreSQL import dry run passed: $report_dir/import-report.json"
+  fi
+}
+
 restore_command() {
   [[ $# -ge 1 ]] || fail "Usage: ./manage restore DIRECTORY [--no-start]"
   local backup_dir="$1"
@@ -903,6 +1095,9 @@ main() {
       ;;
     migration-status)
       migration_status_command "$@"
+      ;;
+    import-postgresql)
+      import_postgresql_command "$@"
       ;;
     upgrade)
       upgrade_command "$@"
