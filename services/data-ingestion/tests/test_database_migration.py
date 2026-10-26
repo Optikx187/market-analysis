@@ -122,7 +122,7 @@ def test_empty_database_upgrades_to_head_and_repeats_cleanly(
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0002_data",)
+        ).fetchone() == ("0003_data",)
 
 
 def test_existing_database_is_adopted_without_losing_market_data(
@@ -150,7 +150,7 @@ def test_existing_database_is_adopted_without_losing_market_data(
         ).fetchall() == [("BTC", "above", 120.0, 0)]
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0002_data",)
+        ).fetchone() == ("0003_data",)
 
 
 def test_destructive_downgrade_requires_verified_restore(
@@ -165,7 +165,7 @@ def test_destructive_downgrade_requires_verified_restore(
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0002_data",)
+        ).fetchone() == ("0003_data",)
 
 
 def test_schema_validation_is_read_only_and_fails_closed(

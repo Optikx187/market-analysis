@@ -73,8 +73,26 @@ completes. The PostgreSQL overlay switches all three durable services to
 PostgreSQL, mounts every SQLite source read-only, stores oversized research
 artifacts in a separate writable volume, and does not import, delete, or
 rewrite source data. Existing deployments must stay on `sqlite-transition`
-until the separate import proves exact candle, research-run/lineage, cash,
-equity, order, fill, reservation, and P&L reconciliation.
+until `./manage import-postgresql` (or
+`.\manage.ps1 import-postgresql`) completes a clean dry run and an
+operator-approved `--apply`. The migration runner records stable UUID
+mappings and resumable checkpoints under `operations`, copies verified
+research artifacts, and reconciles exact candle, research-run/lineage, cash,
+equity, order, fill, reservation, and P&L values. Existing price-alert rows
+require `--accept-deferred market.price_alerts` and are preserved in the
+import ledger pending notification-owned storage.
+
+Apply mode requires a verified backup and never edits runtime backend flags:
+
+```bash
+./manage import-postgresql --apply \
+  --accept-deferred market.price_alerts
+```
+
+Resume an interrupted run with `--apply --resume RUN_ID`; repeated imports are
+idempotent. Cutover remains a separate operator action and is blocked by any
+count, key, checksum, artifact, ownership, or financial mismatch. Imported
+live-execution controls are forced disabled.
 
 Each service has independent migration state in the shared database:
 `alembic_version`, `alembic_version_research`, and
@@ -84,4 +102,6 @@ one service reaching its head does not migrate the other schemas.
 If a fresh target migration fails, stop the overlay, drop the incomplete
 service-owned schema (`market_data`, `research`, or `portfolio`), rerun the
 service migrations, and replay deterministic tests. Do not clean or restore
-over any source SQLite volume. Historical import/cutover remains issue #94.
+over any source SQLite volume. Before cutover, rollback is the unchanged
+SQLite profile. For a disposable failed target, drop the four new schemas and
+all three Alembic version tables, rerun migrations, and replay the import.

@@ -267,6 +267,10 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
                     PYTHON,
                     "scripts/verify_postgresql_shared_migrations.py",
                 ),
+                command(
+                    PYTHON,
+                    "scripts/verify_postgresql_import.py",
+                ),
             ),
         ),
         **{
@@ -336,8 +340,17 @@ def jobs_for_path(path: str) -> set[str]:
         return jobs | {"management", "docs"}
     if path == "scripts/verify_changes.py":
         return jobs | set(CORE_JOBS)
-    if path == "scripts/verify_postgresql_shared_migrations.py":
+    if path in {
+        "scripts/verify_postgresql_shared_migrations.py",
+        "scripts/verify_postgresql_import.py",
+    }:
         return jobs | {"postgres-contract"}
+    if path.startswith("tools/postgresql-import/"):
+        return jobs | set(BACKEND_SERVICES) | {
+            "management",
+            "compose",
+            "postgres-contract",
+        }
     if path == "scripts/ci_sandbox_smoke.sh":
         return jobs | {"management", "compose"}
     if path.startswith("scripts/"):

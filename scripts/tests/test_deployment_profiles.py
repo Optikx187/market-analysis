@@ -98,7 +98,7 @@ class DeploymentProfileTest(unittest.TestCase):
         self.assertEqual(worker["deploy"]["replicas"], 2)
 
     def test_postgresql_uses_shared_storage_and_preserves_sqlite_source(self) -> None:
-        model = self.render("postgresql")
+        model = self.render("postgresql", enable_profile=True)
         self.assert_edge_only(model)
         services = model["services"]
         ingestion = services["data-ingestion"]
@@ -112,6 +112,28 @@ class DeploymentProfileTest(unittest.TestCase):
             ingestion["environment"]["DATABASE_URL"].startswith(
                 "postgresql+asyncpg://"
             )
+        )
+        runner = services["migration-runner"]
+        self.assertFalse(runner.get("ports"))
+        source_mounts = {
+            volume["source"]: volume
+            for volume in runner["volumes"]
+            if volume["source"] in {
+                "data-ingestion-db",
+                "quant-engine-db",
+                "portfolio-db",
+            }
+        }
+        self.assertEqual(
+            set(source_mounts),
+            {
+                "data-ingestion-db",
+                "quant-engine-db",
+                "portfolio-db",
+            },
+        )
+        self.assertTrue(
+            all(volume["read_only"] for volume in source_mounts.values())
         )
         source_volume = next(
             volume

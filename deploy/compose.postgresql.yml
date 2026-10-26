@@ -78,6 +78,36 @@ services:
       postgresql:
         condition: service_healthy
 
+  migration-runner:
+    profiles:
+      - postgresql
+      - migration
+    build: ./tools/postgresql-import
+    environment:
+      POSTGRES_IMPORT_DATABASE_URL: >-
+        postgresql+psycopg://${MARKET_DATA_POSTGRES_USER:-market_analysis}:${MARKET_DATA_POSTGRES_PASSWORD:-market-analysis-local}@postgresql:5432/${MARKET_DATA_POSTGRES_DB:-market_analysis}
+    volumes:
+      - type: volume
+        source: data-ingestion-db
+        target: /sources/market
+        read_only: true
+      - type: volume
+        source: quant-engine-db
+        target: /sources/research
+        read_only: true
+      - type: volume
+        source: portfolio-db
+        target: /sources/portfolio
+        read_only: true
+      - type: volume
+        source: research-artifacts
+        target: /target/research-artifacts
+    networks:
+      - trading_network
+    depends_on:
+      postgresql:
+        condition: service_healthy
+
 volumes:
   market-data-postgresql:
   research-artifacts:

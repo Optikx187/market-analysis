@@ -1123,13 +1123,58 @@ This sets `MARKET_DATA_STORAGE_BACKEND=postgresql`,
 `RESEARCH_STORAGE_BACKEND=postgresql`, and
 `PORTFOLIO_STORAGE_BACKEND=postgresql`; starts PostgreSQL 16; mounts all three
 source SQLite volumes read-only; and gives research artifacts a separate
-writable volume. It does not import legacy candles, backtests, or financial
-state. Keep every source intact until issue #94's import and reconciliation
-workflow reports exact row counts, keys, lineage, balances, reservations,
-fills, and P&L. A failed target migration can be cleaned by dropping the new
-service-owned schema and replaying migrations against an empty target; never
-modify the source SQLite files. Without the overlay, all three services remain
-in explicit `sqlite-transition` mode.
+writable volume. It does not automatically import or cut over legacy data.
+Existing installations must first run the read-only import validation:
+
+```bash
+./manage import-postgresql \
+  --accept-deferred market.price_alerts
+```
+
+```powershell
+.\manage.ps1 import-postgresql `
+  --accept-deferred market.price_alerts
+```
+
+The command freezes the SQLite services while it fingerprints and validates
+all three sources, starts an isolated PostgreSQL target, applies every
+service-owned migration, and writes a JSON report under
+`migration-reports/`. It assumes naive historical SQLite timestamps are UTC,
+reports every conversion, and rejects invalid decimals, orphans, conflicting
+candles, unmapped tables, and non-empty targets without matching mappings.
+`market.price_alerts` does not yet have a notification-owned runtime table;
+the explicit option preserves those rows in
+`operations.import_deferred_records` rather than dropping them.
+
+Apply only after the dry run is clean:
+
+```bash
+./manage import-postgresql --apply \
+  --accept-deferred market.price_alerts
+```
+
+```powershell
+.\manage.ps1 import-postgresql --apply `
+  --accept-deferred market.price_alerts
+```
+
+Apply mode creates and verifies a three-volume backup, imports in resumable
+table checkpoints, records stable source-to-target ID mappings, copies
+checksum-verified research artifacts, and reconciles counts, keys, exact
+decimal balances/equity/P&L/reservations, orders, and fills. Resume an
+interrupted report with `--apply --resume RUN_ID` and the same options.
+Repeating a reconciled import is idempotent. Imported live-execution controls
+are always disabled and require a fresh operator acknowledgement.
+
+Neither command changes `.env`, starts the application on PostgreSQL, submits
+an order, or deletes a SQLite row. Cutover is blocked unless the report has
+`"reconciled": true`, `"blocked": false`, and `"source_unchanged": true`.
+Keep running the SQLite profile until a separately approved cutover. Before
+cutover, rollback is the unchanged SQLite profile. For a disposable failed
+target, drop `market_data`, `research`, `portfolio`, and `operations` plus the
+three Alembic version tables, rerun migrations, and replay against the same
+verified sources; never clean or restore over a source SQLite volume. Without
+the overlay, all three services remain in explicit `sqlite-transition` mode.
 
 The shared cluster keeps independent Alembic state:
 `alembic_version` for data ingestion,
@@ -1154,6 +1199,12 @@ database with:
 
 ```bash
 python scripts/verify_postgresql_shared_migrations.py
+```
+
+Run the production-like import verification directly with:
+
+```bash
+python scripts/verify_postgresql_import.py
 ```
 
 `BACKTEST_INLINE_RESULT_MAX_BYTES` bounds the JSON kept in a research row.

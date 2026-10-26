@@ -20,6 +20,7 @@ COMMANDS = (
     "restore",
     "migrate",
     "migration-status",
+    "import-postgresql",
     "upgrade",
     "verify",
 )
@@ -78,6 +79,11 @@ class ManageCommandTest(unittest.TestCase):
         for filename in ("manage", ".env.example", "docker-compose.yml"):
             shutil.copy2(ROOT / filename, self.temp_dir / filename)
         (self.temp_dir / "scripts").mkdir()
+        (self.temp_dir / "deploy").mkdir()
+        shutil.copy2(
+            ROOT / "deploy" / "compose.postgresql.yml",
+            self.temp_dir / "deploy" / "compose.postgresql.yml",
+        )
         shutil.copy2(
             ROOT / "scripts" / "backup_manifest.py",
             self.temp_dir / "scripts" / "backup_manifest.py",
@@ -361,6 +367,31 @@ class ManageCommandTest(unittest.TestCase):
                 f"{service} alembic current --check-heads",
                 log,
             )
+
+    def test_postgresql_import_defaults_to_read_only_dry_run(self) -> None:
+        shutil.copy2(self.temp_dir / ".env.example", self.temp_dir / ".env")
+        report_dir = self.temp_dir / "import-report"
+
+        result = self.run_manage(
+            "import-postgresql",
+            "--report-dir",
+            str(report_dir),
+            "--accept-deferred",
+            "market.price_alerts",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.log_file.read_text()
+        self.assertIn("migration-runner", log)
+        self.assertIn("--dry-run", log)
+        self.assertIn(
+            "--accept-deferred market.price_alerts",
+            log,
+        )
+        self.assertNotIn("--apply", log)
+        self.assertNotIn("/backup/manifest.json", log)
+        self.assertIn("compose stop data-ingestion portfolio-engine", log)
+        self.assertIn("compose start data-ingestion portfolio-engine", log)
 
     def test_upgrade_can_explicitly_override_failed_backup(self) -> None:
         shutil.copy2(self.temp_dir / ".env.example", self.temp_dir / ".env")

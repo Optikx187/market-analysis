@@ -35,9 +35,10 @@ production migration.
 
 ## Boundary for later tickets
 
-Issues #91 through #95 own service conversion, import/reconciliation,
-maintenance, backup, and restore implementation. They must preserve these
-decisions or supersede them with a reviewed ADR. In particular:
+Issues #91 through #94 implement service conversion and read-only,
+checkpointed import/reconciliation. Issue #95 owns PostgreSQL maintenance,
+backup, and restore policy. They must preserve these decisions or supersede
+them with a reviewed ADR. In particular:
 
 - application-generated UUIDv7 identifiers must not be replaced by local
   sequence identifiers;
@@ -48,3 +49,10 @@ decisions or supersede them with a reviewed ADR. In particular:
 - candle writes must preserve the declared natural uniqueness boundary;
 - live-order authorization must remain synchronous and fail closed rather than
   depend on the future event broker.
+
+The import implementation is `tools/postgresql-import/`, exposed through
+`manage import-postgresql`. Dry-run mode writes no domain records. Apply mode
+requires a verified backup, records stable mappings and table checkpoints in
+`operations`, preserves unsupported alert rows explicitly, and never changes
+runtime storage flags. Cutover requires a reconciled report and remains an
+operator-controlled step.

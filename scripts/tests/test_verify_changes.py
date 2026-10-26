@@ -162,6 +162,18 @@ class ClassifierTest(unittest.TestCase):
             )
         )
         self.assertTrue(migration_plan["run_postgres_contract"])
+        import_plan = verify_changes.ci_plan(
+            verify_changes.classify_paths(
+                ["tools/postgresql-import/importer/cli.py"]
+            )
+        )
+        self.assertEqual(
+            import_plan["backend_services"],
+            list(verify_changes.BACKEND_SERVICES),
+        )
+        self.assertTrue(import_plan["run_management"])
+        self.assertTrue(import_plan["run_compose"])
+        self.assertTrue(import_plan["run_postgres_contract"])
 
     def test_representative_hosted_ci_path_matrix(self) -> None:
         cases = {
