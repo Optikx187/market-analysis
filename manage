@@ -35,6 +35,12 @@ postgres_compose() {
     "$@"
 }
 
+validate_postgres_compose() {
+  [[ -f "$POSTGRES_COMPOSE_FILE" ]] ||
+    fail "PostgreSQL Compose overlay is missing."
+  postgres_compose config --quiet
+}
+
 usage() {
   cat <<'EOF'
 Market Analysis operator commands
@@ -55,6 +61,11 @@ Commands:
   migrate   Create a verified backup and upgrade all database schemas
   migration-status  Show each database's current migration revision
   import-postgresql  Dry-run or apply the SQLite-to-PostgreSQL import
+  postgres-backup  Create and verify a logical PostgreSQL backup
+  postgres-restore-drill  Rehearse a backup in an isolated temporary database
+  postgres-status  Report database growth and long-running queries
+  postgres-maintain  Run allowlisted VACUUM (ANALYZE) maintenance
+  postgres-retention  Report or apply backup-gated candle retention
   upgrade   Back up, fast-forward Git, rebuild, and verify
   verify    Validate Compose and service readiness
   help      Show this help
@@ -169,6 +180,51 @@ into PostgreSQL, reconciles counts/keys/financial values, and leaves runtime
 storage settings unchanged. Price alerts currently require the explicit
 "--accept-deferred market.price_alerts" decision and are preserved in the
 operations import ledger. No command in this workflow performs cutover.
+EOF
+      ;;
+    postgres-backup)
+      cat <<'EOF'
+Usage: ./manage postgres-backup [DIRECTORY]
+
+Creates a consistent custom-format pg_dump, records revisions and exact table
+counts in a SHA-256 manifest, and verifies the archive. The default directory
+is ./backups/postgresql-<UTC timestamp>.
+EOF
+      ;;
+    postgres-restore-drill)
+      cat <<'EOF'
+Usage: ./manage postgres-restore-drill DIRECTORY
+
+Verifies a logical backup, restores it into a randomly named isolated database,
+reconciles migration revisions and table counts, then removes the drill database.
+The active application database is never overwritten.
+EOF
+      ;;
+    postgres-status)
+      cat <<'EOF'
+Usage: ./manage postgres-status
+
+Reports database/table growth, dead tuples, vacuum/analyze timestamps,
+queries running longer than five seconds, and partition-review thresholds.
+EOF
+      ;;
+    postgres-maintain)
+      cat <<'EOF'
+Usage: ./manage postgres-maintain [--table SCHEMA.TABLE]...
+
+Runs VACUUM (ANALYZE) on the allowlisted durable tables. With no --table
+options, all current market, research, portfolio, order, and audit tables run.
+EOF
+      ;;
+    postgres-retention)
+      cat <<'EOF'
+Usage: ./manage postgres-retention --as-of TIMESTAMP
+       [--apply --archive-directory DIRECTORY] [--batch-size ROWS]
+
+Dry-run is the default. Only eligible high-frequency candles are considered;
+trade, order, fill, journal, live audit, and import evidence is never deleted.
+Apply requires a verified logical PostgreSQL backup and deletes at most one
+batch per policy, making each scheduled run bounded and reviewable.
 EOF
       ;;
     upgrade)
@@ -871,6 +927,103 @@ import_postgresql_command() {
   fi
 }
 
+prepare_postgresql_operations() {
+  require_env
+  validate_postgres_compose
+  postgres_compose build postgresql-operations
+  postgres_compose up -d postgresql
+  wait_for_postgresql
+}
+
+postgres_operations_run() {
+  postgres_compose run --rm --no-deps \
+    postgresql-operations "$@"
+}
+
+postgres_backup_command() {
+  [[ $# -le 1 ]] || fail "Usage: ./manage postgres-backup [DIRECTORY]"
+  local directory="${1:-$ROOT_DIR/backups/postgresql-$(date -u +%Y%m%dT%H%M%SZ)}"
+  mkdir -p "$directory"
+  directory="$(cd "$directory" && pwd)"
+  chmod 700 "$directory"
+  prepare_postgresql_operations
+  postgres_compose run --rm --no-deps \
+    --user "$(id -u):$(id -g)" \
+    --volume "$directory:/backup" \
+    postgresql-operations backup --directory /backup
+  find "$directory" -type f -exec chmod 600 {} +
+  info "PostgreSQL backup created and verified: $directory"
+}
+
+postgres_restore_drill_command() {
+  [[ $# -eq 1 ]] || fail "Usage: ./manage postgres-restore-drill DIRECTORY"
+  local directory="$1"
+  [[ -d "$directory" ]] || fail "Backup directory '$directory' does not exist."
+  directory="$(cd "$directory" && pwd)"
+  prepare_postgresql_operations
+  postgres_compose run --rm --no-deps \
+    --volume "$directory:/backup:ro" \
+    postgresql-operations restore-drill --directory /backup
+}
+
+postgres_status_command() {
+  [[ $# -eq 0 ]] || fail "Usage: ./manage postgres-status"
+  prepare_postgresql_operations
+  postgres_operations_run status
+}
+
+postgres_maintain_command() {
+  prepare_postgresql_operations
+  local -a arguments=(maintain)
+  while [[ $# -gt 0 ]]; do
+    [[ "$1" == "--table" && $# -ge 2 ]] ||
+      fail "Usage: ./manage postgres-maintain [--table SCHEMA.TABLE]..."
+    arguments+=(--table "$2")
+    shift 2
+  done
+  postgres_operations_run "${arguments[@]}"
+}
+
+postgres_retention_command() {
+  local archive_directory=""
+  local -a arguments=(retention)
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --as-of|--batch-size)
+        [[ $# -ge 2 ]] || fail "$1 requires a value."
+        arguments+=("$1" "$2")
+        shift 2
+        ;;
+      --apply)
+        arguments+=(--apply)
+        shift
+        ;;
+      --archive-directory)
+        [[ $# -ge 2 ]] || fail "--archive-directory requires a value."
+        archive_directory="$2"
+        arguments+=(--archive-directory /archive)
+        shift 2
+        ;;
+      *)
+        fail "Unknown postgres-retention option '$1'."
+        ;;
+    esac
+  done
+  [[ " ${arguments[*]} " == *" --as-of "* ]] ||
+    fail "--as-of is required."
+  prepare_postgresql_operations
+  if [[ -n "$archive_directory" ]]; then
+    [[ -d "$archive_directory" ]] ||
+      fail "Archive directory '$archive_directory' does not exist."
+    archive_directory="$(cd "$archive_directory" && pwd)"
+    postgres_compose run --rm --no-deps \
+      --volume "$archive_directory:/archive:ro" \
+      postgresql-operations "${arguments[@]}"
+  else
+    postgres_operations_run "${arguments[@]}"
+  fi
+}
+
 restore_command() {
   [[ $# -ge 1 ]] || fail "Usage: ./manage restore DIRECTORY [--no-start]"
   local backup_dir="$1"
@@ -1098,6 +1251,21 @@ main() {
       ;;
     import-postgresql)
       import_postgresql_command "$@"
+      ;;
+    postgres-backup)
+      postgres_backup_command "$@"
+      ;;
+    postgres-restore-drill)
+      postgres_restore_drill_command "$@"
+      ;;
+    postgres-status)
+      postgres_status_command "$@"
+      ;;
+    postgres-maintain)
+      postgres_maintain_command "$@"
+      ;;
+    postgres-retention)
+      postgres_retention_command "$@"
       ;;
     upgrade)
       upgrade_command "$@"

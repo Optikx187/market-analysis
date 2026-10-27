@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 COMMANDS = (
     "install",
@@ -21,6 +20,11 @@ COMMANDS = (
     "migrate",
     "migration-status",
     "import-postgresql",
+    "postgres-backup",
+    "postgres-restore-drill",
+    "postgres-status",
+    "postgres-maintain",
+    "postgres-retention",
     "upgrade",
     "verify",
 )
@@ -392,6 +396,40 @@ class ManageCommandTest(unittest.TestCase):
         self.assertNotIn("/backup/manifest.json", log)
         self.assertIn("compose stop data-ingestion portfolio-engine", log)
         self.assertIn("compose start data-ingestion portfolio-engine", log)
+
+    def test_postgresql_retention_defaults_to_dry_run(self) -> None:
+        shutil.copy2(self.temp_dir / ".env.example", self.temp_dir / ".env")
+
+        result = self.run_manage(
+            "postgres-retention",
+            "--as-of",
+            "2030-01-01T00:00:00+00:00",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.log_file.read_text()
+        self.assertIn("postgresql-operations retention --as-of", log)
+        self.assertNotIn("--apply", log)
+        self.assertNotIn("/archive", log)
+
+    def test_postgresql_retention_apply_mounts_archive_read_only(self) -> None:
+        shutil.copy2(self.temp_dir / ".env.example", self.temp_dir / ".env")
+        archive = self.temp_dir / "postgres-backup"
+        archive.mkdir()
+
+        result = self.run_manage(
+            "postgres-retention",
+            "--as-of",
+            "2030-01-01T00:00:00+00:00",
+            "--apply",
+            "--archive-directory",
+            str(archive),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.log_file.read_text()
+        self.assertIn(f"{archive}:/archive:ro", log)
+        self.assertIn("--apply --archive-directory /archive", log)
 
     def test_upgrade_can_explicitly_override_failed_backup(self) -> None:
         shutil.copy2(self.temp_dir / ".env.example", self.temp_dir / ".env")

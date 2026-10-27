@@ -105,6 +105,29 @@ Aurora read replicas may serve stale-tolerant research/history reads only.
 Order submission, idempotency, portfolio/risk authorization, notification job
 claims, and read-after-write reconciliation use the writer endpoint.
 
+The initial service target is:
+
+- continuous point-in-time recovery with at least 35 days of automated backup
+  retention;
+- daily logical export retained outside the cluster failure boundary;
+- recovery point objective of 5 minutes and recovery time objective of 60
+  minutes for the first small private deployment;
+- quarterly point-in-time restore and writer-failover rehearsal, plus a
+  monthly logical restore/reconciliation drill;
+- alarms for backup failure, replica lag, storage growth, connection pressure,
+  deadlocks, long-running transactions, and freeable memory;
+- Performance Insights/Database Insights enabled for historical slow-query
+  review; local PostgreSQL should set an operator-approved
+  `log_min_duration_statement` (start at 1000 ms) with parameterized-query
+  logging that does not expose credentials or notification payloads;
+- documented restoration of database parameters, secrets, artifact storage,
+  application image digests, and DNS/service discovery with the database.
+
+Any tighter commercial SLA requires measured restore/failover evidence and an
+explicitly funded multi-AZ/cross-region design. Aurora snapshots, logical
+exports, and research-artifact backups form separate recovery layers and must
+be tested together.
+
 ## Operational review
 
 Before adding or removing an index:

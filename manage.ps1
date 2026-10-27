@@ -56,6 +56,13 @@ function Invoke-PostgresCompose([string[]]$Arguments) {
     )
 }
 
+function Test-PostgresComposeConfig {
+    if (-not (Test-Path $PostgresComposeFile -PathType Leaf)) {
+        Fail "PostgreSQL Compose overlay is missing."
+    }
+    Invoke-PostgresCompose -Arguments @("config", "--quiet")
+}
+
 function Get-ComposeOutput([string[]]$Arguments) {
     $output = & docker compose @Arguments
     if ($LASTEXITCODE -ne 0) {
@@ -84,6 +91,11 @@ Commands:
   migrate   Create a verified backup and upgrade all database schemas
   migration-status  Show each database's current migration revision
   import-postgresql  Dry-run or apply the SQLite-to-PostgreSQL import
+  postgres-backup  Create and verify a logical PostgreSQL backup
+  postgres-restore-drill  Rehearse an isolated logical restore
+  postgres-status  Report growth and long-running queries
+  postgres-maintain  Run allowlisted VACUUM (ANALYZE)
+  postgres-retention  Report or apply backup-gated candle retention
   upgrade   Back up, fast-forward Git, rebuild, and verify
   verify    Validate Compose and service readiness
   help      Show this help
@@ -141,6 +153,27 @@ Usage: .\manage.ps1 import-postgresql [--apply] [--backup-dir DIRECTORY]
 Runs read-only validation by default. --apply requires a verified backup,
 imports and reconciles all three stores, and leaves SQLite runtime settings
 unchanged. No automatic cutover is performed.
+"@
+        }
+        "postgres-backup" {
+            "Usage: .\manage.ps1 postgres-backup [DIRECTORY]"
+        }
+        "postgres-restore-drill" {
+            "Usage: .\manage.ps1 postgres-restore-drill DIRECTORY"
+        }
+        "postgres-status" {
+            "Usage: .\manage.ps1 postgres-status"
+        }
+        "postgres-maintain" {
+            "Usage: .\manage.ps1 postgres-maintain [--table SCHEMA.TABLE]..."
+        }
+        "postgres-retention" {
+            @"
+Usage: .\manage.ps1 postgres-retention --as-of TIMESTAMP
+       [--apply --archive-directory DIRECTORY] [--batch-size ROWS]
+
+Dry-run is the default. Apply requires a verified logical PostgreSQL backup.
+Trade, order, fill, journal, live audit, and import evidence is never deleted.
 "@
         }
         "upgrade" {
@@ -973,6 +1006,145 @@ function Import-Postgresql([string[]]$Arguments) {
     }
 }
 
+function Initialize-PostgresqlOperations {
+    Assert-EnvFile
+    Test-PostgresComposeConfig
+    Invoke-PostgresCompose -Arguments @("build", "postgresql-operations")
+    Invoke-PostgresCompose -Arguments @("up", "-d", "postgresql")
+    Wait-ForPostgresql
+}
+
+function Invoke-PostgresqlOperations([string[]]$Arguments) {
+    Invoke-PostgresCompose -Arguments (
+        @("run", "--rm", "--no-deps", "postgresql-operations") + $Arguments
+    )
+}
+
+function Backup-Postgresql([string[]]$Arguments) {
+    if ($Arguments.Count -gt 1) {
+        Fail "Usage: .\manage.ps1 postgres-backup [DIRECTORY]"
+    }
+    $directory = if ($Arguments.Count -eq 1) {
+        $Arguments[0]
+    }
+    else {
+        Join-Path $RootDir (
+            "backups/postgresql-" + [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
+        )
+    }
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $directory = (Resolve-Path $directory).Path
+    Protect-Path -Path $directory -Directory $true
+    Initialize-PostgresqlOperations
+    $runArguments = [Collections.Generic.List[string]]::new()
+    $runArguments.AddRange([string[]]@("run", "--rm", "--no-deps"))
+    if (-not $RunningOnWindows) {
+        $uid = (& id -u).Trim()
+        $gid = (& id -g).Trim()
+        $runArguments.Add("--user")
+        $runArguments.Add("${uid}:${gid}")
+    }
+    $runArguments.AddRange([string[]]@(
+        "--volume", "${directory}:/backup",
+        "postgresql-operations", "backup", "--directory", "/backup"
+    ))
+    Invoke-PostgresCompose -Arguments $runArguments.ToArray()
+    Get-ChildItem -File -Recurse $directory | ForEach-Object {
+        Protect-Path -Path $_.FullName -Directory $false
+    }
+    Write-Output "PostgreSQL backup created and verified: $directory"
+}
+
+function Test-PostgresqlRestore([string[]]$Arguments) {
+    if ($Arguments.Count -ne 1) {
+        Fail "Usage: .\manage.ps1 postgres-restore-drill DIRECTORY"
+    }
+    if (-not (Test-Path $Arguments[0] -PathType Container)) {
+        Fail "Backup directory '$($Arguments[0])' does not exist."
+    }
+    $directory = (Resolve-Path $Arguments[0]).Path
+    Initialize-PostgresqlOperations
+    Invoke-PostgresCompose -Arguments @(
+        "run", "--rm", "--no-deps",
+        "--volume", "${directory}:/backup:ro",
+        "postgresql-operations", "restore-drill", "--directory", "/backup"
+    )
+}
+
+function Show-PostgresqlStatus([string[]]$Arguments) {
+    if ($Arguments.Count -ne 0) {
+        Fail "Usage: .\manage.ps1 postgres-status"
+    }
+    Initialize-PostgresqlOperations
+    Invoke-PostgresqlOperations @("status")
+}
+
+function Invoke-PostgresqlMaintenance([string[]]$Arguments) {
+    $runnerArguments = [Collections.Generic.List[string]]::new()
+    $runnerArguments.Add("maintain")
+    for ($index = 0; $index -lt $Arguments.Count; $index++) {
+        if ($Arguments[$index] -ne "--table" -or $index + 1 -ge $Arguments.Count) {
+            Fail "Usage: .\manage.ps1 postgres-maintain [--table SCHEMA.TABLE]..."
+        }
+        $runnerArguments.Add("--table")
+        $index++
+        $runnerArguments.Add($Arguments[$index])
+    }
+    Initialize-PostgresqlOperations
+    Invoke-PostgresqlOperations $runnerArguments.ToArray()
+}
+
+function Invoke-PostgresqlRetention([string[]]$Arguments) {
+    $runnerArguments = [Collections.Generic.List[string]]::new()
+    $runnerArguments.Add("retention")
+    $archiveDirectory = ""
+    for ($index = 0; $index -lt $Arguments.Count; $index++) {
+        switch ($Arguments[$index]) {
+            { $_ -in @("--as-of", "--batch-size") } {
+                if ($index + 1 -ge $Arguments.Count) {
+                    Fail "$($Arguments[$index]) requires a value."
+                }
+                $runnerArguments.Add($Arguments[$index])
+                $index++
+                $runnerArguments.Add($Arguments[$index])
+            }
+            "--apply" { $runnerArguments.Add("--apply") }
+            "--archive-directory" {
+                if ($index + 1 -ge $Arguments.Count) {
+                    Fail "--archive-directory requires a value."
+                }
+                $index++
+                $archiveDirectory = $Arguments[$index]
+                $runnerArguments.Add("--archive-directory")
+                $runnerArguments.Add("/archive")
+            }
+            default {
+                Fail "Unknown postgres-retention option '$($Arguments[$index])'."
+            }
+        }
+    }
+    if (-not ($runnerArguments -contains "--as-of")) {
+        Fail "--as-of is required."
+    }
+    Initialize-PostgresqlOperations
+    if (-not [string]::IsNullOrWhiteSpace($archiveDirectory)) {
+        if (-not (Test-Path $archiveDirectory -PathType Container)) {
+            Fail "Archive directory '$archiveDirectory' does not exist."
+        }
+        $archiveDirectory = (Resolve-Path $archiveDirectory).Path
+        Invoke-PostgresCompose -Arguments (
+            @(
+                "run", "--rm", "--no-deps",
+                "--volume", "${archiveDirectory}:/archive:ro",
+                "postgresql-operations"
+            ) + $runnerArguments.ToArray()
+        )
+    }
+    else {
+        Invoke-PostgresqlOperations $runnerArguments.ToArray()
+    }
+}
+
 function Restore-App([string[]]$Arguments) {
     if ($Arguments.Count -lt 1) {
         Fail "Usage: .\manage.ps1 restore DIRECTORY [--no-start] [--project-name NAME] [--allow-legacy]"
@@ -1206,6 +1378,11 @@ try {
         "migrate" { Update-DatabaseSchema $CommandArgs }
         "migration-status" { Show-MigrationStatus $CommandArgs }
         "import-postgresql" { Import-Postgresql $CommandArgs }
+        "postgres-backup" { Backup-Postgresql $CommandArgs }
+        "postgres-restore-drill" { Test-PostgresqlRestore $CommandArgs }
+        "postgres-status" { Show-PostgresqlStatus $CommandArgs }
+        "postgres-maintain" { Invoke-PostgresqlMaintenance $CommandArgs }
+        "postgres-retention" { Invoke-PostgresqlRetention $CommandArgs }
         "upgrade" { Update-App $CommandArgs }
         "verify" { Test-App $CommandArgs }
         default { Fail "Unknown command '$Command'. Run '.\manage.ps1 help'." }

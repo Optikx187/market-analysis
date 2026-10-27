@@ -6,7 +6,8 @@ $CommandLog = Join-Path $TempRoot "commands.log"
 $Commands = @(
     "install", "start", "stop", "restart", "status", "logs",
     "backup", "verify-backup", "restore", "migrate", "migration-status",
-    "import-postgresql",
+    "import-postgresql", "postgres-backup", "postgres-restore-drill",
+    "postgres-status", "postgres-maintain", "postgres-retention",
     "upgrade", "verify"
 )
 
@@ -257,6 +258,24 @@ exit 0
     Assert-True (
         -not $commandLogContents.Contains("--apply")
     ) "PostgreSQL import dry run unexpectedly applied writes."
+
+    Set-Content -Path $CommandLog -Value "" -Encoding utf8NoBOM
+    $postgresRetention = Invoke-Manage @(
+        "postgres-retention",
+        "--as-of", "2030-01-01T00:00:00+00:00"
+    )
+    Assert-True (
+        $postgresRetention.ExitCode -eq 0
+    ) "PostgreSQL retention dry run failed: $($postgresRetention.Output)"
+    $commandLogContents = Get-Content $CommandLog -Raw
+    Assert-True (
+        $commandLogContents.Contains(
+            "postgresql-operations retention --as-of 2030-01-01T00:00:00+00:00"
+        )
+    ) "PostgreSQL retention did not invoke the operations container."
+    Assert-True (
+        -not $commandLogContents.Contains("--apply")
+    ) "PostgreSQL retention unexpectedly applied writes."
 
     Set-Content -Path $CommandLog -Value "" -Encoding utf8NoBOM
     $env:MOCK_ARCHIVE_FAIL = "1"

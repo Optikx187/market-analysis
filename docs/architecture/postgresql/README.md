@@ -56,3 +56,13 @@ requires a verified backup, records stable mappings and table checkpoints in
 `operations`, preserves unsupported alert rows explicitly, and never changes
 runtime storage flags. Cutover requires a reconciled report and remains an
 operator-controlled step.
+
+The operations implementation is `tools/postgresql-operations/`, exposed
+through the `manage postgres-*` commands. It provides extension-free logical
+backup manifests, isolated restore drills, growth and active-query reporting,
+allowlisted `VACUUM (ANALYZE)`, and dry-run-first bounded candle retention.
+Retention apply requires a fresh backup whose revisions and exact table counts
+still match the active database. Trade, order, fill, journal, live-execution,
+and import evidence is not in a deletion path. Aurora backup/PITR remains an
+additional recovery layer rather than a substitute for logical restore and
+application reconciliation.
