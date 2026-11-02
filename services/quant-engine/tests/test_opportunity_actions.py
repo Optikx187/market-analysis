@@ -29,6 +29,7 @@ class FakeScannerStore:
 def scanner_store(monkeypatch: pytest.MonkeyPatch) -> FakeScannerStore:
     durable = FakeScannerStore()
     monkeypatch.setattr(main, "_get_scanner_store", lambda: durable)
+    monkeypatch.setattr(main, "_get_schedule_stores", dict)
     return durable
 
 

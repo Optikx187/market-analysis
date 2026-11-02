@@ -1,6 +1,7 @@
 from pathlib import Path
 from uuid import UUID
 
+import exchange_calendars
 from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
@@ -20,6 +21,7 @@ class Settings(BaseSettings):
     SCANNER_LEASE_SECONDS: int = 120
     SCANNER_MAX_ATTEMPTS: int = 3
     SCANNER_RETRY_SECONDS: int = 30
+    EQUITY_EXCHANGE_CALENDAR: str = "XNYS"
     BACKTEST_DATABASE_PATH: str = "./backtests.db"
     RESEARCH_STORAGE_BACKEND: str = "sqlite-transition"
     RESEARCH_DATABASE_URL: str = ""
@@ -97,6 +99,17 @@ class Settings(BaseSettings):
         if self.SCANNER_RETRY_SECONDS < 0:
             raise ValueError(
                 "SCANNER_RETRY_SECONDS must not be negative"
+            )
+        if not self.EQUITY_EXCHANGE_CALENDAR.strip():
+            raise ValueError(
+                "EQUITY_EXCHANGE_CALENDAR must not be empty"
+            )
+        if (
+            self.EQUITY_EXCHANGE_CALENDAR
+            not in exchange_calendars.get_calendar_names()
+        ):
+            raise ValueError(
+                "EQUITY_EXCHANGE_CALENDAR is not a known exchange calendar"
             )
         return self
 

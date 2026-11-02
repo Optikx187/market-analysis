@@ -33,6 +33,13 @@ replicas do not start scheduled loops. A worker renews its lease while a scan
 runs; if the worker stops, another replica can claim the run after
 `SCANNER_LEASE_SECONDS`. Failed runs retry up to `SCANNER_MAX_ATTEMPTS`.
 
+Workers poll two independent durable schedule keys. The equity key uses
+`EQUITY_EXCHANGE_CALENDAR=XNYS` by default and defers closed days/minutes to
+the exchange's next session open. The crypto key remains eligible 24/7 UTC.
+Each key has independent cadence and enablement through
+`POST /api/scanner/config`. Missed intervals are bounded to one coalesced
+catch-up run rather than replaying an unbounded backlog.
+
 The `0003_research` migration is additive. SQLite-to-PostgreSQL import carries
 scanner configuration, completed/in-flight runs, actions, and receipts with
 the research store. To roll back the application version, stop scanner

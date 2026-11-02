@@ -288,6 +288,46 @@ class ScannerStore:
                 raise RuntimeError("Scanner configuration is missing")
         return self.get_config()
 
+    def defer_until(
+        self,
+        next_run_at: datetime,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
+        deferred = _utc(next_run_at)
+        current = _utc(now)
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    f"""
+                    UPDATE {self.config_table}
+                    SET next_run_at = CASE
+                            WHEN next_run_at < {self._time("next_run_at")}
+                            THEN {self._time("next_run_at")}
+                            ELSE next_run_at
+                        END,
+                        updated_at = {self._time("updated_at")}
+                    WHERE tenant_id = {self._tenant()}
+                      AND user_key = :user_key
+                      AND scanner_key = :scanner_key
+                    """
+                ),
+                {
+                    **self._params(),
+                    "next_run_at": (
+                        deferred
+                        if self.postgresql
+                        else deferred.isoformat()
+                    ),
+                    "updated_at": (
+                        current
+                        if self.postgresql
+                        else current.isoformat()
+                    ),
+                },
+            )
+        return self.get_config()
+
     def _insert_run(
         self,
         connection: Connection,

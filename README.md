@@ -463,7 +463,19 @@ The scanner:
 
 Missing evidence receives no optimistic score. An opportunity must pass its out-of-sample, data-quality, regime, score, and portfolio-risk requirements before it is eligible.
 
-Current scheduled-scan limitation: when `MARKET_HOURS_ONLY=true`, the global loop pauses outside US equity hours, including crypto scans. Run crypto scans manually outside equity hours or set the flag to false until stock and crypto schedules are separated.
+Scheduled scans use independent durable subscriptions:
+
+- equities use the configured `EQUITY_EXCHANGE_CALENDAR` (`XNYS` by default),
+  including exchange holidays, early closes, and New York DST transitions;
+- crypto uses a continuous 24/7 UTC schedule and remains eligible while US
+  equity markets are closed;
+- each schedule has its own enabled state, cadence, next run, lease, and
+  latest result under `/api/scanner/status`;
+- missed intervals coalesce into at most one catch-up run, then the next
+  cadence advances beyond the current time.
+
+`POST /api/scanner/config` accepts `schedule=equity`, `schedule=crypto`, or
+`schedule=all` with `enabled` and `interval_minutes`.
 
 ## Trade plans
 
@@ -983,10 +995,10 @@ Review:
 
 - `SCAN_ENABLED`;
 - `SCAN_INTERVAL_MINUTES`;
-- `MARKET_HOURS_ONLY`;
+- `EQUITY_EXCHANGE_CALENDAR`;
 - `SCANNER_LEASE_SECONDS` and `SCANNER_MAX_ATTEMPTS`;
 - data eligibility;
-- stock-market hours.
+- the `schedules.equity` and `schedules.crypto` status entries.
 
 The status payload includes durable queued/running/failed counts. A `running`
 run with an expired lease is recoverable by another worker. Repeated failures

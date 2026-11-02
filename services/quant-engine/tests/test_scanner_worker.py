@@ -10,9 +10,11 @@ from alembic.config import Config
 
 from app import main, scanner_worker
 from app.config import settings
+from app.market_calendar import schedule_definitions
 from app.scanner_store import ScannerStore
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
+EQUITY_SCHEDULE, CRYPTO_SCHEDULE = schedule_definitions("XNYS")
 
 
 def migrated_store(tmp_path: Path) -> ScannerStore:
@@ -51,7 +53,13 @@ def test_worker_completes_one_durable_run(
     )
     monkeypatch.setattr(main, "_run_scan", run_scan)
 
-    worked = asyncio.run(scanner_worker.run_once(store, "worker-a"))
+    worked = asyncio.run(
+        scanner_worker.run_once(
+            store,
+            "worker-a",
+            CRYPTO_SCHEDULE,
+        )
+    )
     persisted = store.get_run(str(queued["run_id"]))
 
     assert worked is True
@@ -78,7 +86,13 @@ def test_worker_failure_is_retryable(
     )
     monkeypatch.setattr(settings, "SCANNER_RETRY_SECONDS", 0)
 
-    worked = asyncio.run(scanner_worker.run_once(store, "worker-a"))
+    worked = asyncio.run(
+        scanner_worker.run_once(
+            store,
+            "worker-a",
+            CRYPTO_SCHEDULE,
+        )
+    )
     failed = store.get_run(str(queued["run_id"]))
     retry = store.claim_next("worker-b")
 
@@ -92,16 +106,25 @@ def test_worker_failure_is_retryable(
 
 def test_market_hours_gate_leaves_scheduled_work_unclaimed(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     store = migrated_store(tmp_path)
     store.update_config(market_hours_only=True)
-    monkeypatch.setattr(scanner_worker, "_is_market_hours", lambda: False)
+    holiday = datetime.fromisoformat("2027-07-05T15:00:00+00:00")
 
-    worked = asyncio.run(scanner_worker.run_once(store, "worker-a"))
+    worked = asyncio.run(
+        scanner_worker.run_once(
+            store,
+            "worker-a",
+            EQUITY_SCHEDULE,
+            now=holiday,
+        )
+    )
 
     assert worked is False
     assert store.status()["total_scans"] == 0
+    assert store.get_config()["next_run_at"].startswith(
+        "2027-07-06T13:30:00"
+    )
 
 
 def test_market_hours_gate_does_not_block_manual_recovery(
@@ -114,7 +137,6 @@ def test_market_hours_gate_does_not_block_manual_recovery(
         "manual-outside-hours",
         now=datetime.fromisoformat("2020-01-01T00:00:00+00:00"),
     )
-    monkeypatch.setattr(scanner_worker, "_is_market_hours", lambda: False)
     monkeypatch.setattr(
         main,
         "_run_scan",
@@ -128,7 +150,51 @@ def test_market_hours_gate_does_not_block_manual_recovery(
         ),
     )
 
-    worked = asyncio.run(scanner_worker.run_once(store, "worker-a"))
+    worked = asyncio.run(
+        scanner_worker.run_once(
+            store,
+            "worker-a",
+            EQUITY_SCHEDULE,
+            now=datetime.fromisoformat(
+                "2027-07-05T15:00:00+00:00"
+            ),
+        )
+    )
 
     assert worked is True
     assert store.get_run(str(queued["run_id"]))["status"] == "completed"
+
+
+def test_crypto_schedule_runs_during_equity_holiday(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = migrated_store(tmp_path)
+    run_scan = AsyncMock(
+        return_value={
+            "scanned": 1,
+            "signals_found": 1,
+            "notifications_sent": 0,
+            "signals": [],
+        }
+    )
+    monkeypatch.setattr(main, "_run_scan", run_scan)
+
+    worked = asyncio.run(
+        scanner_worker.run_once(
+            store,
+            "worker-crypto",
+            CRYPTO_SCHEDULE,
+            now=datetime.fromisoformat(
+                "2027-07-05T15:00:00+00:00"
+            ),
+        )
+    )
+
+    assert worked is True
+    assert store.status()["total_scans"] == 1
+    run_scan.assert_awaited_once()
+    assert run_scan.await_args.kwargs["asset_types"] == frozenset(
+        {"crypto"}
+    )
+    assert run_scan.await_args.kwargs["schedule_name"] == "crypto"

@@ -103,32 +103,31 @@ export default function ScannerPanel({ focus }: { focus?: DeepLinkFocus }) {
     setScanning(false);
   };
 
-  const handleToggle = async () => {
+  const handleScheduleToggle = async (schedule: "equity" | "crypto") => {
     if (!status) return;
     try {
-      await updateScannerConfig({ enabled: !status.enabled });
+      await updateScannerConfig({
+        schedule,
+        enabled: !status.schedules[schedule].enabled,
+      });
       load();
     } catch {
       setMsg({ type: "error", text: "Failed to update scanner config" });
     }
   };
 
-  const handleIntervalChange = async (intervalMinutes: number) => {
+  const handleIntervalChange = async (
+    schedule: "equity" | "crypto",
+    intervalMinutes: number,
+  ) => {
     try {
-      await updateScannerConfig({ interval_minutes: intervalMinutes });
+      await updateScannerConfig({
+        schedule,
+        interval_minutes: intervalMinutes,
+      });
       load();
     } catch {
       setMsg({ type: "error", text: "Failed to update interval" });
-    }
-  };
-
-  const handleMarketHoursToggle = async () => {
-    if (!status) return;
-    try {
-      await updateScannerConfig({ market_hours_only: !status.market_hours_only });
-      load();
-    } catch {
-      setMsg({ type: "error", text: "Failed to update market hours setting" });
     }
   };
 
@@ -225,19 +224,25 @@ export default function ScannerPanel({ focus }: { focus?: DeepLinkFocus }) {
       {msg && <div className={`mb-3 rounded border p-2 text-xs ${msg.type === "success" ? "border-green-600 bg-green-600/10 text-green-400" : "border-red-600 bg-red-600/10 text-red-400"}`}>{msg.text}</div>}
 
       {status && (
-        <div className="grid gap-2 md:grid-cols-3 mb-3">
-          <div className="flex items-center justify-between rounded bg-[var(--background)] p-2">
-            <span className="text-xs">Auto-Scan</span>
-            <button onClick={handleToggle} className={`px-2 py-1 text-xs rounded ${status.enabled ? "bg-green-600 text-white" : "bg-[var(--secondary)] text-[var(--muted-foreground)]"}`}>{status.enabled ? "Enabled" : "Disabled"}</button>
-          </div>
-          <div className="flex items-center justify-between rounded bg-[var(--background)] p-2">
-            <span className="text-xs">Interval</span>
-            <div className="flex gap-1">{[5, 15, 30, 60].map((minutes) => <button key={minutes} onClick={() => handleIntervalChange(minutes)} className={`px-1.5 py-0.5 text-[10px] rounded ${status.interval_minutes === minutes ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : "bg-[var(--secondary)]"}`}>{minutes}m</button>)}</div>
-          </div>
-          <div className="flex items-center justify-between rounded bg-[var(--background)] p-2">
-            <span className="text-xs">Market Hours</span>
-            <button onClick={handleMarketHoursToggle} className={`px-2 py-1 text-xs rounded ${status.market_hours_only ? "bg-green-600 text-white" : "bg-[var(--secondary)]"}`}>{status.market_hours_only ? "Only" : "24/7"}</button>
-          </div>
+        <div className="grid gap-2 md:grid-cols-2 mb-3">
+          {(["equity", "crypto"] as const).map((schedule) => {
+            const configured = status.schedules[schedule];
+            return (
+              <div key={schedule} className="rounded bg-[var(--background)] p-2">
+                <div className="mb-2 flex items-center justify-between">
+                  <div>
+                    <div className="text-xs font-medium capitalize">{schedule} schedule</div>
+                    <div className="text-[10px] text-[var(--muted-foreground)]">{configured.calendar}</div>
+                  </div>
+                  <button onClick={() => handleScheduleToggle(schedule)} className={`px-2 py-1 text-xs rounded ${configured.enabled ? "bg-green-600 text-white" : "bg-[var(--secondary)] text-[var(--muted-foreground)]"}`}>{configured.enabled ? "Enabled" : "Disabled"}</button>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-[var(--muted-foreground)]">Cadence</span>
+                  <div className="flex gap-1">{[5, 15, 30, 60].map((minutes) => <button key={minutes} onClick={() => handleIntervalChange(schedule, minutes)} className={`px-1.5 py-0.5 text-[10px] rounded ${configured.interval_minutes === minutes ? "bg-[var(--primary)] text-[var(--primary-foreground)]" : "bg-[var(--secondary)]"}`}>{minutes}m</button>)}</div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 

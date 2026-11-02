@@ -41,6 +41,11 @@ def test_research_backend_and_database_url_must_match() -> None:
         ("SCANNER_LEASE_SECONDS", 2, "at least 3 seconds"),
         ("SCANNER_MAX_ATTEMPTS", 0, "at least 1"),
         ("SCANNER_RETRY_SECONDS", -1, "must not be negative"),
+        (
+            "EQUITY_EXCHANGE_CALENDAR",
+            "NOT_A_CALENDAR",
+            "not a known exchange calendar",
+        ),
     ],
 )
 def test_scanner_worker_settings_fail_closed(
