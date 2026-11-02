@@ -527,6 +527,46 @@ def main() -> int:
             "1",
             "research artifact reconciliation",
         )
+        assert_equal(
+            psql(
+                postgres,
+                "import_test",
+                "SELECT enabled || '|' || interval_minutes || '|' || "
+                "market_hours_only FROM research.scanner_configs",
+            ),
+            "true|30|true",
+            "scanner configuration reconciliation",
+        )
+        assert_equal(
+            psql(
+                postgres,
+                "import_test",
+                "SELECT status || '|' || attempt_count || '|' || "
+                "(result_json->>'signals_found') "
+                "FROM research.scanner_runs",
+            ),
+            "completed|1|1",
+            "scanner run reconciliation",
+        )
+        assert_equal(
+            psql(
+                postgres,
+                "import_test",
+                "SELECT action || '|' || (state_json->>'user_decision') "
+                "FROM research.scanner_opportunity_actions",
+            ),
+            "approve|approved",
+            "scanner action reconciliation",
+        )
+        assert_equal(
+            psql(
+                postgres,
+                "import_test",
+                "SELECT status FROM research.scanner_notification_receipts",
+            ),
+            "sent",
+            "scanner notification idempotency reconciliation",
+        )
         for path, before in source_hashes.items():
             assert_equal(sha256(path), before, f"source unchanged {path.name}")
 
@@ -601,8 +641,8 @@ def main() -> int:
         print(
             "PostgreSQL import verification passed: dry-run decisions, "
             "read-only sources, interrupted resume, repeated idempotency, "
-            "duplicate conflicts, exact finance, artifacts, and fail-closed "
-            "live controls."
+            "duplicate conflicts, exact finance, artifacts, durable scanner "
+            "state, and fail-closed live controls."
         )
         return 0
     except (OSError, VerificationError) as error:

@@ -21,6 +21,13 @@ services:
     volumes:
       - sandbox-quant-engine-db:/app/data
 
+  quant-scanner-worker:
+    environment:
+      DEPLOYMENT_PROFILE: sandbox
+      SCAN_ENABLED: "false"
+    volumes:
+      - sandbox-quant-engine-db:/app/data
+
   portfolio-engine:
     environment:
       DEPLOYMENT_PROFILE: sandbox

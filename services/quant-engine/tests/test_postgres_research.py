@@ -1,13 +1,14 @@
 import json
 import os
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import psycopg
 import pytest
 
 from app.backtest_store import BacktestStore
-
+from app.scanner_store import ScannerStore
 
 DATABASE_URL = os.environ.get("POSTGRES_RESEARCH_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
@@ -192,3 +193,104 @@ def test_completed_research_evidence_is_immutable(tmp_path: Path) -> None:
             (run_id,),
         ).fetchone()
     assert persisted == ("v1",)
+
+
+def test_postgresql_scanner_claims_are_concurrent_and_tenant_scoped() -> None:
+    assert DATABASE_URL is not None
+    tenant_a = "00000000-0000-7000-8000-000000000011"
+    tenant_b = "00000000-0000-7000-8000-000000000012"
+    alice = ScannerStore(DATABASE_URL, tenant_id=tenant_a, user_key="alice")
+    bob = ScannerStore(DATABASE_URL, tenant_id=tenant_b, user_key="bob")
+    for store in (alice, bob):
+        store.ensure_config(
+            enabled=False,
+            interval_minutes=15,
+            market_hours_only=False,
+        )
+    alice_run = alice.enqueue_manual("shared-key")
+    bob_run = bob.enqueue_manual("shared-key")
+
+    alice_claim = alice.claim_next("worker-a")
+    duplicate_claim = alice.claim_next("worker-b")
+    bob_claim = bob.claim_next("worker-b")
+
+    assert alice_claim is not None
+    assert alice_claim["run_id"] == alice_run["run_id"]
+    assert duplicate_claim is None
+    assert bob_claim is not None
+    assert bob_claim["run_id"] == bob_run["run_id"]
+    assert bob_claim["run_id"] != alice_claim["run_id"]
+    alice.complete(
+        str(alice_claim["run_id"]),
+        "worker-a",
+        {"signals_found": 0, "signals": []},
+    )
+    bob.complete(
+        str(bob_claim["run_id"]),
+        "worker-b",
+        {"signals_found": 0, "signals": []},
+    )
+
+    takeover_start = datetime.fromisoformat(
+        "2030-02-01T00:00:00+00:00"
+    )
+    takeover_run = alice.enqueue_manual(
+        "worker-kill-takeover",
+        now=takeover_start,
+    )
+    abandoned = alice.claim_run(
+        str(takeover_run["run_id"]),
+        "worker-killed",
+        now=takeover_start,
+        lease_seconds=10,
+    )
+    recovered = alice.claim_next(
+        "worker-recovery",
+        now=takeover_start + timedelta(seconds=11),
+        lease_seconds=10,
+        allow_scheduled=False,
+    )
+    assert abandoned is not None
+    assert recovered is not None
+    assert recovered["run_id"] == abandoned["run_id"]
+    assert recovered["attempt_count"] == 2
+
+    alice.save_action(
+        "BTC:BUY",
+        "approve",
+        {"user_decision": "approved", "snoozed_until": None},
+    )
+    assert alice.get_action("BTC:BUY") == {
+        "user_decision": "approved",
+        "snoozed_until": None,
+    }
+    sent_at = datetime.fromisoformat("2030-01-01T00:00:00+00:00")
+    assert alice.claim_notification(
+        str(alice_run["run_id"]),
+        "BTC:BUY",
+        "signal:BTC:BUY:postgres",
+        now=sent_at,
+    )
+    assert not alice.claim_notification(
+        str(alice_run["run_id"]),
+        "BTC:BUY",
+        "signal:BTC:BUY:postgres",
+        now=sent_at + timedelta(hours=1),
+    )
+    alice.finish_notification(
+        "signal:BTC:BUY:postgres",
+        sent=True,
+        now=sent_at,
+    )
+    assert not alice.claim_notification(
+        str(alice_run["run_id"]),
+        "BTC:BUY",
+        "signal:BTC:BUY:postgres",
+        now=sent_at + timedelta(hours=23),
+    )
+    assert alice.claim_notification(
+        str(alice_run["run_id"]),
+        "BTC:BUY",
+        "signal:BTC:BUY:postgres",
+        now=sent_at + timedelta(hours=25),
+    )

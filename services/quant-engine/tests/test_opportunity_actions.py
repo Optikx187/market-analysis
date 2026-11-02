@@ -6,6 +6,32 @@ from fastapi import HTTPException
 from app import main
 
 
+class FakeScannerStore:
+    def __init__(self) -> None:
+        self.actions: dict[str, dict[str, object]] = {}
+
+    def latest_completed(self) -> None:
+        return None
+
+    def get_action(self, opportunity_id: str) -> dict[str, object] | None:
+        return self.actions.get(opportunity_id)
+
+    def save_action(
+        self,
+        opportunity_id: str,
+        _action: str,
+        state: dict[str, object],
+    ) -> None:
+        self.actions[opportunity_id] = state
+
+
+@pytest.fixture(autouse=True)
+def scanner_store(monkeypatch: pytest.MonkeyPatch) -> FakeScannerStore:
+    durable = FakeScannerStore()
+    monkeypatch.setattr(main, "_get_scanner_store", lambda: durable)
+    return durable
+
+
 def opportunity(eligible: bool = True) -> dict[str, object]:
     return {
         "id": "AAPL:BUY",
@@ -25,7 +51,6 @@ def opportunity(eligible: bool = True) -> dict[str, object]:
 
 
 def prepare(candidate: dict[str, object]) -> None:
-    main._opportunity_actions.clear()
     main._scan_state["last_scan_result"] = {
         "signals": [{"opportunity": candidate}],
     }
@@ -77,6 +102,15 @@ def test_edit_recalculates_position_size_and_maximum_loss() -> None:
     assert plan["position_size_usd"] == 1_212
     assert plan["maximum_planned_loss_usd"] == 60
     assert [target["price"] for target in plan["targets"]] == [108, 112]
+
+    approved = asyncio.run(
+        main.update_opportunity_action(
+            "AAPL:BUY",
+            main.OpportunityActionRequest(action="approve"),
+        )
+    )
+    assert approved["user_decision"] == "approved"
+    assert approved["trade_plan"]["position_size_usd"] == 1_212
 
 
 def test_ineligible_opportunity_cannot_be_approved() -> None:

@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     SCAN_INTERVAL_MINUTES: int = 15
     SCAN_ENABLED: bool = True
     MARKET_HOURS_ONLY: bool = True
+    SCANNER_WORKER_POLL_SECONDS: float = 5.0
+    SCANNER_LEASE_SECONDS: int = 120
+    SCANNER_MAX_ATTEMPTS: int = 3
+    SCANNER_RETRY_SECONDS: int = 30
     BACKTEST_DATABASE_PATH: str = "./backtests.db"
     RESEARCH_STORAGE_BACKEND: str = "sqlite-transition"
     RESEARCH_DATABASE_URL: str = ""
@@ -77,6 +81,22 @@ class Settings(BaseSettings):
         if self.BACKTEST_INLINE_RESULT_MAX_BYTES < 1024:
             raise ValueError(
                 "BACKTEST_INLINE_RESULT_MAX_BYTES must be at least 1024"
+            )
+        if self.SCANNER_WORKER_POLL_SECONDS <= 0:
+            raise ValueError(
+                "SCANNER_WORKER_POLL_SECONDS must be greater than zero"
+            )
+        if self.SCANNER_LEASE_SECONDS < 3:
+            raise ValueError(
+                "SCANNER_LEASE_SECONDS must be at least 3 seconds"
+            )
+        if self.SCANNER_MAX_ATTEMPTS < 1:
+            raise ValueError(
+                "SCANNER_MAX_ATTEMPTS must be at least 1"
+            )
+        if self.SCANNER_RETRY_SECONDS < 0:
+            raise ValueError(
+                "SCANNER_RETRY_SECONDS must not be negative"
             )
         return self
 

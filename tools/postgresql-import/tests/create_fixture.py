@@ -152,6 +152,83 @@ def seed_research(root: Path) -> None:
             "retain_until": "2033-01-03 12:00:00",
         },
     )
+    scanner_run_id = "22222222-2222-4222-8222-222222222222"
+    insert(
+        connection,
+        "scanner_configs",
+        {
+            "tenant_id": TENANT_ID,
+            "user_key": "alice",
+            "scanner_key": "market-opportunity-scan",
+            "enabled": 1,
+            "interval_minutes": 30,
+            "market_hours_only": 1,
+            "next_run_at": "2026-01-04T14:30:00+00:00",
+            "updated_at": "2026-01-04T14:00:00+00:00",
+        },
+    )
+    insert(
+        connection,
+        "scanner_runs",
+        {
+            "run_id": scanner_run_id,
+            "tenant_id": TENANT_ID,
+            "user_key": "alice",
+            "scanner_key": "market-opportunity-scan",
+            "idempotency_key": "scheduled:fixture",
+            "trigger_type": "scheduled",
+            "status": "completed",
+            "scheduled_for": "2026-01-04T14:00:00+00:00",
+            "available_at": "2026-01-04T14:00:00+00:00",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "attempt_count": 1,
+            "result_json": json.dumps(
+                {
+                    "scanned": 1,
+                    "signals_found": 1,
+                    "signals": [{"ticker": "AAPL"}],
+                }
+            ),
+            "error": None,
+            "created_at": "2026-01-04T14:00:00+00:00",
+            "started_at": "2026-01-04T14:00:01+00:00",
+            "completed_at": "2026-01-04T14:00:02+00:00",
+            "updated_at": "2026-01-04T14:00:02+00:00",
+        },
+    )
+    insert(
+        connection,
+        "scanner_opportunity_actions",
+        {
+            "tenant_id": TENANT_ID,
+            "user_key": "alice",
+            "opportunity_id": "AAPL:BUY",
+            "action": "approve",
+            "state_json": json.dumps(
+                {
+                    "user_decision": "approved",
+                    "snoozed_until": None,
+                }
+            ),
+            "updated_at": "2026-01-04T14:05:00+00:00",
+        },
+    )
+    insert(
+        connection,
+        "scanner_notification_receipts",
+        {
+            "tenant_id": TENANT_ID,
+            "user_key": "alice",
+            "idempotency_key": "signal:AAPL:BUY:fixture",
+            "run_id": scanner_run_id,
+            "opportunity_id": "AAPL:BUY",
+            "status": "sent",
+            "error": None,
+            "created_at": "2026-01-04T14:00:01+00:00",
+            "updated_at": "2026-01-04T14:00:02+00:00",
+        },
+    )
     connection.commit()
     connection.close()
 

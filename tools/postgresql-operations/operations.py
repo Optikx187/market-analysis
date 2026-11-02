@@ -16,7 +16,7 @@ from psycopg.rows import dict_row
 
 EXPECTED_REVISIONS = {
     "alembic_version": "0003_data",
-    "alembic_version_research": "0002_research",
+    "alembic_version_research": "0003_research",
     "alembic_version_portfolio": "0002_portfolio",
 }
 PRESERVED_EVIDENCE = (
@@ -36,6 +36,10 @@ MAINTENANCE_TABLES = (
     "market_data.candles",
     "research.backtest_runs",
     "research.backtest_artifacts",
+    "research.scanner_configs",
+    "research.scanner_runs",
+    "research.scanner_opportunity_actions",
+    "research.scanner_notification_receipts",
     "portfolio.equity_snapshots",
     *PRESERVED_EVIDENCE,
 )

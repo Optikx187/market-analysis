@@ -48,7 +48,15 @@ def _signal() -> SignalResult:
 
 def _prepare_scan(monkeypatch: pytest.MonkeyPatch, ticker: str) -> None:
     main._recent_signals.clear()
-    main._opportunity_actions.clear()
+    monkeypatch.setattr(
+        main,
+        "_get_scanner_store",
+        lambda: type(
+            "ScannerState",
+            (),
+            {"get_action": staticmethod(lambda _opportunity_id: None)},
+        )(),
+    )
     monkeypatch.setattr(
         main,
         "_fetch_assets",

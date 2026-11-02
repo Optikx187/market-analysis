@@ -68,6 +68,44 @@ services:
       notification-gateway:
         condition: service_started
 
+  quant-scanner-worker:
+    build: ./services/quant-engine
+    command: ["python", "-m", "app.scanner_worker"]
+    environment:
+      - RISK_REWARD_RATIO=${RISK_REWARD_RATIO:-3.0}
+      - ATR_STOP_MULTIPLIER=${ATR_STOP_MULTIPLIER:-1.5}
+      - TRAILING_STOP_PCT=${TRAILING_STOP_PCT:-0.02}
+      - ATR_VOLATILITY_THRESHOLD=${ATR_VOLATILITY_THRESHOLD:-2.0}
+      - SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-15}
+      - SCAN_ENABLED=${SCAN_ENABLED:-true}
+      - MARKET_HOURS_ONLY=${MARKET_HOURS_ONLY:-true}
+      - SCANNER_WORKER_POLL_SECONDS=${SCANNER_WORKER_POLL_SECONDS:-5}
+      - SCANNER_LEASE_SECONDS=${SCANNER_LEASE_SECONDS:-120}
+      - SCANNER_MAX_ATTEMPTS=${SCANNER_MAX_ATTEMPTS:-3}
+      - SCANNER_RETRY_SECONDS=${SCANNER_RETRY_SECONDS:-30}
+      - DATA_INGESTION_URL=http://data-ingestion:8000
+      - PORTFOLIO_ENGINE_URL=http://portfolio-engine:8002
+      - NOTIFICATION_GATEWAY_URL=http://notification-gateway:8003
+      - BACKTEST_DATABASE_PATH=/app/data/backtests.db
+      - RESEARCH_STORAGE_BACKEND=sqlite-transition
+      - RESEARCH_DATABASE_URL=sqlite:////app/data/backtests.db
+      - RESEARCH_TENANT_ID=${RESEARCH_TENANT_ID:-00000000-0000-7000-8000-000000000001}
+      - RESEARCH_USER_KEY=${RESEARCH_USER_KEY:-default}
+      - BACKTEST_ARTIFACT_DIRECTORY=/app/data/artifacts
+      - BACKTEST_INLINE_RESULT_MAX_BYTES=${BACKTEST_INLINE_RESULT_MAX_BYTES:-262144}
+      - DEPLOYMENT_PROFILE=${DEPLOYMENT_PROFILE:-single-node}
+    volumes:
+      - quant-engine-db:/app/data
+    networks:
+      - trading_network
+    depends_on:
+      data-ingestion:
+        condition: service_healthy
+      portfolio-engine:
+        condition: service_started
+      notification-gateway:
+        condition: service_started
+
   # SERVICE C: Portfolio & Integration Engine
   portfolio-engine:
     build: ./services/portfolio-engine
