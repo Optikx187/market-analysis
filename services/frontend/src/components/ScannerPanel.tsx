@@ -279,17 +279,17 @@ export default function ScannerPanel({ focus }: { focus?: DeepLinkFocus }) {
           const editing = editingId === opportunity.id && editValues;
           return (
             <div key={opportunity.id} className={`rounded border p-3 bg-[var(--background)] ${opportunity.eligible ? "border-green-600/40" : "border-amber-600/40"}`}>
-              <button onClick={() => setExpandedId(expanded ? null : opportunity.id)} className="w-full text-left">
+              <div className="w-full text-left">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <span className="text-lg font-semibold tabular-nums">{opportunity.score.toFixed(1)}</span>
                     <div><div className="text-sm font-medium">{signal.ticker} <span className={signal.direction === "BUY" ? "text-green-400" : signal.direction === "SELL" ? "text-red-400" : "text-amber-400"}>{signal.direction}</span></div><div className="flex flex-wrap items-center gap-1 text-[10px] text-[var(--muted-foreground)]"><span>{opportunity.status}</span><span>·</span><TermTooltip term="regime">{opportunity.regime?.trend ?? "unknown"} regime</TermTooltip><span>·</span><TermTooltip term="timeframeAgreement">{opportunity.timeframe_agreement?.available ? `${opportunity.timeframe_agreement.score.toFixed(0)}% TF` : "TF incomplete"}</TermTooltip><span>· {opportunity.user_decision}</span></div></div>
                   </div>
-                  <div className="text-right"><div className={opportunity.eligible ? "text-green-400 text-xs" : "text-amber-400 text-xs"}>{opportunity.eligible ? "Eligible" : "Ineligible"}</div><div className="text-[10px] text-[var(--muted-foreground)]">{expanded ? "Hide details" : "Explain score and plan"}</div></div>
+                  <div className="text-right"><div className={opportunity.eligible ? "text-green-400 text-xs" : "text-amber-400 text-xs"}>{opportunity.eligible ? "Eligible" : "Ineligible"}</div><button onClick={() => setExpandedId(expanded ? null : opportunity.id)} className="text-[10px] text-[var(--primary)] hover:underline">{expanded ? "Hide details" : "Explain score and plan"}</button></div>
                 </div>
                 <div className="mt-2 h-1.5 overflow-hidden rounded bg-[var(--secondary)]"><div className={`h-full ${opportunity.eligible ? "bg-green-500" : "bg-amber-500"}`} style={{ width: `${Math.min(100, opportunity.score)}%` }} /></div>
                 <div className="mt-2 text-xs text-[var(--muted-foreground)]">{signal.reason}</div>
-              </button>
+              </div>
 
               {expanded && (
                 <div className="mt-3 space-y-3 border-t border-[var(--border)] pt-3">
