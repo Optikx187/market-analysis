@@ -108,7 +108,11 @@ alerts do not belong in this global schema.
 `analysis_selections` records tenant/user choice and configuration.
 `analysis_runs` stores normalized request/result snapshots, while
 `backtest_runs` preserves the existing dedicated research-history boundary.
-Completed runs are immutable evidence.
+Completed backtest runs are immutable evidence. `scanner_configs`,
+`scanner_runs`, `scanner_opportunity_actions`, and
+`scanner_notification_receipts` provide the mutable scheduling, lease,
+retry, user-decision, and producer-side idempotency boundary used by dedicated
+scanner workers.
 
 ### Portfolio
 

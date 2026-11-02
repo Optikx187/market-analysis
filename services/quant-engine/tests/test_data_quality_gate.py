@@ -7,6 +7,19 @@ from fastapi import HTTPException
 from app import main
 
 
+@pytest.fixture(autouse=True)
+def scanner_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        main,
+        "_get_scanner_store",
+        lambda: type(
+            "ScannerState",
+            (),
+            {"get_action": staticmethod(lambda _opportunity_id: None)},
+        )(),
+    )
+
+
 def quality(ticker: str, eligible: bool, issues: list[str]) -> main.DataQualityResponse:
     return main.DataQualityResponse(
         ticker=ticker,

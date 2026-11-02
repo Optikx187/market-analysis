@@ -76,7 +76,7 @@ def test_empty_database_upgrades_to_head_and_repeats_cleanly(
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0002_research",)
+        ).fetchone() == ("0003_research",)
         index_sql = connection.execute(
             "SELECT sql FROM sqlite_master "
             "WHERE type='index' AND name='idx_backtest_runs_ticker_created'"
@@ -85,9 +85,14 @@ def test_empty_database_upgrades_to_head_and_repeats_cleanly(
             "SELECT name FROM sqlite_master "
             "WHERE type='table' AND name='backtest_artifacts'"
         ).fetchone()
+        scanner_table = connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='scanner_runs'"
+        ).fetchone()
     assert index_sql is not None
     assert "created_at DESC" in index_sql[0]
     assert artifact_table == ("backtest_artifacts",)
+    assert scanner_table == ("scanner_runs",)
 
 
 def test_legacy_backtest_history_is_preserved(

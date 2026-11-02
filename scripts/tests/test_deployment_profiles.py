@@ -67,6 +67,10 @@ class DeploymentProfileTest(unittest.TestCase):
             services["portfolio-engine"]["environment"]["LIVE_TRADING_ENABLED"],
             "false",
         )
+        self.assertEqual(
+            services["quant-scanner-worker"]["environment"]["SCAN_ENABLED"],
+            "false",
+        )
         self.assertTrue(
             services["data-ingestion"]["environment"]["BINANCE_REST_URL"].startswith(
                 "https://binance.invalid/"
@@ -74,7 +78,12 @@ class DeploymentProfileTest(unittest.TestCase):
         )
         volume_sources = {
             volume["source"]
-            for name in ("data-ingestion", "quant-engine", "portfolio-engine")
+            for name in (
+                "data-ingestion",
+                "quant-engine",
+                "quant-scanner-worker",
+                "portfolio-engine",
+            )
             for volume in services[name].get("volumes", [])
             if volume["type"] == "volume"
         }
@@ -87,13 +96,19 @@ class DeploymentProfileTest(unittest.TestCase):
             },
         )
 
-    def test_multi_worker_adds_private_stateless_workers(self) -> None:
+    def test_multi_worker_adds_private_lease_workers(self) -> None:
         model = self.render("multi-worker", enable_profile=True)
         self.assert_edge_only(model)
-        worker = model["services"]["quant-worker"]
+        worker = model["services"]["quant-scanner-worker"]
         self.assertFalse(worker.get("ports"))
-        self.assertEqual(worker["environment"]["SCAN_ENABLED"], "false")
-        self.assertEqual(worker["environment"]["BACKTEST_DATABASE_PATH"], "/tmp/backtests.db")
+        self.assertEqual(
+            worker["command"],
+            ["python", "-m", "app.scanner_worker"],
+        )
+        self.assertEqual(
+            worker["environment"]["BACKTEST_DATABASE_PATH"],
+            "/app/data/backtests.db",
+        )
         self.assertEqual(worker["deploy"]["replicas"], 2)
 
     def test_postgresql_uses_shared_storage_and_preserves_sqlite_source(self) -> None:
@@ -102,6 +117,7 @@ class DeploymentProfileTest(unittest.TestCase):
         services = model["services"]
         ingestion = services["data-ingestion"]
         research = services["quant-engine"]
+        scanner_worker = services["quant-scanner-worker"]
         portfolio = services["portfolio-engine"]
         self.assertEqual(
             ingestion["environment"]["MARKET_DATA_STORAGE_BACKEND"],
@@ -155,6 +171,11 @@ class DeploymentProfileTest(unittest.TestCase):
             research["environment"]["RESEARCH_DATABASE_URL"].startswith(
                 "postgresql+psycopg://"
             )
+        )
+        self.assertTrue(
+            scanner_worker["environment"][
+                "RESEARCH_DATABASE_URL"
+            ].startswith("postgresql+psycopg://")
         )
         research_source = next(
             volume

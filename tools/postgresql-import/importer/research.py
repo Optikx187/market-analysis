@@ -16,6 +16,7 @@ from importer.common import (
     utc_datetime,
 )
 from importer.report import ImportReport
+from importer.scanner import import_scanner_state
 from importer.target import Target
 
 
@@ -523,3 +524,9 @@ def import_research(
         target_checksum=artifact_report.target_checksum,
     )
     target.commit()
+    import_scanner_state(
+        source,
+        target,
+        report,
+        user_map=user_map,
+    )

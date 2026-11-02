@@ -6,7 +6,7 @@ Always combine one overlay with the root `docker-compose.yml`.
 | --- | --- |
 | `compose.single-node.yml` | Explicit form of the supported default deployment |
 | `compose.sandbox.yml` | Offline-safe deterministic market, paper-broker, and notification boundaries |
-| `compose.multi-worker.yml` | Remote-lab topology with private stateless quant workers |
+| `compose.multi-worker.yml` | Remote-lab topology with private lease-based scanner workers |
 | `compose.postgresql.yml` | PostgreSQL 16 market-data, research, and portfolio adapters |
 
 Use a stable, unique Compose project name (`-p`) for each concurrent
@@ -20,11 +20,24 @@ provider endpoints do not use reserved `.invalid` hosts, if live execution is
 enabled, or if its broker endpoint is external. Its data volumes use
 `sandbox-*` logical names and never reuse the single-node databases.
 
-The multi-worker profile keeps scheduled scans on the singleton
-`quant-engine`. Its additional `quant-worker` replicas are stateless, use an
-ephemeral backtest database, and do not publish host ports. Durable distributed
-scheduling is intentionally deferred until broker, lease, and idempotency
-support is implemented.
+The multi-worker profile keeps the `quant-engine` API free of background
+loops and scales private `quant-scanner-worker` replicas instead. Workers
+share the durable scanner store, claim one run with an expiring lease, and
+recover abandoned work without duplicating run results. PostgreSQL is
+recommended before scaling beyond the single local worker; SQLite remains the
+simple single-node compatibility store.
+
+Scanner configuration, run results, retry attempts, opportunity decisions,
+and notification idempotency receipts share the research database. API
+replicas do not start scheduled loops. A worker renews its lease while a scan
+runs; if the worker stops, another replica can claim the run after
+`SCANNER_LEASE_SECONDS`. Failed runs retry up to `SCANNER_MAX_ATTEMPTS`.
+
+The `0003_research` migration is additive. SQLite-to-PostgreSQL import carries
+scanner configuration, completed/in-flight runs, actions, and receipts with
+the research store. To roll back the application version, stop scanner
+workers and restore the verified pre-migration research backup; do not
+downgrade the live schema destructively.
 
 For a fresh deployment, initialize `.env`, start PostgreSQL, build the service
 images, and apply every service-owned migration before starting the PostgreSQL

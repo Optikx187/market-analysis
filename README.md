@@ -22,14 +22,15 @@ The repository supports portable Docker Compose profiles for a private
 workstation, deterministic sandbox, single remote-lab host, and a
 multi-worker-ready topology.
 
-The current release is **not yet horizontally scalable**, although market
-data, research history, and portfolio state now have feature-gated PostgreSQL
-adapters:
+The current release is **not yet fully horizontally scalable**, although
+market data, research history, portfolio state, and scanner jobs now have
+feature-gated PostgreSQL adapters:
 
 - SQLite remains the default transition backend until source import and
   reconciliation are operator-approved;
-- scanner scheduling, deduplication, and some notification state are held in process memory;
-- durable scheduled-work distribution still requires leases and a broker;
+- scanner configuration, runs, results, leases, opportunity actions, and
+  notification idempotency receipts are durable;
+- scheduled scans run only in dedicated `quant-scanner-worker` containers;
 - watchlists, market data, and price alerts are shared rather than tenant-scoped;
 - there is no durable notification queue or multi-destination routing model;
 - only the frontend/nginx edge is published on the host; backend services stay
@@ -43,7 +44,8 @@ Do not run multiple active application clusters against copies of the same SQLit
 | --- | ---: | --- | --- |
 | Frontend | `3000` | React dashboard and nginx API proxy | Browser session state |
 | Data ingestion | `8000` | Assets, OHLCV candles, quotes, data quality, price alerts, earnings | SQLite transition volume or PostgreSQL `market_data` schema |
-| Quant engine | `8001` | Signals, regimes, scanner, opportunity ranking, backtests | SQLite transition volume or PostgreSQL `research` schema; referenced artifact volume; in-memory scanner state |
+| Quant engine | `8001` | Signals, regimes, scanner API, opportunity ranking, backtests | SQLite transition volume or PostgreSQL `research` schema; referenced artifact volume |
+| Scanner worker | none | Claims and executes durable scheduled scanner runs | Shared quant SQLite volume on one host or PostgreSQL `research` scanner tables |
 | Portfolio engine | `8002` | Portfolio, risk, trades, paper/live orders, users, settings, encrypted credentials | SQLite transition volume or PostgreSQL `portfolio` schema |
 | Notification gateway | `8003` | Discord, Telegram, Slack, email, SMS, Telegram commands | Credentials from portfolio engine; some runtime state is in memory |
 
@@ -222,12 +224,12 @@ docker compose -p market-analysis-workers `
   up --build -d
 ```
 
-This profile adds two private, stateless quant worker containers by default and
-keeps the primary quant-engine scheduler as a singleton. Worker scanners are
-disabled so the profile cannot duplicate scheduled signals. Set
-`QUANT_WORKER_REPLICAS` to change the worker count. Durable job distribution,
-leases, and notification outboxes remain separate roadmap work; do not treat
-this profile as multi-host scheduling.
+This profile runs two private `quant-scanner-worker` replicas by default. The
+API never starts a scheduler loop; workers atomically claim durable runs with
+expiring leases, so only one replica owns a run and another can recover it
+after a worker stops. Set `QUANT_WORKER_REPLICAS` to change the worker count.
+Use PostgreSQL before multi-host deployment. Durable notification outboxes and
+broker transport remain separate roadmap work.
 
 ### Profile rollback
 
@@ -480,6 +482,10 @@ An eligible plan can include:
 - earnings and economic-event warnings.
 
 Users can approve, edit, reject, or snooze opportunities. Approval does not automatically submit a broker order.
+Scanner configuration, the latest completed result, user actions, retry state,
+and daily signal-delivery receipts survive API and worker restarts. Manual
+`/api/scan-all` callers can send an `Idempotency-Key` header to safely retry
+the same request.
 
 ## Walk-forward backtesting
 
@@ -970,7 +976,7 @@ Check:
 
 ```bash
 curl http://localhost:3000/api/scanner/status
-docker compose logs quant-engine
+docker compose logs quant-engine quant-scanner-worker
 ```
 
 Review:
@@ -978,8 +984,13 @@ Review:
 - `SCAN_ENABLED`;
 - `SCAN_INTERVAL_MINUTES`;
 - `MARKET_HOURS_ONLY`;
+- `SCANNER_LEASE_SECONDS` and `SCANNER_MAX_ATTEMPTS`;
 - data eligibility;
 - stock-market hours.
+
+The status payload includes durable queued/running/failed counts. A `running`
+run with an expired lease is recoverable by another worker. Repeated failures
+stop after `SCANNER_MAX_ATTEMPTS` and remain visible for operator review.
 
 ### Notification test fails
 

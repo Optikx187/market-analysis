@@ -235,7 +235,7 @@ def main() -> int:
         expected = [
             "data=0003_data",
             "portfolio=0002_portfolio",
-            "research=0002_research",
+            "research=0003_research",
         ]
         if revisions != expected:
             raise SharedMigrationVerificationError(

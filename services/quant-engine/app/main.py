@@ -3,13 +3,16 @@
 import asyncio
 import hashlib
 import logging
+import os
+import socket
+import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 import httpx
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -23,7 +26,11 @@ from app.backtesting import (
 )
 from app.config import settings
 from app.migration_state import validate_schema
-from app.opportunities import OpportunityInput, build_blocked_opportunity, build_opportunity
+from app.opportunities import (
+    OpportunityInput,
+    build_blocked_opportunity,
+    build_opportunity,
+)
 from app.regimes import (
     classify_breadth,
     classify_regime,
@@ -31,13 +38,13 @@ from app.regimes import (
     timeframe_confluence,
 )
 from app.risk_engine import evaluate_risk_profile
+from app.scanner_store import ScannerStore
 from app.signals import evaluate_signals
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Scanner state
-_scanner_task: Optional[asyncio.Task] = None
 _scan_state = {
     "enabled": True,
     "interval_minutes": 15,
@@ -50,8 +57,8 @@ _scan_state = {
 }
 # Dedup: ticker -> last signal direction+timestamp (don't re-alert within 24h)
 _recent_signals: dict[str, str] = {}
-_opportunity_actions: dict[str, dict[str, object]] = {}
 _backtest_store: BacktestStore | None = None
+_scanner_store: ScannerStore | None = None
 
 
 def _get_backtest_store() -> BacktestStore:
@@ -67,6 +74,17 @@ def _get_backtest_store() -> BacktestStore:
     return _backtest_store
 
 
+def _get_scanner_store() -> ScannerStore:
+    global _scanner_store
+    if _scanner_store is None:
+        _scanner_store = ScannerStore(
+            settings.research_database_url,
+            tenant_id=settings.RESEARCH_TENANT_ID,
+            user_key=settings.RESEARCH_USER_KEY,
+        )
+    return _scanner_store
+
+
 def _is_market_hours() -> bool:
     """Check if US stock market is open (9:30-16:00 ET, Mon-Fri)."""
     from zoneinfo import ZoneInfo
@@ -80,21 +98,18 @@ def _is_market_hours() -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _scanner_task
     validate_schema(settings.research_database_url)
-    _scan_state["enabled"] = settings.SCAN_ENABLED
-    _scan_state["interval_minutes"] = settings.SCAN_INTERVAL_MINUTES
-    _scan_state["market_hours_only"] = settings.MARKET_HOURS_ONLY
-    if _scan_state["enabled"]:
-        _scanner_task = asyncio.create_task(_scanner_loop())
-        logger.info(f"Scanner started: every {_scan_state['interval_minutes']}min")
+    config = _get_scanner_store().ensure_config(
+        enabled=settings.SCAN_ENABLED,
+        interval_minutes=settings.SCAN_INTERVAL_MINUTES,
+        market_hours_only=settings.MARKET_HOURS_ONLY,
+    )
+    _scan_state.update(config)
+    logger.info(
+        "Durable scanner scheduling is owned by the scanner worker; "
+        "the API does not start a background loop"
+    )
     yield
-    if _scanner_task and not _scanner_task.done():
-        _scanner_task.cancel()
-        try:
-            await _scanner_task
-        except asyncio.CancelledError:
-            pass
 
 
 app = FastAPI(title="Quant Engine Service", version="3.0.0", lifespan=lifespan)
@@ -429,7 +444,7 @@ def _latest_backtest_result(ticker: str) -> dict[str, object] | None:
 
 def _apply_opportunity_state(opportunity: dict[str, object], now: datetime) -> None:
     opportunity_id = str(opportunity.get("id", ""))
-    state = _opportunity_actions.get(opportunity_id)
+    state = _get_scanner_store().get_action(opportunity_id)
     if state is None:
         return
     decision = str(state.get("user_decision", "pending"))
@@ -437,10 +452,8 @@ def _apply_opportunity_state(opportunity: dict[str, object], now: datetime) -> N
     if decision == "snoozed" and isinstance(snoozed_until, str):
         try:
             if datetime.fromisoformat(snoozed_until) <= now:
-                _opportunity_actions.pop(opportunity_id, None)
                 return
         except ValueError:
-            _opportunity_actions.pop(opportunity_id, None)
             return
     opportunity.update(state)
 
@@ -488,7 +501,11 @@ def _edit_trade_plan(plan: dict[str, object], edit: TradePlanEdit) -> None:
     plan["maximum_planned_loss_usd"] = round(abs(average_entry - stop_loss) * quantity, 2)
 
 
-async def _run_scan() -> dict:
+async def _run_scan(
+    *,
+    run_id: str | None = None,
+    scanner_store: ScannerStore | None = None,
+) -> dict:
     """Scan all active assets for signals and send notifications."""
     now = datetime.now(timezone.utc)
     _scan_state["last_scan_at"] = now.isoformat()
@@ -592,10 +609,10 @@ async def _run_scan() -> dict:
             dedup_key = f"{ticker}:{result.direction}"
             last_signal = _recent_signals.get(dedup_key)
             deduplicated = False
-            if last_signal:
+            if run_id is None and last_signal:
                 last_time = datetime.fromisoformat(last_signal)
                 deduplicated = (now - last_time) < timedelta(hours=24)
-            if not deduplicated:
+            if run_id is None and not deduplicated:
                 _recent_signals[dedup_key] = now.isoformat()
 
             signal_data = {
@@ -672,6 +689,16 @@ async def _run_scan() -> dict:
             action = decision_action if bool(opportunity.get("eligible")) else "ineligible"
 
             if not deduplicated and _notification_allowed(opportunity):
+                notification_key = (
+                    f"signal:{ticker}:{result.direction}"
+                )
+                if run_id is not None and scanner_store is not None:
+                    deduplicated = not scanner_store.claim_notification(
+                        run_id,
+                        str(opportunity.get("id", ticker)),
+                        notification_key,
+                        now=now,
+                    )
                 notify_data = {
                     "ticker": ticker,
                     "direction": str(result.direction) if result.direction else "NONE",
@@ -687,9 +714,17 @@ async def _run_scan() -> dict:
                     "timeframe_agreement": timeframe_agreement,
                     "paper_trade_executed": False,
                 }
-                sent = await _send_notification(notify_data)
-                if sent:
-                    notifications_sent += 1
+                if not deduplicated:
+                    sent = await _send_notification(notify_data)
+                    if run_id is not None and scanner_store is not None:
+                        scanner_store.finish_notification(
+                            notification_key,
+                            sent=sent,
+                            error=None if sent else "notification rejected",
+                            now=now,
+                        )
+                    if sent:
+                        notifications_sent += 1
 
             signal_details.append({
                 "ticker": ticker,
@@ -729,45 +764,55 @@ async def _run_scan() -> dict:
     return result_summary
 
 
-async def _scanner_loop():
-    await asyncio.sleep(30)  # initial delay to let services boot
+async def _lease_heartbeat(
+    store: ScannerStore,
+    run_id: str,
+    owner: str,
+) -> None:
+    interval = max(1.0, settings.SCANNER_LEASE_SECONDS / 3)
     while True:
+        await asyncio.sleep(interval)
+        if not store.heartbeat(
+            run_id,
+            owner,
+            lease_seconds=settings.SCANNER_LEASE_SECONDS,
+        ):
+            raise RuntimeError(f"Scanner lease lost for run {run_id}")
+
+
+async def _run_leased_scan(
+    store: ScannerStore,
+    run_id: str,
+    owner: str,
+) -> dict[str, object]:
+    scan = asyncio.create_task(
+        _run_scan(run_id=run_id, scanner_store=store)
+    )
+    heartbeat = asyncio.create_task(
+        _lease_heartbeat(store, run_id, owner)
+    )
+    done, _pending = await asyncio.wait(
+        {scan, heartbeat},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if heartbeat in done:
+        scan.cancel()
         try:
-            if not _scan_state["enabled"]:
-                await asyncio.sleep(60)
-                continue
-
-            if _scan_state["market_hours_only"] and not _is_market_hours():
-                await asyncio.sleep(60)
-                continue
-
-            interval = _scan_state["interval_minutes"]
-            last = _scan_state.get("last_scan_at")
-            if last:
-                last_time = datetime.fromisoformat(last)
-                elapsed = (datetime.now(timezone.utc) - last_time).total_seconds()
-                if elapsed < interval * 60:
-                    _scan_state["next_scan_at"] = (
-                        last_time + timedelta(minutes=interval)
-                    ).isoformat()
-                    await asyncio.sleep(30)
-                    continue
-
-            logger.info("Starting scheduled scan...")
-            result = await _run_scan()
-            logger.info(
-                f"Scan complete: {result['scanned']} scanned, "
-                f"{result['signals_found']} signals, "
-                f"{result['notifications_sent']} notifications"
-            )
-            _scan_state["next_scan_at"] = (
-                datetime.now(timezone.utc) + timedelta(minutes=interval)
-            ).isoformat()
-
-        except Exception as e:
-            logger.error(f"Scanner loop error: {e}")
-
-        await asyncio.sleep(30)
+            await scan
+        except asyncio.CancelledError:
+            pass
+        exception = heartbeat.exception()
+        if exception is not None:
+            raise exception
+        raise RuntimeError(f"Scanner heartbeat stopped for run {run_id}")
+    heartbeat.cancel()
+    try:
+        await heartbeat
+    except asyncio.CancelledError:
+        pass
+    result = await scan
+    store.complete(run_id, owner, result)
+    return result
 
 
 @app.get("/health")
@@ -881,25 +926,78 @@ async def risk_profile(req: AnalyzeRequest):
 # --- Phase 1: Scheduled Signal Scanning ---
 
 @app.post("/api/scan-all")
-async def scan_all():
-    """Manually trigger a full watchlist scan."""
-    result = await _run_scan()
-    return result
+async def scan_all(
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        min_length=1,
+        max_length=200,
+    ),
+):
+    """Run one durable, lease-owned manual scan."""
+    store = _get_scanner_store()
+    key = idempotency_key or f"manual:{uuid.uuid4()}"
+    durable_run = store.enqueue_manual(key)
+    if durable_run["status"] == "completed":
+        return durable_run["result"]
+    owner = f"api:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4()}"
+    claimed = store.claim_run(
+        str(durable_run["run_id"]),
+        owner,
+        lease_seconds=settings.SCANNER_LEASE_SECONDS,
+        max_attempts=settings.SCANNER_MAX_ATTEMPTS,
+    )
+    if claimed is None:
+        current = store.get_run(str(durable_run["run_id"]))
+        if current["status"] == "completed":
+            return current["result"]
+        raise HTTPException(
+            409,
+            {
+                "message": "Scan is already owned by another worker",
+                "run_id": durable_run["run_id"],
+                "status": current["status"],
+            },
+        )
+    try:
+        return await _run_leased_scan(
+            store,
+            str(claimed["run_id"]),
+            owner,
+        )
+    except Exception as error:
+        try:
+            store.fail(
+                str(claimed["run_id"]),
+                owner,
+                str(error),
+                retry_seconds=settings.SCANNER_RETRY_SECONDS,
+            )
+        except RuntimeError:
+            logger.warning(
+                "Manual scan %s failure was not recorded because its lease "
+                "is no longer owned by %s",
+                claimed["run_id"],
+                owner,
+            )
+        raise
 
 
 @app.get("/api/scanner/status")
 async def scanner_status():
     """Return current scanner configuration and state."""
-    return {
-        "enabled": _scan_state["enabled"],
-        "interval_minutes": _scan_state["interval_minutes"],
-        "market_hours_only": _scan_state["market_hours_only"],
-        "last_scan_at": _scan_state["last_scan_at"],
-        "next_scan_at": _scan_state["next_scan_at"],
-        "last_scan_result": _scan_state["last_scan_result"],
-        "total_scans": _scan_state["total_scans"],
-        "total_signals_found": _scan_state["total_signals_found"],
-    }
+    status = _get_scanner_store().status()
+    result = status.get("last_scan_result")
+    signals = result.get("signals") if isinstance(result, dict) else None
+    if isinstance(signals, list):
+        now = datetime.now(timezone.utc)
+        for signal in signals:
+            if not isinstance(signal, dict):
+                continue
+            opportunity = signal.get("opportunity")
+            if isinstance(opportunity, dict):
+                _apply_opportunity_state(opportunity, now)
+    return status
 
 
 @app.post("/api/opportunities/{opportunity_id}/action")
@@ -907,7 +1005,11 @@ async def update_opportunity_action(
     opportunity_id: str,
     request: OpportunityActionRequest,
 ):
-    latest_result = _scan_state.get("last_scan_result")
+    store = _get_scanner_store()
+    latest = store.latest_completed()
+    latest_result = latest.get("result") if latest else None
+    if latest_result is None:
+        latest_result = _scan_state.get("last_scan_result")
     if not isinstance(latest_result, dict):
         raise HTTPException(404, "Run a scan before managing opportunities")
     signals = latest_result.get("signals")
@@ -926,7 +1028,7 @@ async def update_opportunity_action(
     if request.action == "approve" and not bool(opportunity.get("eligible", False)):
         raise HTTPException(409, "Ineligible opportunities cannot be approved")
 
-    existing = _opportunity_actions.get(opportunity_id, {})
+    existing = store.get_action(opportunity_id) or {}
     state = dict(existing)
     if request.action == "approve":
         state.update({"user_decision": "approved", "snoozed_until": None})
@@ -951,7 +1053,11 @@ async def update_opportunity_action(
             "trade_plan": plan,
         })
 
-    _opportunity_actions[opportunity_id] = state
+    store.save_action(
+        opportunity_id,
+        request.action,
+        state,
+    )
     opportunity.update(state)
     return opportunity
 
@@ -959,19 +1065,18 @@ async def update_opportunity_action(
 @app.post("/api/scanner/config")
 async def update_scanner_config(config: ScanConfigUpdate):
     """Update scanner configuration at runtime."""
-    if config.enabled is not None:
-        _scan_state["enabled"] = config.enabled
-    if config.interval_minutes is not None:
-        if config.interval_minutes < 5:
-            raise HTTPException(400, "Minimum scan interval is 5 minutes")
-        _scan_state["interval_minutes"] = config.interval_minutes
-    if config.market_hours_only is not None:
-        _scan_state["market_hours_only"] = config.market_hours_only
+    try:
+        durable = _get_scanner_store().update_config(
+            enabled=config.enabled,
+            interval_minutes=config.interval_minutes,
+            market_hours_only=config.market_hours_only,
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    _scan_state.update(durable)
     return {
         "message": "Scanner config updated",
-        "enabled": _scan_state["enabled"],
-        "interval_minutes": _scan_state["interval_minutes"],
-        "market_hours_only": _scan_state["market_hours_only"],
+        **durable,
     }
 
 

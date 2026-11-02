@@ -7,6 +7,10 @@ services:
     environment:
       DEPLOYMENT_PROFILE: single-node
 
+  quant-scanner-worker:
+    environment:
+      DEPLOYMENT_PROFILE: single-node
+
   portfolio-engine:
     environment:
       DEPLOYMENT_PROFILE: single-node

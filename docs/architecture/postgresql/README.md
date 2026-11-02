@@ -57,6 +57,14 @@ requires a verified backup, records stable mappings and table checkpoints in
 runtime storage flags. Cutover requires a reconciled report and remains an
 operator-controlled step.
 
+The quant-engine `0003_research` migration adds durable scanner
+configuration, runs, expiring worker leases, opportunity actions, and
+notification receipts. The API owns no scheduler loop. Dedicated
+`quant-scanner-worker` replicas use PostgreSQL row locking with
+`SKIP LOCKED`; the SQLite transition profile uses serialized
+`BEGIN IMMEDIATE` claims for a simple single-host installation. Research
+import preserves this scanner state during a later PostgreSQL cutover.
+
 The operations implementation is `tools/postgresql-operations/`, exposed
 through the `manage postgres-*` commands. It provides extension-free logical
 backup manifests, isolated restore drills, growth and active-query reporting,

@@ -146,7 +146,8 @@ def main() -> int:
         print(
             "PostgreSQL 16 research verification passed: UUIDv7 runs, "
             "lineage, bounded artifacts, retention, immutability, and "
-            "tenant isolation."
+            "tenant isolation; scanner claims, lease takeover, actions, "
+            "and notification idempotency."
         )
         return 0
     except (ResearchVerificationError, OSError) as error:
