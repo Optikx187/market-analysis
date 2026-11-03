@@ -1,30 +1,53 @@
 """Data ingestion: fetch historical OHLCV data from yfinance, Binance, and Alpaca."""
 
 import asyncio
+import hashlib
 import logging
-from datetime import datetime, timezone, timedelta
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
+from itertools import pairwise
 
 import httpx
 import pandas as pd
 import yfinance as yf
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.credentials import get_provider_credentials
 from app.config import settings
+from app.credentials import get_provider_credentials
+from app.data_quality import US_EQUITY_BUSINESS_DAY, assess_data_quality
 from app.database import async_session
 from app.fake_market import fake_candles
-from app.models import Asset, AssetType, Candle
+from app.models import Asset, AssetType, Candle, CandleRevision
 from app.postgres_store import (
     count_candles as count_postgres_candles,
+)
+from app.postgres_store import (
     latest_timestamp as latest_postgres_timestamp,
+)
+from app.postgres_store import (
+    load_candle_lineage as load_postgres_candle_lineage,
+)
+from app.postgres_store import (
     load_candles as load_postgres_candles,
+)
+from app.postgres_store import (
+    recent_timestamps as recent_postgres_timestamps,
+)
+from app.postgres_store import (
     upsert_candles,
 )
 
 logger = logging.getLogger(__name__)
 
 CRYPTO_BINANCE_MAP = {"BTC": "BTCUSDT", "ETH": "ETHUSDT"}
+INTERVAL_DURATION = {
+    "1d": timedelta(days=1),
+    "4h": timedelta(hours=4),
+    "1h": timedelta(hours=1),
+}
+_refresh_tasks: dict[str, asyncio.Task[dict[str, object]]] = {}
+_store_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
 CRYPTO_NAMES = {
     "BTC": "Bitcoin",
@@ -49,6 +72,125 @@ CRYPTO_NAMES = {
     "SHIB": "Shiba Inu",
     "PEPE": "Pepe",
 }
+
+
+@dataclass(frozen=True)
+class RefreshPlan:
+    interval: str
+    latest_timestamp: datetime | None
+    request_start: datetime | None
+    overlap_bars: int
+    max_backfill_bars: int
+    bootstrap: bool
+
+    def to_dict(self) -> dict[str, object]:
+        payload = asdict(self)
+        for key in ("latest_timestamp", "request_start"):
+            value = payload[key]
+            payload[key] = value.isoformat() if value is not None else None
+        return payload
+
+
+def plan_refresh(
+    latest_timestamp: datetime | None,
+    interval: str,
+    *,
+    now: datetime | None = None,
+    timestamps: list[datetime] | None = None,
+    asset_type: AssetType = AssetType.CRYPTO,
+) -> RefreshPlan:
+    if interval not in INTERVAL_DURATION:
+        raise ValueError("interval must be one of: 1d, 4h, 1h")
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    if latest_timestamp is None:
+        return RefreshPlan(
+            interval=interval,
+            latest_timestamp=None,
+            request_start=None,
+            overlap_bars=settings.MARKET_DATA_OVERLAP_BARS,
+            max_backfill_bars=settings.MARKET_DATA_MAX_BACKFILL_BARS,
+            bootstrap=True,
+        )
+    latest = latest_timestamp
+    if latest.tzinfo is None:
+        latest = latest.replace(tzinfo=timezone.utc)
+    latest = min(latest.astimezone(timezone.utc), current)
+    duration = INTERVAL_DURATION[interval]
+    overlap_start = latest - (
+        duration * settings.MARKET_DATA_OVERLAP_BARS
+    )
+    bounded_start = current - (
+        duration * settings.MARKET_DATA_MAX_BACKFILL_BARS
+    )
+    missing_start = _earliest_missing_timestamp(
+        timestamps or [],
+        interval,
+        asset_type,
+    )
+    if missing_start is not None:
+        overlap_start = min(
+            overlap_start,
+            missing_start
+            - duration * settings.MARKET_DATA_OVERLAP_BARS,
+        )
+    return RefreshPlan(
+        interval=interval,
+        latest_timestamp=latest_timestamp,
+        request_start=max(overlap_start, bounded_start),
+        overlap_bars=settings.MARKET_DATA_OVERLAP_BARS,
+        max_backfill_bars=settings.MARKET_DATA_MAX_BACKFILL_BARS,
+        bootstrap=False,
+    )
+
+
+def _earliest_missing_timestamp(
+    timestamps: list[datetime],
+    interval: str,
+    asset_type: AssetType,
+) -> datetime | None:
+    if len(timestamps) < 2:
+        return None
+    ordered = pd.DatetimeIndex(
+        pd.to_datetime(timestamps, utc=True)
+    ).unique().sort_values()
+    duration = INTERVAL_DURATION[interval]
+    if asset_type == AssetType.CRYPTO:
+        for previous, current in pairwise(ordered):
+            if current - previous > duration * 1.5:
+                return (previous + duration).to_pydatetime()
+        return None
+    local = ordered.tz_convert("America/New_York")
+    dates = pd.DatetimeIndex(local.normalize()).unique().sort_values()
+    expected = pd.date_range(
+        start=dates[0],
+        end=dates[-1],
+        freq=US_EQUITY_BUSINESS_DAY,
+        tz="America/New_York",
+    )
+    missing_sessions = expected.difference(dates)
+    candidates: list[datetime] = [
+        value.replace(hour=9, minute=30).tz_convert("UTC").to_pydatetime()
+        for value in missing_sessions
+    ]
+    if interval != "1d":
+        for _, group in pd.DataFrame(
+            {"timestamp": local, "session": local.date}
+        ).groupby("session"):
+            values = pd.DatetimeIndex(
+                group["timestamp"].sort_values()
+            )
+            for previous, current in pairwise(values):
+                if current - previous > duration * 1.5:
+                    candidates.append(
+                        (previous + duration)
+                        .tz_convert("UTC")
+                        .to_pydatetime()
+                    )
+                    break
+    return min(candidates) if candidates else None
 
 
 def get_crypto_name(ticker: str) -> str:
@@ -347,6 +489,25 @@ def validate_candles_for_storage(df: pd.DataFrame) -> pd.DataFrame:
     return validated
 
 
+def _content_checksum(row: pd.Series) -> str:
+    values = [
+        format(float(row[column]), ".12f")
+        for column in ("open", "high", "low", "close")
+    ]
+    values.append(format(float(row["volume"]), ".18f"))
+    return hashlib.sha256("|".join(values).encode()).hexdigest()
+
+
+def _naive_utc(value: datetime | pd.Timestamp | None) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, pd.Timestamp):
+        value = value.to_pydatetime()
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
 async def store_candles(
     db: AsyncSession,
     ticker: str,
@@ -371,33 +532,104 @@ async def store_candles(
             validated,
             interval,
         )
-    timestamps = []
-    for value in validated["timestamp"]:
-        timestamp = value.to_pydatetime() if isinstance(value, pd.Timestamp) else value
-        if timestamp.tzinfo is not None:
-            timestamp = timestamp.replace(tzinfo=None)
-        timestamps.append(timestamp)
-    await db.execute(
-        delete(Candle).where(
-            Candle.ticker == ticker,
-            Candle.interval == interval,
-            Candle.timestamp.in_(timestamps),
-        ),
+    provider = str(validated.attrs.get("provider", "unknown")).lower()
+    provider_symbol = str(
+        validated.attrs.get("provider_symbol", ticker)
+    ).upper()
+    observed_at = _naive_utc(
+        validated.attrs.get("provider_observed_at")
+        or datetime.now(timezone.utc)
     )
-    for _, row in validated.iterrows():
-        ts = row["timestamp"]
-        if isinstance(ts, pd.Timestamp):
-            ts = ts.to_pydatetime()
-        if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
-            ts = ts.replace(tzinfo=None)
-        candle = Candle(
-            ticker=ticker, timestamp=ts,
-            open=float(row["open"]), high=float(row["high"]),
-            low=float(row["low"]), close=float(row["close"]),
-            volume=float(row["volume"]), interval=interval,
+    ingested_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    timestamps = [_naive_utc(value) for value in validated["timestamp"]]
+    lock = _store_locks.setdefault(
+        (ticker.strip().upper(), interval),
+        asyncio.Lock(),
+    )
+    async with lock:
+        result = await db.execute(
+            select(Candle).where(
+                Candle.ticker == ticker,
+                Candle.interval == interval,
+                Candle.timestamp.in_(timestamps),
+            )
         )
-        db.add(candle)
-    await db.commit()
+        existing = {
+            candle.timestamp: candle for candle in result.scalars().all()
+        }
+        for _, row in validated.iterrows():
+            timestamp = _naive_utc(row["timestamp"])
+            checksum = _content_checksum(row)
+            candle = existing.get(timestamp)
+            values = {
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"]),
+            }
+            if candle is None:
+                db.add(
+                    Candle(
+                        ticker=ticker,
+                        timestamp=timestamp,
+                        interval=interval,
+                        provider=provider,
+                        provider_symbol=provider_symbol,
+                        provider_observed_at=observed_at,
+                        first_ingested_at=ingested_at,
+                        ingested_at=ingested_at,
+                        provider_revision=1,
+                        content_checksum=checksum,
+                        **values,
+                    )
+                )
+                continue
+            current_checksum = candle.content_checksum or _content_checksum(
+                pd.Series(
+                    {
+                        "open": candle.open,
+                        "high": candle.high,
+                        "low": candle.low,
+                        "close": candle.close,
+                        "volume": candle.volume,
+                    }
+                )
+            )
+            revised = (
+                current_checksum != checksum
+                or candle.provider != provider
+                or candle.provider_symbol != provider_symbol
+            )
+            if revised:
+                db.add(
+                    CandleRevision(
+                        candle_id=candle.id,
+                        ticker=candle.ticker,
+                        timestamp=candle.timestamp,
+                        interval=candle.interval,
+                        provider=candle.provider or "legacy",
+                        provider_symbol=candle.provider_symbol or candle.ticker,
+                        provider_observed_at=candle.provider_observed_at,
+                        ingested_at=candle.ingested_at,
+                        provider_revision=candle.provider_revision or 1,
+                        open=candle.open,
+                        high=candle.high,
+                        low=candle.low,
+                        close=candle.close,
+                        volume=candle.volume,
+                        content_checksum=current_checksum,
+                    )
+                )
+                candle.provider_revision = (candle.provider_revision or 1) + 1
+            for key, value in values.items():
+                setattr(candle, key, value)
+            candle.provider = provider
+            candle.provider_symbol = provider_symbol
+            candle.provider_observed_at = observed_at
+            candle.ingested_at = ingested_at
+            candle.content_checksum = checksum
+        await db.commit()
     return len(validated)
 
 
@@ -421,6 +653,63 @@ async def load_candles(
     return pd.DataFrame(rows)
 
 
+async def load_candle_lineage(
+    db: AsyncSession,
+    ticker: str,
+    interval: str = "1d",
+    limit: int = 100,
+) -> list[dict[str, object]]:
+    if settings.MARKET_DATA_STORAGE_BACKEND.strip().lower() == "postgresql":
+        return await load_postgres_candle_lineage(
+            db,
+            ticker,
+            interval,
+            limit,
+        )
+    result = await db.execute(
+        select(Candle)
+        .where(Candle.ticker == ticker, Candle.interval == interval)
+        .order_by(Candle.timestamp.desc())
+        .limit(limit)
+    )
+    current = result.scalars().all()
+    if not current:
+        return []
+    revision_result = await db.execute(
+        select(
+            CandleRevision.candle_id,
+            func.count(CandleRevision.id),
+        )
+        .where(
+            CandleRevision.candle_id.in_(
+                [candle.id for candle in current]
+            )
+        )
+        .group_by(CandleRevision.candle_id)
+    )
+    archived = dict(revision_result.all())
+
+    def isoformat(value: datetime | None) -> str | None:
+        return value.isoformat() if value is not None else None
+
+    return [
+        {
+            "timestamp": candle.timestamp.isoformat(),
+            "provider": candle.provider,
+            "provider_symbol": candle.provider_symbol,
+            "provider_observed_at": isoformat(
+                candle.provider_observed_at
+            ),
+            "first_ingested_at": isoformat(candle.first_ingested_at),
+            "ingested_at": isoformat(candle.ingested_at),
+            "provider_revision": candle.provider_revision,
+            "archived_revisions": archived.get(candle.id, 0),
+            "content_checksum": candle.content_checksum,
+        }
+        for candle in current
+    ]
+
+
 async def latest_candle_timestamp(
     db: AsyncSession,
     ticker: str,
@@ -440,6 +729,37 @@ async def latest_candle_timestamp(
     return value
 
 
+async def recent_candle_timestamps(
+    db: AsyncSession,
+    ticker: str,
+    interval: str,
+) -> list[datetime]:
+    limit = (
+        settings.MARKET_DATA_MAX_BACKFILL_BARS
+        + settings.MARKET_DATA_OVERLAP_BARS
+        + 1
+    )
+    if settings.MARKET_DATA_STORAGE_BACKEND.strip().lower() == "postgresql":
+        return await recent_postgres_timestamps(
+            db,
+            ticker,
+            interval,
+            limit,
+        )
+    result = await db.execute(
+        select(Candle.timestamp)
+        .where(Candle.ticker == ticker, Candle.interval == interval)
+        .order_by(Candle.timestamp.desc())
+        .limit(limit)
+    )
+    return [
+        value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(timezone.utc)
+        for value in result.scalars().all()
+    ]
+
+
 async def candle_count(
     db: AsyncSession,
     ticker: str,
@@ -456,39 +776,149 @@ async def candle_count(
     return int(result.scalar_one())
 
 
-async def refresh_asset_data(ticker: str, asset_type: AssetType):
-    ticker = ticker.strip()
+async def refresh_asset_data(
+    ticker: str,
+    asset_type: AssetType,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    normalized = ticker.strip().upper()
+    active = _refresh_tasks.get(normalized)
+    if active is not None and not active.done():
+        return await asyncio.shield(active)
+    task = asyncio.create_task(
+        _refresh_asset_data(normalized, asset_type, now=now)
+    )
+    _refresh_tasks[normalized] = task
+
+    def clear(completed: asyncio.Task[dict[str, object]]) -> None:
+        if _refresh_tasks.get(normalized) is completed:
+            _refresh_tasks.pop(normalized, None)
+
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if task.done():
+            clear(task)
+        else:
+            task.add_done_callback(clear)
+
+
+async def _refresh_asset_data(
+    normalized: str,
+    asset_type: AssetType,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    intervals: dict[str, dict[str, object]] = {}
     stored = 0
+    errors = 0
     for interval in ("1d", "4h", "1h"):
         try:
             async with async_session() as db:
-                latest = await latest_candle_timestamp(db, ticker, interval)
-            overlap = {
-                "1d": timedelta(days=2),
-                "4h": timedelta(hours=8),
-                "1h": timedelta(hours=2),
-            }[interval]
-            start_after = latest - overlap if latest is not None else None
+                timestamps = await recent_candle_timestamps(
+                    db,
+                    normalized,
+                    interval,
+                )
+            latest = max(timestamps) if timestamps else None
+            plan = plan_refresh(
+                latest,
+                interval,
+                now=current,
+                timestamps=timestamps,
+                asset_type=asset_type,
+            )
             frame = await fetch_historical(
-                ticker,
+                normalized,
                 asset_type,
                 interval,
-                start_after=start_after,
+                start_after=plan.request_start,
+            )
+            provider = str(frame.attrs.get("provider", "unknown"))
+            provider_symbol = str(
+                frame.attrs.get("provider_symbol", normalized)
             )
             if frame.empty:
-                logger.warning(f"No {interval} data for {ticker}")
+                logger.warning(f"No {interval} data for {normalized}")
+                intervals[interval] = {
+                    "status": "no_data",
+                    "provider": provider,
+                    "provider_symbol": provider_symbol,
+                    "fetched": 0,
+                    "stored": 0,
+                    "plan": plan.to_dict(),
+                }
                 continue
             async with async_session() as db:
-                await store_candles(
+                stored_rows = await store_candles(
                     db,
-                    ticker,
+                    normalized,
                     frame,
                     interval,
                     asset_type=asset_type,
                 )
-            stored += len(frame)
-            logger.info(f"Stored {len(frame)} {interval} candles for {ticker}")
+                canonical = await load_candles(
+                    db,
+                    normalized,
+                    interval,
+                )
+            quality = assess_data_quality(
+                normalized,
+                asset_type,
+                canonical,
+                interval,
+                now=current,
+            )
+            stored += stored_rows
+            intervals[interval] = {
+                "status": "stored",
+                "provider": provider,
+                "provider_symbol": provider_symbol,
+                "provider_observed_at": (
+                    frame.attrs.get("provider_observed_at").isoformat()
+                    if isinstance(
+                        frame.attrs.get("provider_observed_at"),
+                        datetime,
+                    )
+                    else None
+                ),
+                "fetched": len(frame),
+                "stored": stored_rows,
+                "canonical_count": len(canonical),
+                "quality": quality.to_dict(),
+                "plan": plan.to_dict(),
+            }
+            logger.info(
+                "Stored %s %s candles for %s from %s",
+                stored_rows,
+                interval,
+                normalized,
+                provider,
+            )
         except Exception as error:
-            logger.warning(f"Unable to refresh {ticker} {interval}: {error}")
+            errors += 1
+            intervals[interval] = {
+                "status": "error",
+                "error": str(error),
+            }
+            logger.warning(
+                f"Unable to refresh {normalized} {interval}: {error}"
+            )
     if stored == 0:
-        logger.warning(f"No data for {ticker}")
+        logger.warning(f"No data for {normalized}")
+    return {
+        "ticker": normalized,
+        "status": (
+            "success"
+            if errors == 0
+            else "failed" if errors == 3 else "partial"
+        ),
+        "stored": stored,
+        "errors": errors,
+        "intervals": intervals,
+    }

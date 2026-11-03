@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.market_models import (
+    candle_revisions,
     candles,
     instrument_symbols,
     instruments,
@@ -18,7 +19,6 @@ from app.market_models import (
     venues,
 )
 from app.models import AssetType
-
 
 PRICE_QUANTUM = Decimal("0.000000000001")
 QUANTITY_QUANTUM = Decimal("0.000000000000000001")
@@ -164,6 +164,34 @@ async def latest_timestamp(
         )
     )
     return (await db.execute(statement)).scalar_one_or_none()
+
+
+async def recent_timestamps(
+    db: AsyncSession,
+    ticker: str,
+    interval: str,
+    limit: int,
+) -> list[datetime]:
+    normalized = ticker.strip().upper().replace("-USD", "")
+    statement = (
+        select(candles.c.bucket_start)
+        .select_from(
+            candles.join(
+                instrument_symbols,
+                (candles.c.instrument_id == instrument_symbols.c.instrument_id)
+                & (candles.c.provider_id == instrument_symbols.c.provider_id),
+            )
+        )
+        .where(
+            instrument_symbols.c.normalized_symbol == normalized,
+            instrument_symbols.c.valid_to.is_(None),
+            candles.c.bar_interval == interval,
+        )
+        .distinct()
+        .order_by(candles.c.bucket_start.desc())
+        .limit(limit)
+    )
+    return list((await db.execute(statement)).scalars().all())
 
 
 async def count_candles(
@@ -326,3 +354,69 @@ async def load_candles(
             for row in rows
         ]
     )
+
+
+async def load_candle_lineage(
+    db: AsyncSession,
+    ticker: str,
+    interval: str,
+    limit: int = 100,
+) -> list[dict[str, object]]:
+    normalized = ticker.strip().upper().replace("-USD", "")
+    revision_count = (
+        select(func.count())
+        .select_from(candle_revisions)
+        .where(
+            candle_revisions.c.provider_id == candles.c.provider_id,
+            candle_revisions.c.instrument_id == candles.c.instrument_id,
+            candle_revisions.c.bar_interval == candles.c.bar_interval,
+            candle_revisions.c.bucket_start == candles.c.bucket_start,
+        )
+        .correlate(candles)
+        .scalar_subquery()
+    )
+    statement = (
+        select(
+            candles.c.bucket_start,
+            providers.c.provider_key,
+            instrument_symbols.c.provider_symbol,
+            candles.c.provider_observed_at,
+            candles.c.first_ingested_at,
+            candles.c.ingested_at,
+            candles.c.provider_revision,
+            candles.c.content_checksum,
+            revision_count.label("archived_revisions"),
+        )
+        .select_from(
+            candles.join(
+                instrument_symbols,
+                (candles.c.instrument_id == instrument_symbols.c.instrument_id)
+                & (candles.c.provider_id == instrument_symbols.c.provider_id),
+            ).join(
+                providers,
+                candles.c.provider_id == providers.c.id,
+            )
+        )
+        .where(
+            instrument_symbols.c.normalized_symbol == normalized,
+            instrument_symbols.c.valid_to.is_(None),
+            candles.c.bar_interval == interval,
+        )
+        .order_by(candles.c.bucket_start.desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(statement)).all()
+    return [
+        {
+            "timestamp": row.bucket_start.isoformat(),
+            "provider": row.provider_key,
+            "provider_symbol": row.provider_symbol,
+            "provider_observed_at": row.provider_observed_at.isoformat(),
+            "first_ingested_at": row.first_ingested_at.isoformat(),
+            "ingested_at": row.ingested_at.isoformat(),
+            "provider_revision": row.provider_revision,
+            "archived_revisions": row.archived_revisions,
+            "content_checksum": row.content_checksum,
+        }
+        for row in rows
+    ]

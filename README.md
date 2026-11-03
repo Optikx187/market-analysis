@@ -448,6 +448,22 @@ Current frontend minimums:
 - analysis: at least 201 daily candles;
 - walk-forward backtesting: at least 301 daily candles.
 
+Refreshes are incremental. Each asset/interval request overlaps the latest
+stored bars so provider corrections become traceable revisions, starts from
+the earliest bounded gap when one is detected, and never deletes/reinserts
+the full history. `MARKET_DATA_OVERLAP_BARS` defaults to `2`;
+`MARKET_DATA_MAX_BACKFILL_BARS` defaults to `1000` and prevents an outage
+from triggering an unbounded provider request. Concurrent refresh requests
+for the same ticker share one provider operation in each API process, while
+database upserts remain idempotent across processes.
+
+`GET /api/candles/{ticker}/lineage?interval=1d` returns the current provider,
+provider symbol, observation/ingestion times, revision number, archived
+revision count, and checksum. PostgreSQL stores exact revision history;
+the SQLite transition profile stores equivalent local lineage for
+sandbox/single-node operation. Data-quality gates run against the canonical
+series after each refresh.
+
 ## Scanner and opportunity ranking
 
 The scanner:
@@ -812,7 +828,7 @@ Use these pages for current request and response schemas.
 
 Major API groups:
 
-- `/api/assets`, `/api/candles`, `/api/data-quality`, `/api/quotes`, `/api/price-alerts`, `/api/earnings`;
+- `/api/assets`, `/api/candles`, `/api/candles/{ticker}/lineage`, `/api/data-quality`, `/api/quotes`, `/api/price-alerts`, `/api/earnings`;
 - `/api/analyze`, `/api/regime`, `/api/scan-all`, `/api/scanner`, `/api/opportunities`, `/api/backtest`;
 - `/api/portfolio`, `/api/trades`, `/api/attribution`, `/api/paper-orders`, `/api/action-items`, `/api/dashboard-preferences`;
 - `/api/auth`, `/api/settings`, `/api/live-trading`, `/api/live-orders`;

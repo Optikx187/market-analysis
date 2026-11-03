@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.config import settings
 from app.migration_state import validate_schema
 
-
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -122,7 +121,7 @@ def test_empty_database_upgrades_to_head_and_repeats_cleanly(
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0003_data",)
+        ).fetchone() == ("0004_data",)
 
 
 def test_existing_database_is_adopted_without_losing_market_data(
@@ -135,14 +134,44 @@ def test_existing_database_is_adopted_without_losing_market_data(
     _check(database_path)
 
     with sqlite3.connect(database_path) as connection:
+        candle_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(candles)"
+            ).fetchall()
+        }
+        assert {
+            "provider",
+            "provider_symbol",
+            "provider_observed_at",
+            "first_ingested_at",
+            "ingested_at",
+            "provider_revision",
+            "content_checksum",
+        }.issubset(candle_columns)
+        assert connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='candle_revisions'"
+        ).fetchone() == ("candle_revisions",)
         assert connection.execute(
             "SELECT ticker, name, asset_type, is_active FROM assets"
         ).fetchall() == [("BTC", "Bitcoin", "CRYPTO", 1)]
         assert connection.execute(
-            "SELECT ticker, open, high, low, close, volume, interval "
+            "SELECT ticker, open, high, low, close, volume, interval, "
+            "provider, provider_revision "
             "FROM candles"
         ).fetchall() == [
-            ("BTC", 100.0, 110.0, 90.0, 105.0, 1000.0, "1d")
+            (
+                "BTC",
+                100.0,
+                110.0,
+                90.0,
+                105.0,
+                1000.0,
+                "1d",
+                "legacy",
+                1,
+            )
         ]
         assert connection.execute(
             "SELECT ticker, condition, threshold, triggered "
@@ -150,7 +179,7 @@ def test_existing_database_is_adopted_without_losing_market_data(
         ).fetchall() == [("BTC", "above", 120.0, 0)]
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0003_data",)
+        ).fetchone() == ("0004_data",)
 
 
 def test_destructive_downgrade_requires_verified_restore(
@@ -165,7 +194,7 @@ def test_destructive_downgrade_requires_verified_restore(
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0003_data",)
+        ).fetchone() == ("0004_data",)
 
 
 def test_schema_validation_is_read_only_and_fails_closed(

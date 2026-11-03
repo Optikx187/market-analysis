@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     YAHOO_CHART_URL: str = "https://query2.finance.yahoo.com/v8/finance/chart"
     ALPACA_DATA_URL: str = "https://data.alpaca.markets/v2"
     ALPACA_TRADING_URL: str = "https://paper-api.alpaca.markets"
+    MARKET_DATA_OVERLAP_BARS: int = 2
+    MARKET_DATA_MAX_BACKFILL_BARS: int = 1000
 
     @property
     def allowed_origins(self) -> list[str]:
@@ -50,6 +52,12 @@ class Settings(BaseSettings):
         ):
             raise ValueError(
                 "sqlite-transition market-data storage requires an async SQLite DATABASE_URL"
+            )
+        if self.MARKET_DATA_OVERLAP_BARS < 1:
+            raise ValueError("MARKET_DATA_OVERLAP_BARS must be at least 1")
+        if self.MARKET_DATA_MAX_BACKFILL_BARS < 201:
+            raise ValueError(
+                "MARKET_DATA_MAX_BACKFILL_BARS must be at least 201"
             )
         if profile == "sandbox":
             if mode != "fake":

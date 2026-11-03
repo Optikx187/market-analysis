@@ -12,6 +12,8 @@ services:
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost:3000}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       - MARKET_DATA_MODE=${MARKET_DATA_MODE:-live}
+      - MARKET_DATA_OVERLAP_BARS=${MARKET_DATA_OVERLAP_BARS:-2}
+      - MARKET_DATA_MAX_BACKFILL_BARS=${MARKET_DATA_MAX_BACKFILL_BARS:-1000}
       - BINANCE_REST_URL=${BINANCE_REST_URL:-https://api.binance.com/api/v3}
       - YAHOO_CHART_URL=${YAHOO_CHART_URL:-https://query2.finance.yahoo.com/v8/finance/chart}
       - ALPACA_DATA_URL=${ALPACA_DATA_URL:-https://data.alpaca.markets/v2}

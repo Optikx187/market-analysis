@@ -3,7 +3,6 @@ from pydantic import ValidationError
 
 from app.config import Settings
 
-
 SANDBOX_ENDPOINTS = {
     "BINANCE_REST_URL": "https://binance.invalid/api/v3",
     "YAHOO_CHART_URL": "https://yahoo.invalid/chart",
@@ -66,3 +65,19 @@ def test_sqlite_transition_backend_is_explicit() -> None:
             DATABASE_URL="postgresql+asyncpg://database/market",
             _env_file=None,
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("MARKET_DATA_OVERLAP_BARS", 0, "must be at least 1"),
+        ("MARKET_DATA_MAX_BACKFILL_BARS", 200, "must be at least 201"),
+    ),
+)
+def test_incremental_refresh_bounds_fail_closed(
+    field: str,
+    value: int,
+    message: str,
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        Settings(**{field: value}, _env_file=None)
