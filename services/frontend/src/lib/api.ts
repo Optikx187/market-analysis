@@ -1253,6 +1253,18 @@ export interface ScanResult {
   quality_rejections: Array<{ ticker: string; reason: string }>;
   signals: ScanSignal[];
   timestamp: string;
+  schedule?: string;
+  asset_types?: string[];
+}
+
+export interface ScannerScheduleStatus {
+  enabled: boolean;
+  interval_minutes: number;
+  next_scan_at: string | null;
+  last_scan_at: string | null;
+  runs_by_status: Record<string, number>;
+  asset_types: string[];
+  calendar: string;
 }
 
 export interface ScannerStatus {
@@ -1264,6 +1276,10 @@ export interface ScannerStatus {
   last_scan_result: ScanResult | null;
   total_scans: number;
   total_signals_found: number;
+  schedules: {
+    equity: ScannerScheduleStatus;
+    crypto: ScannerScheduleStatus;
+  };
 }
 
 export const triggerScan = () =>
@@ -1272,7 +1288,11 @@ export const triggerScan = () =>
 export const fetchScannerStatus = () =>
   api.get<ScannerStatus>("/scanner/status").then((r) => r.data);
 
-export const updateScannerConfig = (config: { enabled?: boolean; interval_minutes?: number; market_hours_only?: boolean }) =>
+export const updateScannerConfig = (config: {
+  schedule?: "all" | "equity" | "crypto";
+  enabled?: boolean;
+  interval_minutes?: number;
+}) =>
   api.post<{ message: string; enabled: boolean; interval_minutes: number; market_hours_only: boolean }>("/scanner/config", config).then((r) => r.data);
 
 export interface OpportunityActionPayload {

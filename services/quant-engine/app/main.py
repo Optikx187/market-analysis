@@ -25,6 +25,7 @@ from app.backtesting import (
     run_walk_forward_backtest,
 )
 from app.config import settings
+from app.market_calendar import schedule_definitions
 from app.migration_state import validate_schema
 from app.opportunities import (
     OpportunityInput,
@@ -59,6 +60,7 @@ _scan_state = {
 _recent_signals: dict[str, str] = {}
 _backtest_store: BacktestStore | None = None
 _scanner_store: ScannerStore | None = None
+_schedule_stores: dict[str, ScannerStore] | None = None
 
 
 def _get_backtest_store() -> BacktestStore:
@@ -85,6 +87,44 @@ def _get_scanner_store() -> ScannerStore:
     return _scanner_store
 
 
+def _get_schedule_stores() -> dict[str, ScannerStore]:
+    global _schedule_stores
+    if _schedule_stores is None:
+        _schedule_stores = {
+            definition.name: ScannerStore(
+                settings.research_database_url,
+                tenant_id=settings.RESEARCH_TENANT_ID,
+                user_key=settings.RESEARCH_USER_KEY,
+                scanner_key=definition.scanner_key,
+            )
+            for definition in schedule_definitions(
+                settings.EQUITY_EXCHANGE_CALENDAR
+            )
+        }
+    return _schedule_stores
+
+
+def initialize_scanner_stores() -> dict[str, ScannerStore]:
+    legacy = _get_scanner_store()
+    legacy_config = legacy.ensure_config(
+        enabled=settings.SCAN_ENABLED,
+        interval_minutes=settings.SCAN_INTERVAL_MINUTES,
+        market_hours_only=settings.MARKET_HOURS_ONLY,
+    )
+    stores = _get_schedule_stores()
+    stores["equity"].ensure_config(
+        enabled=bool(legacy_config["enabled"]),
+        interval_minutes=int(legacy_config["interval_minutes"]),
+        market_hours_only=True,
+    )
+    stores["crypto"].ensure_config(
+        enabled=bool(legacy_config["enabled"]),
+        interval_minutes=int(legacy_config["interval_minutes"]),
+        market_hours_only=False,
+    )
+    return stores
+
+
 def _is_market_hours() -> bool:
     """Check if US stock market is open (9:30-16:00 ET, Mon-Fri)."""
     from zoneinfo import ZoneInfo
@@ -99,12 +139,8 @@ def _is_market_hours() -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_schema(settings.research_database_url)
-    config = _get_scanner_store().ensure_config(
-        enabled=settings.SCAN_ENABLED,
-        interval_minutes=settings.SCAN_INTERVAL_MINUTES,
-        market_hours_only=settings.MARKET_HOURS_ONLY,
-    )
-    _scan_state.update(config)
+    stores = initialize_scanner_stores()
+    _scan_state.update(stores["equity"].get_config())
     logger.info(
         "Durable scanner scheduling is owned by the scanner worker; "
         "the API does not start a background loop"
@@ -187,6 +223,7 @@ class DataQualityResponse(BaseModel):
 
 
 class ScanConfigUpdate(BaseModel):
+    schedule: Literal["all", "equity", "crypto"] = "all"
     enabled: Optional[bool] = None
     interval_minutes: Optional[int] = None
     market_hours_only: Optional[bool] = None
@@ -505,12 +542,21 @@ async def _run_scan(
     *,
     run_id: str | None = None,
     scanner_store: ScannerStore | None = None,
+    asset_types: frozenset[str] | None = None,
+    schedule_name: str = "manual",
 ) -> dict:
     """Scan all active assets for signals and send notifications."""
     now = datetime.now(timezone.utc)
     _scan_state["last_scan_at"] = now.isoformat()
 
     assets = await _fetch_assets()
+    if asset_types is not None:
+        assets = [
+            asset
+            for asset in assets
+            if str(asset.get("asset_type", "stock")).lower()
+            in asset_types
+        ]
     try:
         quality_by_ticker = await _fetch_all_data_quality()
         quality_service_error = None
@@ -757,6 +803,8 @@ async def _run_scan(
         "quality_rejections": quality_rejections,
         "signals": signal_details,
         "timestamp": now.isoformat(),
+        "schedule": schedule_name,
+        "asset_types": sorted(asset_types) if asset_types else ["all"],
     }
     _scan_state["last_scan_result"] = result_summary
     _scan_state["total_scans"] += 1
@@ -784,9 +832,17 @@ async def _run_leased_scan(
     store: ScannerStore,
     run_id: str,
     owner: str,
+    *,
+    asset_types: frozenset[str] | None = None,
+    schedule_name: str = "manual",
 ) -> dict[str, object]:
     scan = asyncio.create_task(
-        _run_scan(run_id=run_id, scanner_store=store)
+        _run_scan(
+            run_id=run_id,
+            scanner_store=store,
+            asset_types=asset_types,
+            schedule_name=schedule_name,
+        )
     )
     heartbeat = asyncio.create_task(
         _lease_heartbeat(store, run_id, owner)
@@ -925,6 +981,145 @@ async def risk_profile(req: AnalyzeRequest):
 
 # --- Phase 1: Scheduled Signal Scanning ---
 
+
+def _latest_scanner_runs() -> list[tuple[str, ScannerStore, dict[str, object]]]:
+    sources = [("manual", _get_scanner_store())]
+    sources.extend(_get_schedule_stores().items())
+    runs = [
+        (name, store, latest)
+        for name, store in sources
+        if (latest := store.latest_completed()) is not None
+    ]
+    return sorted(
+        runs,
+        key=lambda item: str(item[2].get("completed_at") or ""),
+        reverse=True,
+    )
+
+
+def _merge_schedule_results(
+    results: list[dict[str, object]],
+) -> dict[str, object] | None:
+    if not results:
+        return None
+    signals = [
+        signal
+        for result in results
+        for signal in result.get("signals", [])
+        if isinstance(signal, dict)
+    ]
+    signals.sort(
+        key=lambda item: (
+            -float(item.get("score", 0.0)),
+            str(item.get("ticker", "")),
+        )
+    )
+    rejections = [
+        rejection
+        for result in results
+        for rejection in result.get("quality_rejections", [])
+        if isinstance(rejection, dict)
+    ]
+    timestamps = [
+        str(result.get("timestamp"))
+        for result in results
+        if result.get("timestamp")
+    ]
+    return {
+        "scanned": sum(int(result.get("scanned", 0)) for result in results),
+        "signals_found": sum(
+            int(result.get("signals_found", 0)) for result in results
+        ),
+        "notifications_sent": sum(
+            int(result.get("notifications_sent", 0)) for result in results
+        ),
+        "errors": sum(int(result.get("errors", 0)) for result in results),
+        "quality_rejected": sum(
+            int(result.get("quality_rejected", 0)) for result in results
+        ),
+        "quality_rejections": rejections,
+        "signals": signals,
+        "timestamp": max(timestamps) if timestamps else None,
+        "schedule": "asset-schedules",
+        "asset_types": ["crypto", "stock"],
+    }
+
+
+def _scanner_status_payload() -> dict[str, object]:
+    legacy = _get_scanner_store().status()
+    stores = _get_schedule_stores()
+    schedule_statuses = {
+        name: store.status() for name, store in stores.items()
+    }
+    schedule_results = [
+        status["last_scan_result"]
+        for status in schedule_statuses.values()
+        if isinstance(status.get("last_scan_result"), dict)
+    ]
+    latest_schedule_at = max(
+        (
+            str(status.get("last_scan_at"))
+            for status in schedule_statuses.values()
+            if status.get("last_scan_at")
+        ),
+        default="",
+    )
+    legacy_at = str(legacy.get("last_scan_at") or "")
+    if legacy_at > latest_schedule_at and isinstance(
+        legacy.get("last_scan_result"), dict
+    ):
+        latest_result = legacy["last_scan_result"]
+    else:
+        latest_result = _merge_schedule_results(schedule_results)
+    next_times = [
+        str(status["next_scan_at"])
+        for status in schedule_statuses.values()
+        if status.get("next_scan_at")
+    ]
+    run_counts: dict[str, int] = {}
+    for status in [legacy, *schedule_statuses.values()]:
+        for run_status, count in status.get("runs_by_status", {}).items():
+            run_counts[str(run_status)] = (
+                run_counts.get(str(run_status), 0) + int(count)
+            )
+    intervals = [
+        int(status["interval_minutes"])
+        for status in schedule_statuses.values()
+    ]
+    return {
+        "enabled": any(
+            bool(status["enabled"])
+            for status in schedule_statuses.values()
+        ),
+        "interval_minutes": min(intervals),
+        "market_hours_only": True,
+        "last_scan_at": max(legacy_at, latest_schedule_at) or None,
+        "next_scan_at": min(next_times) if next_times else None,
+        "last_scan_result": latest_result,
+        "total_scans": sum(
+            int(status.get("total_scans", 0))
+            for status in [legacy, *schedule_statuses.values()]
+        ),
+        "total_signals_found": sum(
+            int(status.get("total_signals_found", 0))
+            for status in [legacy, *schedule_statuses.values()]
+        ),
+        "runs_by_status": run_counts,
+        "schedules": {
+            "equity": {
+                **schedule_statuses["equity"],
+                "asset_types": ["stock"],
+                "calendar": settings.EQUITY_EXCHANGE_CALENDAR,
+            },
+            "crypto": {
+                **schedule_statuses["crypto"],
+                "asset_types": ["crypto"],
+                "calendar": "24/7",
+            },
+        },
+    }
+
+
 @app.post("/api/scan-all")
 async def scan_all(
     idempotency_key: str | None = Header(
@@ -986,7 +1181,7 @@ async def scan_all(
 @app.get("/api/scanner/status")
 async def scanner_status():
     """Return current scanner configuration and state."""
-    status = _get_scanner_store().status()
+    status = _scanner_status_payload()
     result = status.get("last_scan_result")
     signals = result.get("signals") if isinstance(result, dict) else None
     if isinstance(signals, list):
@@ -1006,22 +1201,33 @@ async def update_opportunity_action(
     request: OpportunityActionRequest,
 ):
     store = _get_scanner_store()
-    latest = store.latest_completed()
-    latest_result = latest.get("result") if latest else None
-    if latest_result is None:
-        latest_result = _scan_state.get("last_scan_result")
-    if not isinstance(latest_result, dict):
+    latest_results = [
+        run["result"]
+        for _name, _run_store, run in _latest_scanner_runs()
+        if isinstance(run.get("result"), dict)
+    ]
+    if not latest_results and isinstance(
+        _scan_state.get("last_scan_result"), dict
+    ):
+        latest_results = [_scan_state["last_scan_result"]]
+    if not latest_results:
         raise HTTPException(404, "Run a scan before managing opportunities")
-    signals = latest_result.get("signals")
-    if not isinstance(signals, list):
-        raise HTTPException(404, "No opportunities are available")
     opportunity: dict[str, object] | None = None
-    for signal in signals:
-        if not isinstance(signal, dict):
+    for latest_result in latest_results:
+        signals = latest_result.get("signals")
+        if not isinstance(signals, list):
             continue
-        candidate = signal.get("opportunity")
-        if isinstance(candidate, dict) and str(candidate.get("id")) == opportunity_id:
-            opportunity = candidate
+        for signal in signals:
+            if not isinstance(signal, dict):
+                continue
+            candidate = signal.get("opportunity")
+            if (
+                isinstance(candidate, dict)
+                and str(candidate.get("id")) == opportunity_id
+            ):
+                opportunity = candidate
+                break
+        if opportunity is not None:
             break
     if opportunity is None:
         raise HTTPException(404, "Opportunity not found in the latest scan")
@@ -1065,17 +1271,30 @@ async def update_opportunity_action(
 @app.post("/api/scanner/config")
 async def update_scanner_config(config: ScanConfigUpdate):
     """Update scanner configuration at runtime."""
+    stores = _get_schedule_stores()
+    targets = (
+        stores.values()
+        if config.schedule == "all"
+        else (stores[config.schedule],)
+    )
     try:
-        durable = _get_scanner_store().update_config(
-            enabled=config.enabled,
-            interval_minutes=config.interval_minutes,
-            market_hours_only=config.market_hours_only,
-        )
+        for target in targets:
+            target.update_config(
+                enabled=config.enabled,
+                interval_minutes=config.interval_minutes,
+            )
+        if config.schedule == "all":
+            _get_scanner_store().update_config(
+                interval_minutes=config.interval_minutes,
+                market_hours_only=config.market_hours_only,
+            )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
+    durable = _scanner_status_payload()
     _scan_state.update(durable)
     return {
         "message": "Scanner config updated",
+        "schedule": config.schedule,
         **durable,
     }
 

@@ -119,6 +119,24 @@ def test_expired_lease_is_recovered_without_duplicate_run(
     assert takeover["attempt_count"] == 2
 
 
+def test_missed_intervals_coalesce_to_one_catch_up_run(
+    tmp_path: Path,
+) -> None:
+    scanner = store(tmp_path)
+    restart = datetime.fromisoformat("2030-01-03T00:00:00+00:00")
+
+    first = scanner.claim_next("worker-restarted", now=restart)
+    second = scanner.claim_next("worker-other", now=restart)
+    config = scanner.get_config()
+
+    assert first is not None
+    assert first["trigger_type"] == "scheduled"
+    assert second is None
+    assert datetime.fromisoformat(
+        str(config["next_run_at"])
+    ) > restart
+
+
 def test_retry_and_idempotency_reuse_same_run(tmp_path: Path) -> None:
     scanner = store(tmp_path)
     scanner.update_config(enabled=False)

@@ -143,3 +143,67 @@ def test_scanner_exposes_rejection_reason_without_notification(monkeypatch: pyte
     assert result["signals"][0]["recommended_size_usd"] == 0
     assert result["signals"][0]["reason"] == "Ticker exposure for MSFT 30.00% exceeds 20.00% limit"
     send_notification.assert_not_awaited()
+
+
+def test_asset_schedule_scans_only_selected_asset_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_scan(monkeypatch, "AAPL")
+    monkeypatch.setattr(
+        main,
+        "_fetch_assets",
+        AsyncMock(
+            return_value=[
+                {
+                    "ticker": "AAPL",
+                    "asset_type": "stock",
+                    "is_active": True,
+                },
+                {
+                    "ticker": "BTC",
+                    "asset_type": "crypto",
+                    "is_active": True,
+                },
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "_fetch_all_data_quality",
+        AsyncMock(
+            return_value={
+                "AAPL": _quality("AAPL"),
+                "BTC": _quality("BTC"),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "_process_signal_via_portfolio",
+        AsyncMock(
+            return_value={
+                "approved": False,
+                "reason": "Deterministic fixture",
+                "risk_decision": {
+                    "action": "rejected",
+                    "approved": False,
+                },
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "_send_notification",
+        AsyncMock(return_value=False),
+    )
+
+    result = asyncio.run(
+        main._run_scan(
+            asset_types=frozenset({"crypto"}),
+            schedule_name="crypto",
+        )
+    )
+
+    assert [signal["ticker"] for signal in result["signals"]] == ["BTC"]
+    assert result["schedule"] == "crypto"
+    assert result["asset_types"] == ["crypto"]
