@@ -2,13 +2,13 @@
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import httpx
 import pandas as pd
 import yfinance as yf
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -16,13 +16,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.credentials import get_provider_credentials
+from app.data_quality import DataQualityReport, assess_data_quality
 from app.database import async_session, get_db
+from app.fake_market import fake_quote
+from app.ingestion import (
+    CRYPTO_NAMES,
+    candle_count,
+    get_binance_symbol,
+    get_crypto_name,
+    load_candle_lineage,
+    load_candles,
+    refresh_asset_data,
+)
 from app.migration_state import validate_schema
 from app.models import Asset, AssetType, Candle, PriceAlert
-from app.data_quality import DataQualityReport, assess_data_quality
-from app.fake_market import fake_quote
-from app.ingestion import candle_count, load_candles, refresh_asset_data
-from app.ingestion import get_binance_symbol, get_crypto_name, CRYPTO_NAMES
 
 CRYPTO_NAMES_SET = set(CRYPTO_NAMES.keys())
 
@@ -427,12 +434,28 @@ async def refresh_all_assets(db: AsyncSession = Depends(get_db)):
     results: dict[str, dict] = {}
     for asset in assets:
         try:
-            await refresh_asset_data(asset.ticker, asset.asset_type)
+            refresh = await refresh_asset_data(
+                asset.ticker,
+                asset.asset_type,
+            )
             df = await load_candles(db, asset.ticker, "1d")
-            results[asset.ticker] = {"status": "success", "candles": len(df)}
+            results[asset.ticker] = {
+                **refresh,
+                "candles": len(df),
+            }
         except Exception as e:
             results[asset.ticker] = {"status": "error", "error": str(e)}
-    return {"refreshed": len([r for r in results.values() if r["status"] == "success"]), "total": len(assets), "details": results}
+    return {
+        "refreshed": len(
+            [
+                refresh
+                for refresh in results.values()
+                if refresh["status"] in {"success", "partial"}
+            ]
+        ),
+        "total": len(assets),
+        "details": results,
+    }
 
 
 @app.delete("/api/assets/{ticker}")
@@ -458,12 +481,23 @@ async def refresh_asset(ticker: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Asset not found")
     if not asset.is_active:
         raise HTTPException(400, "Asset is not active")
-    
+
     try:
-        await refresh_asset_data(asset.ticker, asset.asset_type)
+        refresh = await refresh_asset_data(
+            asset.ticker,
+            asset.asset_type,
+        )
+        if refresh["status"] == "failed":
+            raise HTTPException(502, "Every provider refresh interval failed")
         # Check how many candles were stored
         df = await load_candles(db, asset.ticker, "1d")
-        return {"status": "success", "ticker": ticker.strip().upper(), "candles": len(df)}
+        return {
+            **refresh,
+            "ticker": ticker.strip().upper(),
+            "candles": len(df),
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Failed to refresh data: {str(e)}")
 
@@ -480,6 +514,25 @@ async def get_candles(
         if hasattr(r["timestamp"], "isoformat"):
             r["timestamp"] = r["timestamp"].isoformat()
     return records
+
+
+@app.get("/api/candles/{ticker}/lineage")
+async def get_candle_lineage(
+    ticker: str,
+    interval: str = "1d",
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+):
+    if interval not in {"1d", "4h", "1h"}:
+        raise HTTPException(400, "interval must be one of: 1d, 4h, 1h")
+    if limit < 1 or limit > 1000:
+        raise HTTPException(400, "limit must be between 1 and 1000")
+    return await load_candle_lineage(
+        db,
+        ticker.strip().upper(),
+        interval,
+        limit,
+    )
 
 
 @app.get("/api/symbols/lookup/{ticker}", response_model=SymbolLookupResponse)
@@ -730,8 +783,10 @@ async def refresh_data(ticker: str, db: AsyncSession = Depends(get_db)):
     asset = result.scalar_one_or_none()
     if not asset:
         raise HTTPException(404, "Asset not found")
-    await refresh_asset_data(asset.ticker, asset.asset_type)
-    return {"status": "refreshed", "ticker": ticker.strip().upper()}
+    refresh = await refresh_asset_data(asset.ticker, asset.asset_type)
+    if refresh["status"] == "failed":
+        raise HTTPException(502, "Every provider refresh interval failed")
+    return refresh
 
 
 # --- Phase 3: Price Alerts ---

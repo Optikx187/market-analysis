@@ -42,6 +42,10 @@
       "candles.high",
       "candles.low",
       "candles.close",
+      "candle_revisions.open",
+      "candle_revisions.high",
+      "candle_revisions.low",
+      "candle_revisions.close",
       "price_alerts.threshold",
       "trades.entry_price",
       "trades.exit_price",
@@ -71,6 +75,7 @@
     ],
     "quantity": [
       "candles.volume",
+      "candle_revisions.volume",
       "trades.quantity",
       "trades.planned_quantity",
       "trades.realized_quantity",

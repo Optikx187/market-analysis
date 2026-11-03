@@ -13,7 +13,7 @@ from importer.research import import_research
 from importer.target import Target
 
 EXPECTED_REVISIONS = {
-    "market": "0003_data",
+    "market": "0004_data",
     "research": "0003_research",
     "portfolio": "0002_portfolio",
 }

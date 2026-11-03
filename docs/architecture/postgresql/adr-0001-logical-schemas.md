@@ -43,6 +43,7 @@ implicit.
 | --- | --- |
 | `assets` | Canonical identity in `market_data.instruments`; user tracking state in future `research.watchlists` / `watchlist_items` |
 | `candles` | `market_data.candles` |
+| `candle_revisions` | `market_data.candle_revisions` |
 | `price_alerts` | Future `notifications.alert_rules`, tenant/user scoped and keyed by instrument UUID |
 | `users` | `identity.users`; tenant role in `identity.memberships` |
 | `credential_secrets` | Future `operations.credential_bindings` containing an opaque secret-manager reference, never plaintext |

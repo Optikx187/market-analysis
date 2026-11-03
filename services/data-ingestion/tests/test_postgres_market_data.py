@@ -16,8 +16,12 @@ from app.market_models import (
     providers,
 )
 from app.models import AssetType
-from app.postgres_store import count_candles, load_candles, upsert_candles
-
+from app.postgres_store import (
+    count_candles,
+    load_candle_lineage,
+    load_candles,
+    upsert_candles,
+)
 
 DATABASE_URL = os.environ.get("POSTGRES_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
@@ -223,6 +227,18 @@ def test_provider_revisions_and_freshness_are_retained() -> None:
             assert archived.close_price == Decimal("101.123456789013")
             assert archived.provider_revision == 1
             assert archived.provider_observed_at == refreshed_observation
+            lineage = await load_candle_lineage(
+                session,
+                "BTC",
+                "1d",
+            )
+            assert lineage[0]["provider"] == "fake"
+            assert lineage[0]["provider_revision"] == 2
+            assert lineage[0]["archived_revisions"] == 1
+            assert (
+                lineage[0]["provider_observed_at"]
+                == revised_observation.isoformat()
+            )
         await engine.dispose()
 
     asyncio.run(run())

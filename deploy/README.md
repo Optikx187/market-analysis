@@ -119,6 +119,20 @@ Each service has independent migration state in the shared database:
 `alembic_version_portfolio`. Run every service migration command shown above;
 one service reaching its head does not migrate the other schemas.
 
+Market-data refreshes use a bounded incremental range. Configure overlap and
+outage recovery with `MARKET_DATA_OVERLAP_BARS` and
+`MARKET_DATA_MAX_BACKFILL_BARS`. Provider corrections are retained as candle
+revisions, and `/api/candles/{ticker}/lineage` exposes provider observation
+and ingestion metadata. The SQLite `0004_data` migration adds equivalent
+lineage columns and an archive table; PostgreSQL already has these structures
+and only advances its service-owned migration head.
+
+For application rollback, stop ingestion and restore the verified
+pre-`0004_data` market-data backup before starting a version that expects
+`0003_data`. Do not stamp an active database backward or drop revision
+evidence. Restore the prior overlap/backfill environment values with the
+prior application configuration.
+
 If a fresh target migration fails, stop the overlay, drop the incomplete
 service-owned schema (`market_data`, `research`, or `portfolio`), rerun the
 service migrations, and replay deterministic tests. Do not clean or restore
