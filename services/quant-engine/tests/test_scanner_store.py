@@ -119,6 +119,157 @@ def test_expired_lease_is_recovered_without_duplicate_run(
     assert takeover["attempt_count"] == 2
 
 
+def test_worker_heartbeat_tracks_staleness_and_counters(
+    tmp_path: Path,
+) -> None:
+    scanner = store(tmp_path)
+    start = datetime.fromisoformat("2030-01-01T00:00:00+00:00")
+    scanner.touch_worker(
+        "worker:host-a:101:one",
+        hostname="host-a",
+        process_id=101,
+        status="running",
+        current_run_id="00000000-0000-7000-8000-000000000010",
+        current_scanner_key=scanner.scanner_key,
+        now=start,
+    )
+
+    fresh = scanner.worker_health(
+        now=start + timedelta(seconds=5),
+        stale_after_seconds=30,
+    )[0]
+    stale = scanner.worker_health(
+        now=start + timedelta(seconds=31),
+        stale_after_seconds=30,
+    )[0]
+    scanner.touch_worker(
+        "worker:host-a:101:one",
+        hostname="host-a",
+        process_id=101,
+        status="idle",
+        completed_delta=1,
+        last_run_duration_ms=250,
+        now=start + timedelta(seconds=32),
+    )
+    completed = scanner.worker_health(
+        now=start + timedelta(seconds=33),
+        stale_after_seconds=30,
+    )[0]
+
+    assert fresh["stale"] is False
+    assert fresh["current_scanner_key"] == scanner.scanner_key
+    assert stale["stale"] is True
+    assert completed["status"] == "idle"
+    assert completed["completed_runs"] == 1
+    assert completed["last_run_duration_ms"] == 250
+    assert completed["current_run_id"] is None
+
+
+def test_observability_identifies_lag_expired_leases_and_dead_jobs(
+    tmp_path: Path,
+) -> None:
+    scanner = store(tmp_path)
+    scanner.update_config(enabled=False)
+    now = datetime.fromisoformat("2030-01-01T01:00:00+00:00")
+
+    completed_run = scanner.enqueue_manual(
+        "completed-observed",
+        now=now - timedelta(seconds=100),
+    )
+    completed_claim = scanner.claim_run(
+        str(completed_run["run_id"]),
+        "worker-complete",
+        now=now - timedelta(seconds=100),
+    )
+    assert completed_claim is not None
+    scanner.complete(
+        str(completed_run["run_id"]),
+        "worker-complete",
+        {
+            "signals_found": 2,
+            "signals": [],
+            "provider_metrics": {
+                "data-ingestion": {
+                    "calls": 4,
+                    "errors": 1,
+                    "total_latency_ms": 80,
+                    "max_latency_ms": 30,
+                }
+            },
+        },
+        now=now - timedelta(seconds=95),
+    )
+
+    dead_run = scanner.enqueue_manual(
+        "dead-observed",
+        now=now - timedelta(seconds=90),
+    )
+    for offset in (90, 80, 70):
+        owner = f"worker-dead-{offset}"
+        claimed = scanner.claim_run(
+            str(dead_run["run_id"]),
+            owner,
+            now=now - timedelta(seconds=offset),
+            max_attempts=3,
+        )
+        assert claimed is not None
+        scanner.fail(
+            str(dead_run["run_id"]),
+            owner,
+            "deterministic failure",
+            now=now - timedelta(seconds=offset),
+            retry_seconds=0,
+        )
+
+    scanner.enqueue_manual(
+        "lagged-observed",
+        now=now - timedelta(seconds=600),
+    )
+    expired_run = scanner.enqueue_manual(
+        "expired-observed",
+        now=now - timedelta(seconds=60),
+    )
+    assert scanner.claim_run(
+        str(expired_run["run_id"]),
+        "worker-expired",
+        now=now - timedelta(seconds=60),
+        lease_seconds=10,
+    )
+
+    metrics = scanner.observability(
+        now=now,
+        window_minutes=15,
+        max_attempts=3,
+    )
+
+    assert metrics["queue"]["depth"] == 1
+    assert metrics["queue"]["oldest_age_seconds"] == 600
+    assert metrics["leases"] == {"running": 1, "expired": 1}
+    assert metrics["dead_jobs"] == 1
+    assert metrics["throughput"]["completed"] == 1
+    assert metrics["throughput"]["failed"] == 1
+    assert metrics["throughput"]["error_rate_pct"] == 50
+    assert metrics["duration_ms"]["p95"] == 5000
+    assert metrics["slowest_runs"][0] == {
+        "correlation_id": completed_run["run_id"],
+        "run_id": completed_run["run_id"],
+        "duration_ms": 5000.0,
+        "scanned": 0,
+    }
+    assert metrics["provider_metrics"]["data-ingestion"] == {
+        "calls": 4,
+        "errors": 1,
+        "average_latency_ms": 20.0,
+        "max_latency_ms": 30.0,
+    }
+    assert {
+        problem["run_id"] for problem in metrics["problem_runs"]
+    } == {
+        dead_run["run_id"],
+        expired_run["run_id"],
+    }
+
+
 def test_missed_intervals_coalesce_to_one_catch_up_run(
     tmp_path: Path,
 ) -> None:

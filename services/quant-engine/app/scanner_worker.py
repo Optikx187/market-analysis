@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import socket
+import time
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -29,12 +31,46 @@ logger = logging.getLogger(__name__)
 UTC_ZONE = ZoneInfo("UTC")
 
 
+def _worker_process(worker_id: str) -> tuple[str, int]:
+    parts = worker_id.split(":")
+    if len(parts) >= 4 and parts[0] == "worker":
+        try:
+            return parts[1], int(parts[2])
+        except ValueError:
+            pass
+    return socket.gethostname(), os.getpid()
+
+
+def _log_event(event: str, **fields: object) -> None:
+    logger.info(
+        json.dumps(
+            {"event": event, **fields},
+            sort_keys=True,
+            default=str,
+        )
+    )
+
+
+def _touch_worker(
+    store: ScannerStore,
+    worker_id: str,
+    **values: object,
+) -> None:
+    try:
+        store.touch_worker(worker_id, **values)
+    except Exception:
+        logger.exception(
+            "Scanner worker heartbeat update failed for %s",
+            worker_id,
+        )
+
+
 async def _run_claimed(
     store: ScannerStore,
     claimed: dict[str, object],
     owner: str,
     schedule: AssetSchedule,
-) -> None:
+) -> dict[str, object]:
     run_id = str(claimed["run_id"])
     result = await _run_leased_scan(
         store,
@@ -43,12 +79,7 @@ async def _run_claimed(
         asset_types=schedule.asset_types,
         schedule_name=schedule.name,
     )
-    logger.info(
-        "Scanner run %s completed: %s scanned, %s signals",
-        run_id,
-        result["scanned"],
-        result["signals_found"],
-    )
+    return result
 
 
 async def run_once(
@@ -79,11 +110,54 @@ async def run_once(
     if claimed is None:
         return False
     run_id = str(claimed["run_id"])
+    hostname, process_id = _worker_process(owner)
+    started = time.perf_counter()
+    if owner.startswith("worker:"):
+        _touch_worker(
+            store,
+            owner,
+            hostname=hostname,
+            process_id=process_id,
+            status="running",
+            current_run_id=run_id,
+            current_scanner_key=store.scanner_key,
+            now=current,
+        )
+    _log_event(
+        "scanner_run_claimed",
+        worker_id=owner,
+        correlation_id=run_id,
+        scanner_key=store.scanner_key,
+        schedule=schedule.name,
+        attempt_count=claimed["attempt_count"],
+    )
     try:
-        await _run_claimed(store, claimed, owner, schedule)
+        result = await _run_claimed(store, claimed, owner, schedule)
+        duration_ms = round((time.perf_counter() - started) * 1000)
+        if owner.startswith("worker:"):
+            _touch_worker(
+                store,
+                owner,
+                hostname=hostname,
+                process_id=process_id,
+                status="idle",
+                completed_delta=1,
+                last_run_duration_ms=duration_ms,
+            )
+        _log_event(
+            "scanner_run_completed",
+            worker_id=owner,
+            correlation_id=run_id,
+            scanner_key=store.scanner_key,
+            schedule=schedule.name,
+            duration_ms=duration_ms,
+            scanned=result["scanned"],
+            signals_found=result["signals_found"],
+        )
     except asyncio.CancelledError:
         raise
     except Exception as error:
+        duration_ms = round((time.perf_counter() - started) * 1000)
         logger.exception("Scanner run %s failed", run_id)
         try:
             store.fail(
@@ -99,6 +173,26 @@ async def run_once(
                 run_id,
                 owner,
             )
+        if owner.startswith("worker:"):
+            _touch_worker(
+                store,
+                owner,
+                hostname=hostname,
+                process_id=process_id,
+                status="error",
+                failed_delta=1,
+                last_run_duration_ms=duration_ms,
+                last_error=str(error),
+            )
+        _log_event(
+            "scanner_run_failed",
+            worker_id=owner,
+            correlation_id=run_id,
+            scanner_key=store.scanner_key,
+            schedule=schedule.name,
+            duration_ms=duration_ms,
+            error=str(error),
+        )
     return True
 
 
@@ -116,39 +210,74 @@ async def run_worker() -> None:
     )
     manual_store = _get_scanner_store()
     owner = f"worker:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4()}"
-    logger.info("Scanner worker started as %s", owner)
-    while True:
-        worked = False
-        try:
-            worked = await run_once(
-                manual_store,
-                owner,
-                manual_schedule,
-                allow_schedule_creation=False,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Scanner worker manual recovery polling failed")
-        for schedule in definitions:
+    hostname = socket.gethostname()
+    process_id = os.getpid()
+    _touch_worker(
+        manual_store,
+        owner,
+        hostname=hostname,
+        process_id=process_id,
+        status="idle",
+    )
+    _log_event(
+        "scanner_worker_started",
+        worker_id=owner,
+        hostname=hostname,
+        process_id=process_id,
+    )
+    try:
+        while True:
+            worked = False
             try:
-                worked = (
-                    await run_once(
-                        stores[schedule.name],
-                        owner,
-                        schedule,
-                    )
-                    or worked
+                worked = await run_once(
+                    manual_store,
+                    owner,
+                    manual_schedule,
+                    allow_schedule_creation=False,
                 )
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception(
-                    "Scanner worker polling failed for %s",
-                    schedule.name,
+                    "Scanner worker manual recovery polling failed"
                 )
-        if not worked:
-            await asyncio.sleep(settings.SCANNER_WORKER_POLL_SECONDS)
+            for schedule in definitions:
+                try:
+                    worked = (
+                        await run_once(
+                            stores[schedule.name],
+                            owner,
+                            schedule,
+                        )
+                        or worked
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Scanner worker polling failed for %s",
+                        schedule.name,
+                    )
+            if not worked:
+                _touch_worker(
+                    manual_store,
+                    owner,
+                    hostname=hostname,
+                    process_id=process_id,
+                    status="idle",
+                )
+                await asyncio.sleep(
+                    settings.SCANNER_WORKER_POLL_SECONDS
+                )
+    finally:
+        _touch_worker(
+            manual_store,
+            owner,
+            hostname=hostname,
+            process_id=process_id,
+            status="stopped",
+        )
+        _log_event("scanner_worker_stopped", worker_id=owner)
 
 
 def main() -> None:

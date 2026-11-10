@@ -64,6 +64,7 @@ implicit.
 | `live_order_fills` | `portfolio.live_order_fills` |
 | `live_execution_audit` | Future `portfolio.live_execution_audit` plus security events in `operations.audit_events` |
 | `backtest_runs` SQLite store | `research.backtest_runs`; oversized result payloads use `research.backtest_artifacts` references |
+| `scanner_worker_heartbeats` | `research.scanner_worker_heartbeats`; ephemeral worker health re-registers after cutover |
 
 The future-table labels are part of this contract even where the executable
 prototype omits low-volume detail tables. Issues #91 through #93 added the
@@ -111,9 +112,10 @@ alerts do not belong in this global schema.
 `backtest_runs` preserves the existing dedicated research-history boundary.
 Completed backtest runs are immutable evidence. `scanner_configs`,
 `scanner_runs`, `scanner_opportunity_actions`, and
-`scanner_notification_receipts` provide the mutable scheduling, lease,
-retry, user-decision, and producer-side idempotency boundary used by dedicated
-scanner workers.
+`scanner_notification_receipts` provide the mutable scheduling, lease, retry,
+user-decision, and producer-side idempotency boundary used by dedicated
+scanner workers. `scanner_worker_heartbeats` records active ownership and
+capacity counters without becoming execution evidence.
 
 ### Portfolio
 

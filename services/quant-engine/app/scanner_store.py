@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,22 @@ def _decoded(value: object) -> object:
     return json.loads(value) if isinstance(value, str) else value
 
 
+def _parsed_time(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return _utc(value)
+    return _utc(datetime.fromisoformat(str(value)))
+
+
+def _percentile(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, math.ceil(percentile * len(ordered)) - 1)
+    return round(ordered[index], 3)
+
+
 class ScannerStore:
     def __init__(
         self,
@@ -93,6 +110,11 @@ class ScannerStore:
             "research.scanner_notification_receipts"
             if self.postgresql
             else "scanner_notification_receipts"
+        )
+        self.worker_table = (
+            "research.scanner_worker_heartbeats"
+            if self.postgresql
+            else "scanner_worker_heartbeats"
         )
         validate_schema(self.database_url)
 
@@ -877,6 +899,410 @@ class ScannerStore:
                 self._params(),
             ).mappings().one_or_none()
         return self._run_payload(row) if row else None
+
+    def touch_worker(
+        self,
+        worker_id: str,
+        *,
+        hostname: str,
+        process_id: int,
+        status: str,
+        current_run_id: str | None = None,
+        current_scanner_key: str | None = None,
+        completed_delta: int = 0,
+        failed_delta: int = 0,
+        last_run_duration_ms: int | None = None,
+        last_error: str | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        if status not in {"idle", "running", "error", "stopped"}:
+            raise ValueError("Unknown scanner worker status")
+        if completed_delta < 0 or failed_delta < 0:
+            raise ValueError("Worker counter deltas must not be negative")
+        current = _utc(now)
+        values = {
+            "tenant_id": self.tenant_id,
+            "user_key": self.user_key,
+            "worker_id": worker_id,
+            "hostname": hostname,
+            "process_id": process_id,
+            "status": status,
+            "started_at": current if self.postgresql else current.isoformat(),
+            "last_seen_at": (
+                current if self.postgresql else current.isoformat()
+            ),
+            "current_run_id": current_run_id,
+            "current_scanner_key": current_scanner_key,
+            "completed_delta": completed_delta,
+            "failed_delta": failed_delta,
+            "last_run_duration_ms": last_run_duration_ms,
+            "last_error": last_error[:2000] if last_error else None,
+        }
+        run_id = (
+            "CAST(:current_run_id AS UUID)"
+            if self.postgresql
+            else ":current_run_id"
+        )
+        if self.postgresql:
+            statement = f"""
+                INSERT INTO {self.worker_table} (
+                    tenant_id, user_key, worker_id, hostname, process_id,
+                    status, started_at, last_seen_at, current_run_id,
+                    current_scanner_key, completed_runs, failed_runs,
+                    last_run_duration_ms, last_error
+                ) VALUES (
+                    {self._tenant()}, :user_key, :worker_id, :hostname,
+                    :process_id, :status, {self._time("started_at")},
+                    {self._time("last_seen_at")}, {run_id},
+                    :current_scanner_key, :completed_delta, :failed_delta,
+                    :last_run_duration_ms, :last_error
+                )
+                ON CONFLICT (tenant_id, user_key, worker_id)
+                DO UPDATE SET
+                    hostname = EXCLUDED.hostname,
+                    process_id = EXCLUDED.process_id,
+                    status = EXCLUDED.status,
+                    last_seen_at = EXCLUDED.last_seen_at,
+                    current_run_id = EXCLUDED.current_run_id,
+                    current_scanner_key = EXCLUDED.current_scanner_key,
+                    completed_runs = {self.worker_table}.completed_runs
+                        + :completed_delta,
+                    failed_runs = {self.worker_table}.failed_runs
+                        + :failed_delta,
+                    last_run_duration_ms = COALESCE(
+                        EXCLUDED.last_run_duration_ms,
+                        {self.worker_table}.last_run_duration_ms
+                    ),
+                    last_error = EXCLUDED.last_error
+            """
+        else:
+            statement = f"""
+                INSERT INTO {self.worker_table} (
+                    tenant_id, user_key, worker_id, hostname, process_id,
+                    status, started_at, last_seen_at, current_run_id,
+                    current_scanner_key, completed_runs, failed_runs,
+                    last_run_duration_ms, last_error
+                ) VALUES (
+                    :tenant_id, :user_key, :worker_id, :hostname,
+                    :process_id, :status, :started_at, :last_seen_at,
+                    {run_id}, :current_scanner_key, :completed_delta,
+                    :failed_delta, :last_run_duration_ms, :last_error
+                )
+                ON CONFLICT (tenant_id, user_key, worker_id)
+                DO UPDATE SET
+                    hostname = excluded.hostname,
+                    process_id = excluded.process_id,
+                    status = excluded.status,
+                    last_seen_at = excluded.last_seen_at,
+                    current_run_id = excluded.current_run_id,
+                    current_scanner_key = excluded.current_scanner_key,
+                    completed_runs = completed_runs + :completed_delta,
+                    failed_runs = failed_runs + :failed_delta,
+                    last_run_duration_ms = COALESCE(
+                        excluded.last_run_duration_ms,
+                        last_run_duration_ms
+                    ),
+                    last_error = excluded.last_error
+            """
+        with self.engine.begin() as connection:
+            connection.execute(text(statement), values)
+
+    def worker_health(
+        self,
+        *,
+        now: datetime | None = None,
+        stale_after_seconds: int = 30,
+    ) -> list[dict[str, object]]:
+        current = _utc(now)
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    f"""
+                    SELECT *
+                    FROM {self.worker_table}
+                    WHERE tenant_id = {self._tenant()}
+                      AND user_key = :user_key
+                    ORDER BY last_seen_at DESC, worker_id
+                    LIMIT 100
+                    """
+                ),
+                self._params(),
+            ).mappings().all()
+        workers = []
+        for row in rows:
+            last_seen = _parsed_time(row["last_seen_at"])
+            age_seconds = (
+                max(0.0, (current - last_seen).total_seconds())
+                if last_seen is not None
+                else None
+            )
+            stopped = str(row["status"]) == "stopped"
+            workers.append(
+                {
+                    "worker_id": str(row["worker_id"]),
+                    "hostname": str(row["hostname"]),
+                    "process_id": int(row["process_id"]),
+                    "status": str(row["status"]),
+                    "started_at": str(row["started_at"]),
+                    "last_seen_at": str(row["last_seen_at"]),
+                    "heartbeat_age_seconds": (
+                        round(age_seconds, 3)
+                        if age_seconds is not None
+                        else None
+                    ),
+                    "stale": (
+                        not stopped
+                        and age_seconds is not None
+                        and age_seconds >= stale_after_seconds
+                    ),
+                    "current_run_id": (
+                        str(row["current_run_id"])
+                        if row["current_run_id"] is not None
+                        else None
+                    ),
+                    "current_scanner_key": row["current_scanner_key"],
+                    "completed_runs": int(row["completed_runs"]),
+                    "failed_runs": int(row["failed_runs"]),
+                    "last_run_duration_ms": (
+                        int(row["last_run_duration_ms"])
+                        if row["last_run_duration_ms"] is not None
+                        else None
+                    ),
+                    "last_error": row["last_error"],
+                }
+            )
+        return workers
+
+    def observability(
+        self,
+        *,
+        now: datetime | None = None,
+        window_minutes: int = 15,
+        max_attempts: int = 3,
+        sample_limit: int = 1000,
+    ) -> dict[str, object]:
+        current = _utc(now)
+        window_start = current - timedelta(minutes=window_minutes)
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    f"""
+                    SELECT *
+                    FROM {self.run_table}
+                    WHERE tenant_id = {self._tenant()}
+                      AND user_key = :user_key
+                      AND scanner_key = :scanner_key
+                    ORDER BY created_at DESC
+                    LIMIT :sample_limit
+                    """
+                ),
+                {**self._params(), "sample_limit": sample_limit},
+            ).mappings().all()
+        runs = [self._run_payload(row) for row in rows]
+        pending = [
+            run
+            for run in runs
+            if run["status"] == "queued"
+            or (
+                run["status"] == "failed"
+                and int(run["attempt_count"]) < max_attempts
+            )
+        ]
+        running = [run for run in runs if run["status"] == "running"]
+        dead = [
+            run
+            for run in runs
+            if run["status"] == "failed"
+            and int(run["attempt_count"]) >= max_attempts
+        ]
+        expired = [
+            run
+            for run in running
+            if (
+                (lease := _parsed_time(run["lease_expires_at"])) is not None
+                and lease <= current
+            )
+        ]
+        recent = [
+            run
+            for run in runs
+            if (
+                (updated := _parsed_time(run["updated_at"])) is not None
+                and updated >= window_start
+            )
+        ]
+        completed = [run for run in recent if run["status"] == "completed"]
+        failed = [run for run in recent if run["status"] == "failed"]
+        durations_ms = [
+            (completed_at - started_at).total_seconds() * 1000
+            for run in completed
+            if (started_at := _parsed_time(run["started_at"])) is not None
+            and (completed_at := _parsed_time(run["completed_at"])) is not None
+        ]
+        provider_metrics: dict[str, dict[str, float]] = {}
+        for run in completed:
+            result = run.get("result")
+            if not isinstance(result, dict):
+                continue
+            metrics = result.get("provider_metrics")
+            if not isinstance(metrics, dict):
+                continue
+            for provider, observed in metrics.items():
+                if not isinstance(observed, dict):
+                    continue
+                aggregate = provider_metrics.setdefault(
+                    str(provider),
+                    {
+                        "calls": 0.0,
+                        "errors": 0.0,
+                        "total_latency_ms": 0.0,
+                        "max_latency_ms": 0.0,
+                    },
+                )
+                aggregate["calls"] += float(observed.get("calls", 0))
+                aggregate["errors"] += float(observed.get("errors", 0))
+                aggregate["total_latency_ms"] += float(
+                    observed.get("total_latency_ms", 0)
+                )
+                aggregate["max_latency_ms"] = max(
+                    aggregate["max_latency_ms"],
+                    float(observed.get("max_latency_ms", 0)),
+                )
+        serialized_provider_metrics = {}
+        for provider, values in provider_metrics.items():
+            calls = values["calls"]
+            serialized_provider_metrics[provider] = {
+                "calls": int(calls),
+                "errors": int(values["errors"]),
+                "average_latency_ms": (
+                    round(values["total_latency_ms"] / calls, 3)
+                    if calls
+                    else 0.0
+                ),
+                "max_latency_ms": round(values["max_latency_ms"], 3),
+            }
+        queue_ages = [
+            max(
+                0.0,
+                (
+                    current
+                    - (
+                        _parsed_time(run["scheduled_for"])
+                        or _parsed_time(run["created_at"])
+                        or current
+                    )
+                ).total_seconds(),
+            )
+            for run in pending
+        ]
+        oldest_pending = max(
+            zip(queue_ages, pending),
+            key=lambda item: item[0],
+            default=None,
+        )
+        outcome_count = len(completed) + len(failed)
+        problem_runs = {
+            str(run["run_id"]): {
+                "correlation_id": run["run_id"],
+                "run_id": run["run_id"],
+                "status": run["status"],
+                "attempt_count": run["attempt_count"],
+                "lease_owner": run["lease_owner"],
+                "lease_expires_at": run["lease_expires_at"],
+                "error": run["error"],
+                "dead": run in dead,
+            }
+            for run in [*expired, *failed]
+        }
+        slowest_runs = []
+        for run in completed:
+            started_at = _parsed_time(run["started_at"])
+            completed_at = _parsed_time(run["completed_at"])
+            if started_at is None or completed_at is None:
+                continue
+            result = run.get("result")
+            slowest_runs.append(
+                {
+                    "correlation_id": run["run_id"],
+                    "run_id": run["run_id"],
+                    "duration_ms": round(
+                        (completed_at - started_at).total_seconds() * 1000,
+                        3,
+                    ),
+                    "scanned": (
+                        int(result.get("scanned", 0))
+                        if isinstance(result, dict)
+                        else 0
+                    ),
+                }
+            )
+        slowest_runs.sort(
+            key=lambda run: float(run["duration_ms"]),
+            reverse=True,
+        )
+        idempotency_keys = [
+            str(run["idempotency_key"]) for run in runs
+        ]
+        return {
+            "scanner_key": self.scanner_key,
+            "window_minutes": window_minutes,
+            "queue": {
+                "depth": len(pending),
+                "ready": sum(
+                    1
+                    for run in pending
+                    if (
+                        (available := _parsed_time(run["available_at"]))
+                        is not None
+                        and available <= current
+                    )
+                ),
+                "oldest_age_seconds": (
+                    round(max(queue_ages), 3) if queue_ages else 0.0
+                ),
+                "oldest_correlation_id": (
+                    oldest_pending[1]["run_id"]
+                    if oldest_pending is not None
+                    else None
+                ),
+            },
+            "leases": {
+                "running": len(running),
+                "expired": len(expired),
+            },
+            "throughput": {
+                "completed": len(completed),
+                "failed": len(failed),
+                "runs_per_minute": round(
+                    len(completed) / window_minutes,
+                    3,
+                ),
+                "error_rate_pct": round(
+                    len(failed) / outcome_count * 100,
+                    3,
+                )
+                if outcome_count
+                else 0.0,
+                "retry_attempts": sum(
+                    max(0, int(run["attempt_count"]) - 1)
+                    for run in recent
+                ),
+            },
+            "duration_ms": {
+                "p50": _percentile(durations_ms, 0.5),
+                "p95": _percentile(durations_ms, 0.95),
+                "max": round(max(durations_ms), 3)
+                if durations_ms
+                else None,
+            },
+            "provider_metrics": serialized_provider_metrics,
+            "dead_jobs": len(dead),
+            "duplicate_idempotency_keys": (
+                len(idempotency_keys) - len(set(idempotency_keys))
+            ),
+            "problem_runs": list(problem_runs.values()),
+            "slowest_runs": slowest_runs[:10],
+        }
 
     def status(self) -> dict[str, object]:
         config = self.get_config()

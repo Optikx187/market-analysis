@@ -40,9 +40,14 @@ Each key has independent cadence and enablement through
 `POST /api/scanner/config`. Missed intervals are bounded to one coalesced
 catch-up run rather than replaying an unbounded backlog.
 
-The `0003_research` migration is additive. SQLite-to-PostgreSQL import carries
-scanner configuration, completed/in-flight runs, actions, and receipts with
-the research store. To roll back the application version, stop scanner
+The `0003_research` and `0004_research` migrations are additive.
+`0004_research` records worker heartbeat, current correlation/run ID, counters,
+duration, and last failure. `/api/scanner/observability` combines this with
+durable queue/lease metrics and configured lag/error alerts. SQLite-to-
+PostgreSQL import carries scanner configuration, completed/in-flight runs,
+actions, and receipts with the research store. Heartbeats are intentionally
+not imported; live workers register fresh health rows after cutover. To roll
+back the application version, stop scanner
 workers and restore the verified pre-migration research backup; do not
 downgrade the live schema destructively.
 

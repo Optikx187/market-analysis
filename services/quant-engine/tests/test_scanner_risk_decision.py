@@ -112,6 +112,12 @@ def test_scanner_notifies_with_risk_recommended_size(monkeypatch: pytest.MonkeyP
     assert result["signals"][0]["action"] == "reduced"
     assert result["signals"][0]["recommended_size_usd"] == 1_000
     assert result["signals"][0]["score"] >= 50
+    assert result["correlation_id"].startswith("scan:")
+    assert result["duration_ms"] >= 0
+    assert result["provider_metrics"]["data-ingestion"]["calls"] == 6
+    assert result["provider_metrics"]["data-ingestion"]["errors"] == 0
+    assert result["provider_metrics"]["portfolio-engine"]["calls"] == 1
+    assert result["provider_metrics"]["notification-gateway"]["calls"] == 1
     assert send_notification.await_args.args[0]["optimal_size_usd"] == 1_000
 
 

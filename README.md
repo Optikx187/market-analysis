@@ -231,6 +231,14 @@ after a worker stops. Set `QUANT_WORKER_REPLICAS` to change the worker count.
 Use PostgreSQL before multi-host deployment. Durable notification outboxes and
 broker transport remain separate roadmap work.
 
+Worker health and capacity are available from
+`GET /api/scanner/observability`: queue depth/age, leases, dead jobs,
+throughput, duration percentiles, downstream latency/errors, correlation IDs,
+and heartbeat freshness. Default lag/error thresholds are configurable through
+the `SCANNER_*` settings documented in `.env.example`. See
+[`docs/operations/scanner-worker-capacity.md`](docs/operations/scanner-worker-capacity.md)
+for the deterministic two-worker failover and 250-ticker baseline.
+
 ### Profile rollback
 
 Stop the selected profile without `--volumes`, then start the prior profile.
@@ -1004,6 +1012,7 @@ Check:
 
 ```bash
 curl http://localhost:3000/api/scanner/status
+curl http://localhost:3000/api/scanner/observability
 docker compose logs quant-engine quant-scanner-worker
 ```
 
@@ -1016,9 +1025,11 @@ Review:
 - data eligibility;
 - the `schedules.equity` and `schedules.crypto` status entries.
 
-The status payload includes durable queued/running/failed counts. A `running`
-run with an expired lease is recoverable by another worker. Repeated failures
-stop after `SCANNER_MAX_ATTEMPTS` and remain visible for operator review.
+The observability payload identifies stale workers, lagged correlation IDs,
+expired leases, dead jobs, slow runs, downstream latency/errors, throughput,
+and active alert thresholds. A `running` run with an expired lease is
+recoverable by another worker. Repeated failures stop after
+`SCANNER_MAX_ATTEMPTS` and remain visible for operator review.
 
 ### Notification test fails
 

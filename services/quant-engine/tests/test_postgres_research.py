@@ -254,6 +254,35 @@ def test_postgresql_scanner_claims_are_concurrent_and_tenant_scoped() -> None:
     assert recovered is not None
     assert recovered["run_id"] == abandoned["run_id"]
     assert recovered["attempt_count"] == 2
+    alice.touch_worker(
+        "worker:postgres:101:alice",
+        hostname="postgres",
+        process_id=101,
+        status="running",
+        current_run_id=str(recovered["run_id"]),
+        current_scanner_key=alice.scanner_key,
+        now=takeover_start + timedelta(seconds=11),
+    )
+    bob.touch_worker(
+        "worker:postgres:202:bob",
+        hostname="postgres",
+        process_id=202,
+        status="idle",
+        now=takeover_start + timedelta(seconds=11),
+    )
+    alice_workers = alice.worker_health(
+        now=takeover_start + timedelta(seconds=12),
+    )
+    assert [worker["worker_id"] for worker in alice_workers] == [
+        "worker:postgres:101:alice"
+    ]
+    assert alice_workers[0]["current_run_id"] == recovered["run_id"]
+    observed = alice.observability(
+        now=takeover_start + timedelta(seconds=22),
+        max_attempts=3,
+    )
+    assert observed["leases"]["expired"] == 1
+    assert observed["problem_runs"][0]["correlation_id"] == recovered["run_id"]
 
     alice.save_action(
         "BTC:BUY",
