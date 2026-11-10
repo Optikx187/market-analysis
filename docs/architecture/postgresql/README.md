@@ -64,6 +64,9 @@ notification receipts. The API owns no scheduler loop. Dedicated
 `SKIP LOCKED`; the SQLite transition profile uses serialized
 `BEGIN IMMEDIATE` claims for a simple single-host installation. Research
 import preserves this scanner state during a later PostgreSQL cutover.
+The additive `0004_research` migration records scanner-worker heartbeats and
+current lease correlation so multi-worker health remains visible across API
+and worker restarts.
 
 The operations implementation is `tools/postgresql-operations/`, exposed
 through the `manage postgres-*` commands. It provides extension-free logical

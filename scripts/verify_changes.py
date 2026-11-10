@@ -152,7 +152,7 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
         ),
         "quant-engine": Job(
             "quant-engine",
-            "Run quant-engine tests and PostgreSQL research verification.",
+            "Run quant tests, PostgreSQL verification, and worker failover.",
             (
                 command(
                     PYTHON,
@@ -164,6 +164,7 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
                     environment=pytest_environment,
                 ),
                 command(PYTHON, "scripts/verify_postgresql_research.py"),
+                command(PYTHON, "scripts/verify_scanner_failover.py"),
             ),
         ),
         "portfolio-engine": Job(

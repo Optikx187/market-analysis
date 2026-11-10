@@ -5,10 +5,11 @@ import hashlib
 import logging
 import os
 import socket
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Optional
+from typing import Awaitable, Callable, Literal, Optional, TypeVar
 
 import httpx
 import pandas as pd
@@ -41,6 +42,8 @@ from app.regimes import (
 from app.risk_engine import evaluate_risk_profile
 from app.scanner_store import ScannerStore
 from app.signals import evaluate_signals
+
+T = TypeVar("T")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -347,15 +350,101 @@ def _backtest_input_lineage(
     }
 
 
+def _observe_service_call(
+    metrics: dict[str, dict[str, float]],
+    service: str,
+    elapsed_ms: float,
+    *,
+    failed: bool,
+) -> None:
+    observed = metrics.setdefault(
+        service,
+        {
+            "calls": 0.0,
+            "errors": 0.0,
+            "total_latency_ms": 0.0,
+            "max_latency_ms": 0.0,
+        },
+    )
+    observed["calls"] += 1
+    observed["errors"] += int(failed)
+    observed["total_latency_ms"] += elapsed_ms
+    observed["max_latency_ms"] = max(
+        observed["max_latency_ms"],
+        elapsed_ms,
+    )
+
+
+async def _timed_service_call(
+    metrics: dict[str, dict[str, float]],
+    service: str,
+    request: Awaitable[T],
+    *,
+    failed: Callable[[T], bool] | None = None,
+) -> T:
+    started = time.perf_counter()
+    try:
+        result = await request
+    except Exception:
+        _observe_service_call(
+            metrics,
+            service,
+            (time.perf_counter() - started) * 1000,
+            failed=True,
+        )
+        raise
+    _observe_service_call(
+        metrics,
+        service,
+        (time.perf_counter() - started) * 1000,
+        failed=failed(result) if failed else False,
+    )
+    return result
+
+
+def _serialize_service_metrics(
+    metrics: dict[str, dict[str, float]],
+) -> dict[str, dict[str, float | int]]:
+    serialized = {}
+    for service, observed in metrics.items():
+        calls = observed["calls"]
+        serialized[service] = {
+            "calls": int(calls),
+            "errors": int(observed["errors"]),
+            "total_latency_ms": round(
+                observed["total_latency_ms"],
+                3,
+            ),
+            "average_latency_ms": (
+                round(observed["total_latency_ms"] / calls, 3)
+                if calls
+                else 0.0
+            ),
+            "max_latency_ms": round(observed["max_latency_ms"], 3),
+        }
+    return serialized
+
+
 async def _fetch_timeframe_frames(
     ticker: str,
     timeframes: list[str] | None = None,
+    metrics: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, pd.DataFrame]:
     requested = list(dict.fromkeys(timeframes or ["1d", "4h", "1h"]))
 
     async def fetch_one(timeframe: str) -> tuple[str, pd.DataFrame]:
         try:
-            return timeframe, await fetch_candles_from_service_a(ticker, timeframe)
+            request = fetch_candles_from_service_a(ticker, timeframe)
+            frame = (
+                await _timed_service_call(
+                    metrics,
+                    "data-ingestion",
+                    request,
+                )
+                if metrics is not None
+                else await request
+            )
+            return timeframe, frame
         except Exception as error:
             logger.warning(f"{timeframe} candles unavailable for {ticker}: {error}")
             return timeframe, pd.DataFrame()
@@ -546,10 +635,17 @@ async def _run_scan(
     schedule_name: str = "manual",
 ) -> dict:
     """Scan all active assets for signals and send notifications."""
+    scan_started = time.perf_counter()
     now = datetime.now(timezone.utc)
+    correlation_id = run_id or f"scan:{uuid.uuid4()}"
+    service_metrics: dict[str, dict[str, float]] = {}
     _scan_state["last_scan_at"] = now.isoformat()
 
-    assets = await _fetch_assets()
+    assets = await _timed_service_call(
+        service_metrics,
+        "data-ingestion",
+        _fetch_assets(),
+    )
     if asset_types is not None:
         assets = [
             asset
@@ -558,13 +654,21 @@ async def _run_scan(
             in asset_types
         ]
     try:
-        quality_by_ticker = await _fetch_all_data_quality()
+        quality_by_ticker = await _timed_service_call(
+            service_metrics,
+            "data-ingestion",
+            _fetch_all_data_quality(),
+        )
         quality_service_error = None
     except Exception as e:
         logger.error(f"Data quality unavailable for scan: {e}")
         quality_by_ticker = {}
         quality_service_error = "Data quality service unavailable"
-    earnings_by_ticker = await _fetch_upcoming_earnings()
+    earnings_by_ticker = await _timed_service_call(
+        service_metrics,
+        "data-ingestion",
+        _fetch_upcoming_earnings(),
+    )
     scanned = 0
     signals_found = 0
     notifications_sent = 0
@@ -582,7 +686,11 @@ async def _run_scan(
     async def fetch_daily(asset: dict[str, object]) -> tuple[str, pd.DataFrame]:
         ticker = str(asset.get("ticker", ""))
         try:
-            return ticker, await fetch_candles_from_service_a(ticker)
+            return ticker, await _timed_service_call(
+                service_metrics,
+                "data-ingestion",
+                fetch_candles_from_service_a(ticker),
+            )
         except Exception as error:
             logger.warning(f"Daily candles unavailable for {ticker}: {error}")
             return ticker, pd.DataFrame()
@@ -635,7 +743,11 @@ async def _run_scan(
                 continue
 
             signals_found += 1
-            intraday_frames = await _fetch_timeframe_frames(ticker, ["4h", "1h"])
+            intraday_frames = await _fetch_timeframe_frames(
+                ticker,
+                ["4h", "1h"],
+                service_metrics,
+            )
             frames = {"1d": df, **intraday_frames}
             breadth = breadth_by_asset_type.get(asset_type, {})
             breadth_pct_value = breadth.get("pct_above_50")
@@ -682,7 +794,12 @@ async def _run_scan(
                 "regime_controls": controls,
             }
 
-            decision = await _process_signal_via_portfolio(signal_data)
+            decision = await _timed_service_call(
+                service_metrics,
+                "portfolio-engine",
+                _process_signal_via_portfolio(signal_data),
+                failed=lambda value: value is None,
+            )
             approved = bool(decision and decision.get("approved", False))
             risk_decision_value = decision.get("risk_decision") if decision else None
             risk_decision = risk_decision_value if isinstance(risk_decision_value, dict) else None
@@ -761,7 +878,12 @@ async def _run_scan(
                     "paper_trade_executed": False,
                 }
                 if not deduplicated:
-                    sent = await _send_notification(notify_data)
+                    sent = await _timed_service_call(
+                        service_metrics,
+                        "notification-gateway",
+                        _send_notification(notify_data),
+                        failed=lambda value: not value,
+                    )
                     if run_id is not None and scanner_store is not None:
                         scanner_store.finish_notification(
                             notification_key,
@@ -803,8 +925,16 @@ async def _run_scan(
         "quality_rejections": quality_rejections,
         "signals": signal_details,
         "timestamp": now.isoformat(),
+        "correlation_id": correlation_id,
         "schedule": schedule_name,
         "asset_types": sorted(asset_types) if asset_types else ["all"],
+        "duration_ms": round(
+            (time.perf_counter() - scan_started) * 1000,
+            3,
+        ),
+        "provider_metrics": _serialize_service_metrics(
+            service_metrics
+        ),
     }
     _scan_state["last_scan_result"] = result_summary
     _scan_state["total_scans"] += 1
@@ -817,7 +947,13 @@ async def _lease_heartbeat(
     run_id: str,
     owner: str,
 ) -> None:
-    interval = max(1.0, settings.SCANNER_LEASE_SECONDS / 3)
+    interval = max(
+        1.0,
+        min(
+            settings.SCANNER_LEASE_SECONDS / 3,
+            settings.SCANNER_WORKER_STALE_SECONDS / 3,
+        ),
+    )
     while True:
         await asyncio.sleep(interval)
         if not store.heartbeat(
@@ -826,6 +962,27 @@ async def _lease_heartbeat(
             lease_seconds=settings.SCANNER_LEASE_SECONDS,
         ):
             raise RuntimeError(f"Scanner lease lost for run {run_id}")
+        parts = owner.split(":")
+        if len(parts) >= 4 and parts[0] == "worker":
+            try:
+                process_id = int(parts[2])
+            except ValueError:
+                process_id = os.getpid()
+            try:
+                store.touch_worker(
+                    owner,
+                    hostname=parts[1],
+                    process_id=process_id,
+                    status="running",
+                    current_run_id=run_id,
+                    current_scanner_key=store.scanner_key,
+                )
+            except Exception as error:
+                logger.warning(
+                    "Worker heartbeat telemetry failed for %s: %s",
+                    owner,
+                    error,
+                )
 
 
 async def _run_leased_scan(
@@ -1120,6 +1277,174 @@ def _scanner_status_payload() -> dict[str, object]:
     }
 
 
+def _scanner_observability_payload(
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    current = now or datetime.now(timezone.utc)
+    sources = {
+        "manual": _get_scanner_store(),
+        **_get_schedule_stores(),
+    }
+    schedules = {
+        name: store.observability(
+            now=current,
+            window_minutes=settings.SCANNER_OBSERVABILITY_WINDOW_MINUTES,
+            max_attempts=settings.SCANNER_MAX_ATTEMPTS,
+        )
+        for name, store in sources.items()
+    }
+    workers = _get_scanner_store().worker_health(
+        now=current,
+        stale_after_seconds=settings.SCANNER_WORKER_STALE_SECONDS,
+    )
+    alerts: list[dict[str, object]] = []
+    active_workers = [
+        worker
+        for worker in workers
+        if not worker["stale"] and worker["status"] != "stopped"
+    ]
+    scheduled_enabled = any(
+        bool(store.get_config()["enabled"])
+        for name, store in sources.items()
+        if name != "manual"
+    )
+    if scheduled_enabled and not active_workers:
+        alerts.append(
+            {
+                "code": "no-active-workers",
+                "severity": "critical",
+                "message": "Scheduled scanning is enabled but no worker is active.",
+            }
+        )
+    for worker in workers:
+        if worker["stale"]:
+            alerts.append(
+                {
+                    "code": "stale-worker",
+                    "severity": "critical",
+                    "worker_id": worker["worker_id"],
+                    "correlation_id": worker["current_run_id"],
+                    "message": "Worker heartbeat exceeded the stale threshold.",
+                }
+            )
+    for name, metrics in schedules.items():
+        queue = metrics["queue"]
+        leases = metrics["leases"]
+        throughput = metrics["throughput"]
+        duration = metrics["duration_ms"]
+        if (
+            float(queue["oldest_age_seconds"])
+            >= settings.SCANNER_LAG_ALERT_SECONDS
+        ):
+            alerts.append(
+                {
+                    "code": "persistent-queue-lag",
+                    "severity": "warning",
+                    "schedule": name,
+                    "correlation_id": queue[
+                        "oldest_correlation_id"
+                    ],
+                    "value_seconds": queue["oldest_age_seconds"],
+                    "threshold_seconds": settings.SCANNER_LAG_ALERT_SECONDS,
+                    "message": "Oldest queued run exceeds the lag threshold.",
+                }
+            )
+        if int(leases["expired"]) > 0:
+            alerts.append(
+                {
+                    "code": "expired-lease",
+                    "severity": "critical",
+                    "schedule": name,
+                    "count": leases["expired"],
+                    "message": "Running work has an expired lease.",
+                }
+            )
+        if int(metrics["dead_jobs"]) > 0:
+            alerts.append(
+                {
+                    "code": "dead-jobs",
+                    "severity": "critical",
+                    "schedule": name,
+                    "count": metrics["dead_jobs"],
+                    "message": "Runs exhausted their configured attempts.",
+                }
+            )
+        if (
+            int(throughput["failed"]) > 0
+            and float(throughput["error_rate_pct"])
+            >= settings.SCANNER_ERROR_RATE_ALERT_PCT
+        ):
+            alerts.append(
+                {
+                    "code": "persistent-error-rate",
+                    "severity": "warning",
+                    "schedule": name,
+                    "value_pct": throughput["error_rate_pct"],
+                    "threshold_pct": settings.SCANNER_ERROR_RATE_ALERT_PCT,
+                    "message": "Run error rate exceeds the configured threshold.",
+                }
+            )
+        if (
+            duration["p95"] is not None
+            and float(duration["p95"])
+            >= settings.SCANNER_DURATION_ALERT_SECONDS * 1000
+        ):
+            alerts.append(
+                {
+                    "code": "slow-runs",
+                    "severity": "warning",
+                    "schedule": name,
+                    "value_ms": duration["p95"],
+                    "threshold_ms": (
+                        settings.SCANNER_DURATION_ALERT_SECONDS * 1000
+                    ),
+                    "message": "P95 run duration exceeds the threshold.",
+                }
+            )
+    aggregate = {
+        "queue_depth": sum(
+            int(metrics["queue"]["depth"])
+            for metrics in schedules.values()
+        ),
+        "running_leases": sum(
+            int(metrics["leases"]["running"])
+            for metrics in schedules.values()
+        ),
+        "dead_jobs": sum(
+            int(metrics["dead_jobs"])
+            for metrics in schedules.values()
+        ),
+        "completed_in_window": sum(
+            int(metrics["throughput"]["completed"])
+            for metrics in schedules.values()
+        ),
+        "failed_in_window": sum(
+            int(metrics["throughput"]["failed"])
+            for metrics in schedules.values()
+        ),
+    }
+    return {
+        "generated_at": current.isoformat(),
+        "status": (
+            "critical"
+            if any(alert["severity"] == "critical" for alert in alerts)
+            else "degraded" if alerts else "healthy"
+        ),
+        "thresholds": {
+            "worker_stale_seconds": settings.SCANNER_WORKER_STALE_SECONDS,
+            "lag_alert_seconds": settings.SCANNER_LAG_ALERT_SECONDS,
+            "duration_alert_seconds": settings.SCANNER_DURATION_ALERT_SECONDS,
+            "error_rate_alert_pct": settings.SCANNER_ERROR_RATE_ALERT_PCT,
+            "window_minutes": settings.SCANNER_OBSERVABILITY_WINDOW_MINUTES,
+        },
+        "aggregate": aggregate,
+        "workers": workers,
+        "schedules": schedules,
+        "alerts": alerts,
+    }
+
+
 @app.post("/api/scan-all")
 async def scan_all(
     idempotency_key: str | None = Header(
@@ -1193,6 +1518,12 @@ async def scanner_status():
             if isinstance(opportunity, dict):
                 _apply_opportunity_state(opportunity, now)
     return status
+
+
+@app.get("/api/scanner/observability")
+async def scanner_observability():
+    """Return durable worker health, capacity, and alert metrics."""
+    return _scanner_observability_payload()
 
 
 @app.post("/api/opportunities/{opportunity_id}/action")

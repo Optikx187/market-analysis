@@ -42,6 +42,23 @@ def test_research_backend_and_database_url_must_match() -> None:
         ("SCANNER_MAX_ATTEMPTS", 0, "at least 1"),
         ("SCANNER_RETRY_SECONDS", -1, "must not be negative"),
         (
+            "SCANNER_WORKER_STALE_SECONDS",
+            5,
+            "must exceed the poll interval",
+        ),
+        ("SCANNER_LAG_ALERT_SECONDS", 0, "must be at least 1"),
+        ("SCANNER_DURATION_ALERT_SECONDS", 0, "must be at least 1"),
+        (
+            "SCANNER_ERROR_RATE_ALERT_PCT",
+            101,
+            "at most 100",
+        ),
+        (
+            "SCANNER_OBSERVABILITY_WINDOW_MINUTES",
+            0,
+            "must be at least 1",
+        ),
+        (
             "EQUITY_EXCHANGE_CALENDAR",
             "NOT_A_CALENDAR",
             "not a known exchange calendar",

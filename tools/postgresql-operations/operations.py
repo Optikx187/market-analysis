@@ -16,7 +16,7 @@ from psycopg.rows import dict_row
 
 EXPECTED_REVISIONS = {
     "alembic_version": "0004_data",
-    "alembic_version_research": "0003_research",
+    "alembic_version_research": "0004_research",
     "alembic_version_portfolio": "0002_portfolio",
 }
 PRESERVED_EVIDENCE = (

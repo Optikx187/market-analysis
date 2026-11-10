@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -8,7 +9,7 @@ from unittest.mock import AsyncMock
 from alembic import command
 from alembic.config import Config
 
-from app import main, scanner_worker
+from app import main, scanner_worker, scanner_worker_healthcheck
 from app.config import settings
 from app.market_calendar import schedule_definitions
 from app.scanner_store import ScannerStore
@@ -198,3 +199,142 @@ def test_crypto_schedule_runs_during_equity_holiday(
         {"crypto"}
     )
     assert run_scan.await_args.kwargs["schedule_name"] == "crypto"
+
+
+def test_worker_emits_correlation_logs_and_updates_heartbeat(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = migrated_store(tmp_path)
+    queued = store.enqueue_manual(
+        "worker-observed",
+        now=datetime.fromisoformat("2020-01-01T00:00:00+00:00"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_run_scan",
+        AsyncMock(
+            return_value={
+                "scanned": 2,
+                "signals_found": 1,
+                "notifications_sent": 0,
+                "signals": [],
+            }
+        ),
+    )
+    owner = "worker:test-host:123:observed"
+    messages: list[str] = []
+    monkeypatch.setattr(
+        scanner_worker.logger,
+        "info",
+        lambda message, *args: messages.append(
+            message % args if args else message
+        ),
+    )
+
+    worked = asyncio.run(
+        scanner_worker.run_once(
+            store,
+            owner,
+            CRYPTO_SCHEDULE,
+        )
+    )
+
+    events = [
+        json.loads(message)
+        for message in messages
+        if message.startswith("{")
+    ]
+    worker = store.worker_health()[0]
+
+    assert worked is True
+    assert [event["event"] for event in events] == [
+        "scanner_run_claimed",
+        "scanner_run_completed",
+    ]
+    assert all(
+        event["correlation_id"] == queued["run_id"]
+        for event in events
+    )
+    assert worker["worker_id"] == owner
+    assert worker["status"] == "idle"
+    assert worker["completed_runs"] == 1
+    assert worker["current_run_id"] is None
+
+
+def test_worker_container_healthcheck_requires_fresh_local_heartbeat(
+    monkeypatch,
+) -> None:
+    class FakeStore:
+        workers: list[dict[str, object]] = []
+
+        def worker_health(self, **_kwargs):
+            return self.workers
+
+    fake = FakeStore()
+    monkeypatch.setattr(
+        scanner_worker_healthcheck,
+        "ScannerStore",
+        lambda: fake,
+    )
+    monkeypatch.setattr(
+        scanner_worker_healthcheck.socket,
+        "gethostname",
+        lambda: "worker-host",
+    )
+
+    fake.workers = [
+        {
+            "hostname": "worker-host",
+            "stale": False,
+            "status": "idle",
+        }
+    ]
+    assert scanner_worker_healthcheck.main() == 0
+
+    fake.workers = [
+        {
+            "hostname": "worker-host",
+            "stale": True,
+            "status": "running",
+        }
+    ]
+    assert scanner_worker_healthcheck.main() == 1
+
+
+def test_telemetry_failure_does_not_reclassify_completed_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = migrated_store(tmp_path)
+    queued = store.enqueue_manual(
+        "telemetry-failure",
+        now=datetime.fromisoformat("2020-01-01T00:00:00+00:00"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_run_scan",
+        AsyncMock(
+            return_value={
+                "scanned": 1,
+                "signals_found": 0,
+                "notifications_sent": 0,
+                "signals": [],
+            }
+        ),
+    )
+    def fail_telemetry(*_args, **_kwargs) -> None:
+        raise RuntimeError("telemetry unavailable")
+
+    monkeypatch.setattr(store, "touch_worker", fail_telemetry)
+
+    worked = asyncio.run(
+        scanner_worker.run_once(
+            store,
+            "worker:test-host:123:telemetry",
+            CRYPTO_SCHEDULE,
+        )
+    )
+
+    assert worked is True
+    assert store.get_run(str(queued["run_id"]))["status"] == "completed"

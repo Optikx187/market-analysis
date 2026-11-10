@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     SCANNER_LEASE_SECONDS: int = 120
     SCANNER_MAX_ATTEMPTS: int = 3
     SCANNER_RETRY_SECONDS: int = 30
+    SCANNER_WORKER_STALE_SECONDS: int = 30
+    SCANNER_LAG_ALERT_SECONDS: int = 300
+    SCANNER_DURATION_ALERT_SECONDS: int = 120
+    SCANNER_ERROR_RATE_ALERT_PCT: float = 20.0
+    SCANNER_OBSERVABILITY_WINDOW_MINUTES: int = 15
     EQUITY_EXCHANGE_CALENDAR: str = "XNYS"
     BACKTEST_DATABASE_PATH: str = "./backtests.db"
     RESEARCH_STORAGE_BACKEND: str = "sqlite-transition"
@@ -99,6 +104,30 @@ class Settings(BaseSettings):
         if self.SCANNER_RETRY_SECONDS < 0:
             raise ValueError(
                 "SCANNER_RETRY_SECONDS must not be negative"
+            )
+        if (
+            self.SCANNER_WORKER_STALE_SECONDS
+            <= self.SCANNER_WORKER_POLL_SECONDS
+        ):
+            raise ValueError(
+                "SCANNER_WORKER_STALE_SECONDS must exceed the poll interval"
+            )
+        if self.SCANNER_LAG_ALERT_SECONDS < 1:
+            raise ValueError(
+                "SCANNER_LAG_ALERT_SECONDS must be at least 1"
+            )
+        if self.SCANNER_DURATION_ALERT_SECONDS < 1:
+            raise ValueError(
+                "SCANNER_DURATION_ALERT_SECONDS must be at least 1"
+            )
+        if not 0 < self.SCANNER_ERROR_RATE_ALERT_PCT <= 100:
+            raise ValueError(
+                "SCANNER_ERROR_RATE_ALERT_PCT must be greater than 0 "
+                "and at most 100"
+            )
+        if self.SCANNER_OBSERVABILITY_WINDOW_MINUTES < 1:
+            raise ValueError(
+                "SCANNER_OBSERVABILITY_WINDOW_MINUTES must be at least 1"
             )
         if not self.EQUITY_EXCHANGE_CALENDAR.strip():
             raise ValueError(

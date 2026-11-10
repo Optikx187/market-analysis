@@ -220,3 +220,113 @@ def test_status_combines_latest_equity_and_crypto_results(
         for signal in status["last_scan_result"]["signals"]
     ] == ["AAPL", "BTC"]
     assert set(status["schedules"]) == {"equity", "crypto"}
+
+
+def test_observability_aggregates_workers_and_schedule_alerts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    legacy = migrated_store(tmp_path)
+    stores = schedule_stores(legacy)
+    monkeypatch.setattr(main, "_scanner_store", legacy)
+    monkeypatch.setattr(main, "_schedule_stores", stores)
+    monkeypatch.setattr(settings, "SCANNER_LAG_ALERT_SECONDS", 60)
+    now = datetime.fromisoformat("2030-01-01T00:10:00+00:00")
+    legacy.touch_worker(
+        "worker:host-a:101:active",
+        hostname="host-a",
+        process_id=101,
+        status="idle",
+        now=now,
+    )
+    stores["crypto"].enqueue_manual(
+        "lagged-crypto",
+        now=now - timedelta(minutes=5),
+    )
+
+    observed = main._scanner_observability_payload(now=now)
+
+    assert observed["status"] == "degraded"
+    assert observed["aggregate"]["queue_depth"] == 1
+    assert len(observed["workers"]) == 1
+    assert observed["workers"][0]["stale"] is False
+    assert observed["schedules"]["crypto"]["queue"]["depth"] == 1
+    assert {
+        alert["code"] for alert in observed["alerts"]
+    } == {"persistent-queue-lag"}
+
+
+def test_observability_alerts_on_dead_expired_failed_and_slow_work(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    legacy = migrated_store(tmp_path)
+    stores = schedule_stores(legacy)
+    monkeypatch.setattr(main, "_scanner_store", legacy)
+    monkeypatch.setattr(main, "_schedule_stores", stores)
+    monkeypatch.setattr(settings, "SCANNER_DURATION_ALERT_SECONDS", 10)
+    monkeypatch.setattr(settings, "SCANNER_ERROR_RATE_ALERT_PCT", 20)
+    now = datetime.fromisoformat("2030-01-01T00:10:00+00:00")
+    legacy.touch_worker(
+        "worker:host-a:101:active",
+        hostname="host-a",
+        process_id=101,
+        status="idle",
+        now=now,
+    )
+    dead = stores["equity"].enqueue_manual(
+        "dead-alert",
+        now=now - timedelta(minutes=4),
+    )
+    for minute in (4, 3, 2):
+        owner = f"worker-dead-{minute}"
+        claimed = stores["equity"].claim_run(
+            str(dead["run_id"]),
+            owner,
+            now=now - timedelta(minutes=minute),
+            max_attempts=3,
+        )
+        assert claimed is not None
+        stores["equity"].fail(
+            str(dead["run_id"]),
+            owner,
+            "deterministic",
+            now=now - timedelta(minutes=minute),
+            retry_seconds=0,
+        )
+    completed = stores["equity"].enqueue_manual(
+        "slow-alert",
+        now=now - timedelta(minutes=5),
+    )
+    assert stores["equity"].claim_run(
+        str(completed["run_id"]),
+        "worker-slow",
+        now=now - timedelta(minutes=5),
+    )
+    stores["equity"].complete(
+        str(completed["run_id"]),
+        "worker-slow",
+        {"signals_found": 0, "signals": []},
+        now=now - timedelta(minutes=1),
+    )
+    expired = stores["crypto"].enqueue_manual(
+        "expired-alert",
+        now=now - timedelta(minutes=2),
+    )
+    assert stores["crypto"].claim_run(
+        str(expired["run_id"]),
+        "worker-expired",
+        now=now - timedelta(minutes=2),
+        lease_seconds=10,
+    )
+
+    observed = main._scanner_observability_payload(now=now)
+    codes = {alert["code"] for alert in observed["alerts"]}
+
+    assert observed["status"] == "critical"
+    assert {
+        "dead-jobs",
+        "expired-lease",
+        "persistent-error-rate",
+        "slow-runs",
+    }.issubset(codes)

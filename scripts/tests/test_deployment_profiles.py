@@ -109,6 +109,14 @@ class DeploymentProfileTest(unittest.TestCase):
             worker["environment"]["BACKTEST_DATABASE_PATH"],
             "/app/data/backtests.db",
         )
+        self.assertEqual(
+            worker["healthcheck"]["test"],
+            ["CMD", "python", "-m", "app.scanner_worker_healthcheck"],
+        )
+        self.assertEqual(
+            worker["environment"]["SCANNER_WORKER_STALE_SECONDS"],
+            "30",
+        )
         self.assertEqual(worker["deploy"]["replicas"], 2)
 
     def test_postgresql_uses_shared_storage_and_preserves_sqlite_source(self) -> None:
