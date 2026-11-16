@@ -201,7 +201,7 @@ class CurrentSignalAnalysisModule:
             DataRequirement(
                 interval="1d",
                 minimum_candles=201,
-                max_age_seconds=172_800,
+                max_age_seconds=432_000,
             )
         ],
         input_schema=AnalysisRunRequest.model_json_schema(),
