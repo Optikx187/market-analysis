@@ -7,6 +7,14 @@ from pathlib import Path
 import psycopg
 import pytest
 
+from app.analysis_modules import (
+    AnalysisEvidence,
+    AnalysisModuleResult,
+    AnalysisRunRequest,
+    NormalizedAnalysisEvent,
+    default_analysis_registry,
+)
+from app.analysis_store import AnalysisStore
 from app.backtest_store import BacktestStore
 from app.scanner_store import ScannerStore
 
@@ -323,3 +331,74 @@ def test_postgresql_scanner_claims_are_concurrent_and_tenant_scoped() -> None:
         "signal:BTC:BUY:postgres",
         now=sent_at + timedelta(hours=25),
     )
+
+
+def test_postgresql_analysis_registry_is_versioned_and_tenant_scoped() -> None:
+    assert DATABASE_URL is not None
+    registry = default_analysis_registry()
+    definition = registry.get("current-signal-analysis").definition
+    alice = AnalysisStore(
+        DATABASE_URL,
+        tenant_id="00000000-0000-7000-8000-000000000021",
+        user_key="alice-analysis",
+    )
+    bob = AnalysisStore(
+        DATABASE_URL,
+        tenant_id="00000000-0000-7000-8000-000000000022",
+        user_key="bob-analysis",
+    )
+    alice.sync_registry(registry)
+    bob.sync_registry(registry)
+    alice.set_selection(
+        definition.module_key,
+        definition.module_version,
+        enabled=False,
+        config={"cadence_minutes": 30},
+    )
+    assert alice.get_selection(definition.module_key)["enabled"] is False
+    assert bob.get_selection(definition.module_key)["enabled"] is True
+
+    generated_at = datetime.now().astimezone()
+    request = AnalysisRunRequest(
+        ticker="BTC",
+        asset_type="crypto",
+        horizon="short-term",
+    )
+    result = AnalysisModuleResult(
+        output={"signal": None},
+        evidence=[
+            AnalysisEvidence(
+                evidence_type="data-quality",
+                summary="eligible",
+            )
+        ],
+        lineage={"frames": []},
+        normalized_event=NormalizedAnalysisEvent(
+            event_type=definition.normalized_event_type,
+            module_key=definition.module_key,
+            module_version=definition.module_version,
+            ticker="BTC",
+            asset_type="crypto",
+            horizon="short-term",
+            generated_at=generated_at,
+            expires_at=generated_at + timedelta(hours=1),
+            recommendation={"signal": None},
+        ),
+    )
+    persisted = alice.save_run(
+        definition,
+        request,
+        result,
+        started_at=generated_at,
+        completed_at=generated_at,
+    )
+    assert alice.get_run(str(persisted["run_id"]))["result"] == {
+        "signal": None
+    }
+    with pytest.raises(psycopg.errors.RaiseException, match="immutable"):
+        with psycopg.connect(_psycopg_url()) as connection:
+            connection.execute(
+                "UPDATE research.analysis_module_runs "
+                "SET ticker='ETH' WHERE run_id=%s",
+                (persisted["run_id"],),
+            )

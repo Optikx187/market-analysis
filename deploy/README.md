@@ -51,6 +51,14 @@ back the application version, stop scanner
 workers and restore the verified pre-migration research backup; do not
 downgrade the live schema destructively.
 
+The additive `0005_research` migration creates immutable analysis-module
+definitions/results and mutable per-user selections. Existing scanner,
+backtest, notification, and execution behavior is unchanged. SQLite-to-
+PostgreSQL import preserves definitions, selections, runs, normalized events,
+evidence, and lineage. To roll back to code expecting `0004_research`, stop
+quant/scanner processes and restore the verified pre-migration research
+backup; do not delete research evidence or stamp the live schema backward.
+
 For a fresh deployment, initialize `.env`, start PostgreSQL, build the service
 images, and apply every service-owned migration before starting the PostgreSQL
 overlay:

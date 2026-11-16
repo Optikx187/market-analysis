@@ -76,7 +76,7 @@ def test_empty_database_upgrades_to_head_and_repeats_cleanly(
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0004_research",)
+        ).fetchone() == ("0005_research",)
         index_sql = connection.execute(
             "SELECT sql FROM sqlite_master "
             "WHERE type='index' AND name='idx_backtest_runs_ticker_created'"

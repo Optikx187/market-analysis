@@ -65,6 +65,7 @@ implicit.
 | `live_execution_audit` | Future `portfolio.live_execution_audit` plus security events in `operations.audit_events` |
 | `backtest_runs` SQLite store | `research.backtest_runs`; oversized result payloads use `research.backtest_artifacts` references |
 | `scanner_worker_heartbeats` | `research.scanner_worker_heartbeats`; ephemeral worker health re-registers after cutover |
+| `analysis_module_definitions`, `analysis_module_selections`, `analysis_module_runs` | Same-named `research` tables with tenant-scoped selection and immutable version/result evidence |
 
 The future-table labels are part of this contract even where the executable
 prototype omits low-volume detail tables. Issues #91 through #93 added the

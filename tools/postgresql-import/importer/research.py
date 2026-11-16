@@ -16,7 +16,14 @@ from importer.common import (
     utc_datetime,
 )
 from importer.report import ImportReport
-from importer.scanner import import_scanner_state
+from importer.scanner import (
+    _import_table,
+    _json_object as scanner_json_object,
+    _time,
+    _user,
+    _uuid,
+    import_scanner_state,
+)
 from importer.target import Target
 
 
@@ -524,6 +531,120 @@ def import_research(
         target_checksum=artifact_report.target_checksum,
     )
     target.commit()
+    _import_table(
+        source,
+        target,
+        report,
+        table="analysis_module_definitions",
+        conflict_columns=("module_key", "module_version"),
+        compare_columns=("definition_sha256", "definition_json"),
+        transform=lambda row: {
+            "module_key": str(row["module_key"]),
+            "module_version": str(row["module_version"]),
+            "definition_json": scanner_json_object(
+                row["definition_json"],
+                "definition_json",
+            ),
+            "definition_sha256": str(row["definition_sha256"]),
+            "created_at": _time(row["created_at"]),
+        },
+    )
+    _import_table(
+        source,
+        target,
+        report,
+        table="analysis_module_selections",
+        conflict_columns=("tenant_id", "user_key", "module_key"),
+        compare_columns=(
+            "module_version",
+            "enabled",
+            "config_json",
+        ),
+        transform=lambda row: {
+            "tenant_id": target.tenant_id,
+            "user_key": _user(row, user_map),
+            "module_key": str(row["module_key"]),
+            "module_version": str(row["module_version"]),
+            "enabled": bool(row["enabled"]),
+            "config_json": scanner_json_object(
+                row["config_json"],
+                "config_json",
+            ),
+            "updated_at": _time(row["updated_at"]),
+        },
+    )
+
+    def analysis_run(row: dict[str, object]) -> dict[str, object]:
+        run_id = _uuid(row["run_id"])
+        target.mapping(
+            source_store="research",
+            source_table="analysis_module_runs",
+            source_key=source_key(run_id),
+            source_row_checksum=checksum(row),
+            target_schema="research",
+            target_table="analysis_module_runs",
+            preserve_uuid=run_id,
+        )
+        result_value = row.get("result_json")
+        event_value = row.get("normalized_event_json")
+        return {
+            "run_id": run_id,
+            "tenant_id": target.tenant_id,
+            "user_key": _user(row, user_map),
+            "module_key": str(row["module_key"]),
+            "module_version": str(row["module_version"]),
+            "ticker": str(row["ticker"]).strip().upper(),
+            "asset_type": str(row["asset_type"]),
+            "horizon": str(row["horizon"]),
+            "status": str(row["status"]),
+            "request_json": scanner_json_object(
+                row["request_json"],
+                "request_json",
+            ),
+            "result_json": (
+                scanner_json_object(result_value, "result_json")
+                if result_value not in {None, ""}
+                else None
+            ),
+            "evidence_json": _json_array(
+                row["evidence_json"],
+                "evidence_json",
+            ),
+            "lineage_json": scanner_json_object(
+                row["lineage_json"],
+                "lineage_json",
+            ),
+            "normalized_event_json": (
+                scanner_json_object(
+                    event_value,
+                    "normalized_event_json",
+                )
+                if event_value not in {None, ""}
+                else None
+            ),
+            "error": row.get("error"),
+            "started_at": _time(row["started_at"]),
+            "completed_at": _time(row["completed_at"]),
+            "expires_at": _time(row["expires_at"]),
+        }
+
+    _import_table(
+        source,
+        target,
+        report,
+        table="analysis_module_runs",
+        conflict_columns=("run_id",),
+        compare_columns=(
+            "tenant_id",
+            "user_key",
+            "module_key",
+            "module_version",
+            "status",
+            "result_json",
+            "lineage_json",
+        ),
+        transform=analysis_run,
+    )
     import_scanner_state(
         source,
         target,

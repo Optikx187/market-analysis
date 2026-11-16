@@ -485,6 +485,25 @@ The scanner:
 - produces a complete trade plan;
 - suppresses or marks ineligible opportunities that fail evidence or risk controls.
 
+## Analysis modules
+
+The quant engine exposes a local, versioned analysis registry:
+
+- `GET /api/analysis/modules` lists immutable definitions, JSON schemas,
+  supported assets/horizons, freshness requirements, versions, and the
+  current user selection;
+- `POST /api/analysis/modules/{module_key}/selection` enables/disables a
+  module and stores user configuration;
+- `POST /api/analysis/modules/{module_key}/run` validates required data,
+  executes the selected version, and persists research evidence, lineage,
+  expiry, and a normalized event;
+- `GET /api/analysis/runs/{run_id}` retrieves the immutable result.
+
+`current-signal-analysis@1.0.0` wraps the existing EMA/RSI/ATR and regime math;
+parity tests prevent silent financial changes. Analysis modules do not import
+notification or broker code. Their normalized events are research-only until
+separate portfolio risk and execution gates approve an action.
+
 Missing evidence receives no optimistic score. An opportunity must pass its out-of-sample, data-quality, regime, score, and portfolio-risk requirements before it is eligible.
 
 Scheduled scans use independent durable subscriptions:
@@ -837,7 +856,7 @@ Use these pages for current request and response schemas.
 Major API groups:
 
 - `/api/assets`, `/api/candles`, `/api/candles/{ticker}/lineage`, `/api/data-quality`, `/api/quotes`, `/api/price-alerts`, `/api/earnings`;
-- `/api/analyze`, `/api/regime`, `/api/scan-all`, `/api/scanner`, `/api/opportunities`, `/api/backtest`;
+- `/api/analyze`, `/api/analysis/modules`, `/api/analysis/runs`, `/api/regime`, `/api/scan-all`, `/api/scanner`, `/api/opportunities`, `/api/backtest`;
 - `/api/portfolio`, `/api/trades`, `/api/attribution`, `/api/paper-orders`, `/api/action-items`, `/api/dashboard-preferences`;
 - `/api/auth`, `/api/settings`, `/api/live-trading`, `/api/live-orders`;
 - `/api/notify`.
