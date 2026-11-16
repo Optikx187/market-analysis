@@ -1184,6 +1184,27 @@ async def run_analysis_module(
                 f"{module_key} requires {requirement.minimum_candles} "
                 f"{requirement.interval} candles",
             )
+        timestamps = pd.to_datetime(
+            frame.get("timestamp"),
+            utc=True,
+            errors="coerce",
+        )
+        latest = timestamps.max() if timestamps is not None else pd.NaT
+        if pd.isna(latest):
+            raise HTTPException(
+                422,
+                f"{module_key} requires timestamped "
+                f"{requirement.interval} candles",
+            )
+        age_seconds = (
+            datetime.now(timezone.utc) - latest.to_pydatetime()
+        ).total_seconds()
+        if age_seconds > requirement.max_age_seconds:
+            raise HTTPException(
+                422,
+                f"{module_key} requires {requirement.interval} data "
+                f"newer than {requirement.max_age_seconds} seconds",
+            )
     started_at = datetime.now(timezone.utc)
     try:
         result = module.run(
