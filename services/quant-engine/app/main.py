@@ -1149,8 +1149,11 @@ async def run_analysis_module(
     registry = _get_analysis_registry()
     store = _get_analysis_store()
     try:
-        module = registry.get(module_key)
         selection = store.get_selection(module_key)
+        module = registry.get(
+            module_key,
+            str(selection["module_version"]),
+        )
     except KeyError as error:
         raise HTTPException(404, "Analysis module not found") from error
     if not selection["enabled"]:

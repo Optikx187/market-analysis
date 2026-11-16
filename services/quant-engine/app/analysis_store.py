@@ -94,9 +94,13 @@ class AnalysisStore:
         return f"CAST(:{name} AS JSONB)" if self.postgresql else f":{name}"
 
     def sync_registry(self, registry: AnalysisModuleRegistry) -> None:
-        for definition in registry.definitions():
+        definitions = registry.definitions()
+        for definition in definitions:
             self.register_definition(definition)
-            self.ensure_selection(definition)
+        for module_key in dict.fromkeys(
+            definition.module_key for definition in definitions
+        ):
+            self.ensure_selection(registry.get(module_key).definition)
 
     def register_definition(
         self,
