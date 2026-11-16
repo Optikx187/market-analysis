@@ -254,7 +254,9 @@ class AnalysisStore:
                     "user_key": self.user_key,
                     "module_key": module_key,
                 },
-            ).mappings().one()
+            ).mappings().one_or_none()
+        if row is None:
+            raise KeyError(module_key)
         config = _decoded(row["config_json"])
         return {
             "module_key": str(row["module_key"]),
