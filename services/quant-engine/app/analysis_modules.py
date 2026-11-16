@@ -316,10 +316,19 @@ def default_analysis_registry() -> AnalysisModuleRegistry:
     return registry
 
 
-def _version_tuple(value: str) -> tuple[int, int, int, str]:
+def _version_tuple(
+    value: str,
+) -> tuple[int, int, int, int, tuple[tuple[int, int | str], ...]]:
     core, _, suffix = value.partition("-")
     major, minor, patch = (int(part) for part in core.split("."))
-    return major, minor, patch, suffix
+    prerelease = tuple(
+        (0, int(identifier))
+        if identifier.isdigit()
+        else (1, identifier)
+        for identifier in suffix.split(".")
+        if identifier
+    )
+    return major, minor, patch, int(not suffix), prerelease
 
 
 def _frame_lineage(
