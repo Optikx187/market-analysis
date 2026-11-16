@@ -67,6 +67,9 @@ import preserves this scanner state during a later PostgreSQL cutover.
 The additive `0004_research` migration records scanner-worker heartbeats and
 current lease correlation so multi-worker health remains visible across API
 and worker restarts.
+The additive `0005_research` migration makes analysis definitions/versioned
+schemas, user selections, normalized research events, evidence, lineage, and
+expiry durable without coupling modules to notification or execution code.
 
 The operations implementation is `tools/postgresql-operations/`, exposed
 through the `manage postgres-*` commands. It provides extension-free logical

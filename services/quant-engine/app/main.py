@@ -17,6 +17,13 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from app.analysis_modules import (
+    AnalysisContext,
+    AnalysisModuleRegistry,
+    AnalysisRunRequest,
+    default_analysis_registry,
+)
+from app.analysis_store import AnalysisStore
 from app.backtest_store import BacktestStore
 from app.backtesting import (
     ExecutionCosts,
@@ -64,6 +71,8 @@ _recent_signals: dict[str, str] = {}
 _backtest_store: BacktestStore | None = None
 _scanner_store: ScannerStore | None = None
 _schedule_stores: dict[str, ScannerStore] | None = None
+_analysis_store: AnalysisStore | None = None
+_analysis_registry: AnalysisModuleRegistry | None = None
 
 
 def _get_backtest_store() -> BacktestStore:
@@ -88,6 +97,24 @@ def _get_scanner_store() -> ScannerStore:
             user_key=settings.RESEARCH_USER_KEY,
         )
     return _scanner_store
+
+
+def _get_analysis_store() -> AnalysisStore:
+    global _analysis_store
+    if _analysis_store is None:
+        _analysis_store = AnalysisStore(
+            settings.research_database_url,
+            tenant_id=settings.RESEARCH_TENANT_ID,
+            user_key=settings.RESEARCH_USER_KEY,
+        )
+    return _analysis_store
+
+
+def _get_analysis_registry() -> AnalysisModuleRegistry:
+    global _analysis_registry
+    if _analysis_registry is None:
+        _analysis_registry = default_analysis_registry()
+    return _analysis_registry
 
 
 def _get_schedule_stores() -> dict[str, ScannerStore]:
@@ -142,6 +169,8 @@ def _is_market_hours() -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_schema(settings.research_database_url)
+    analysis_registry = _get_analysis_registry()
+    _get_analysis_store().sync_registry(analysis_registry)
     stores = initialize_scanner_stores()
     _scan_state.update(stores["equity"].get_config())
     logger.info(
@@ -205,6 +234,11 @@ class AnalyzeRequest(BaseModel):
     available_capital: float = 10_000.0
     asset_type: str = "stock"
     timeframes: list[str] = Field(default_factory=lambda: ["1d", "4h", "1h"])
+
+
+class AnalysisSelectionUpdate(BaseModel):
+    enabled: bool
+    config: dict[str, object] = Field(default_factory=dict)
 
 
 class DataQualityResponse(BaseModel):
@@ -1079,6 +1113,103 @@ async def analyze(req: AnalyzeRequest):
         timeframe_agreement=timeframe_agreement,
         regime_controls=controls,
     )
+
+
+@app.get("/api/analysis/modules")
+async def list_analysis_modules():
+    registry = _get_analysis_registry()
+    store = _get_analysis_store()
+    store.sync_registry(registry)
+    return {"modules": store.list_modules()}
+
+
+@app.post("/api/analysis/modules/{module_key}/selection")
+async def update_analysis_module_selection(
+    module_key: str,
+    update: AnalysisSelectionUpdate,
+):
+    registry = _get_analysis_registry()
+    try:
+        module = registry.get(module_key)
+    except KeyError as error:
+        raise HTTPException(404, "Analysis module not found") from error
+    return _get_analysis_store().set_selection(
+        module_key,
+        module.definition.module_version,
+        enabled=update.enabled,
+        config=update.config,
+    )
+
+
+@app.post("/api/analysis/modules/{module_key}/run")
+async def run_analysis_module(
+    module_key: str,
+    request: AnalysisRunRequest,
+):
+    registry = _get_analysis_registry()
+    store = _get_analysis_store()
+    try:
+        module = registry.get(module_key)
+        selection = store.get_selection(module_key)
+    except KeyError as error:
+        raise HTTPException(404, "Analysis module not found") from error
+    if not selection["enabled"]:
+        raise HTTPException(409, "Analysis module is disabled")
+    definition = module.definition
+    if request.asset_type not in definition.supported_asset_types:
+        raise HTTPException(422, "Asset type is not supported by this module")
+    if request.horizon not in definition.supported_horizons:
+        raise HTTPException(422, "Horizon is not supported by this module")
+    normalized = request.ticker.strip().upper()
+    request = request.model_copy(update={"ticker": normalized})
+    quality = await _require_eligible_data(normalized)
+    required_intervals = [
+        requirement.interval for requirement in definition.requirements
+    ]
+    requested_timeframes = list(
+        dict.fromkeys([*request.timeframes, *required_intervals])
+    )
+    frames = await _fetch_timeframe_frames(
+        normalized,
+        requested_timeframes,
+    )
+    for requirement in definition.requirements:
+        frame = frames.get(requirement.interval, pd.DataFrame())
+        if len(frame) < requirement.minimum_candles:
+            raise HTTPException(
+                422,
+                f"{module_key} requires {requirement.minimum_candles} "
+                f"{requirement.interval} candles",
+            )
+    started_at = datetime.now(timezone.utc)
+    try:
+        result = module.run(
+            AnalysisContext(
+                request=request,
+                frames=frames,
+                quality=quality.model_dump(mode="json"),
+                generated_at=started_at,
+            )
+        )
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    completed_at = datetime.now(timezone.utc)
+    persisted = store.save_run(
+        definition,
+        request,
+        result,
+        started_at=started_at,
+        completed_at=completed_at,
+    )
+    return persisted
+
+
+@app.get("/api/analysis/runs/{run_id}")
+async def get_analysis_module_run(run_id: str):
+    try:
+        return _get_analysis_store().get_run(run_id)
+    except (KeyError, ValueError) as error:
+        raise HTTPException(404, "Analysis run not found") from error
 
 
 @app.get("/api/regime/{ticker}")
