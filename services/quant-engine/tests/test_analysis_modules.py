@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -115,6 +116,38 @@ def test_registry_accepts_future_module_without_mutating_current_module() -> Non
         "current-signal-analysis",
         "future-volatility-preview",
     ]
+
+
+def test_registry_prefers_stable_and_orders_numeric_prereleases() -> None:
+    class VersionedModule:
+        def __init__(self, version: str) -> None:
+            self.definition = AnalysisModuleDefinition(
+                module_key="versioned-preview",
+                module_version=version,
+                display_name=version,
+                description="Semantic version ordering fixture",
+                supported_asset_types=["stock"],
+                supported_horizons=["short-term"],
+                requirements=[],
+                input_schema={},
+                output_schema={},
+                result_ttl_seconds=60,
+                normalized_event_type="analysis.preview.v1",
+            )
+
+        def run(self, context: AnalysisContext) -> AnalysisModuleResult:
+            raise AssertionError("Version ordering must not execute modules")
+
+    registry = default_analysis_registry()
+    for version in ("1.0.0-rc.10", "1.0.0", "1.0.0-rc.2"):
+        registry.register(VersionedModule(version))
+
+    assert registry.get("versioned-preview").definition.module_version == "1.0.0"
+    assert [
+        definition.module_version
+        for definition in registry.definitions()
+        if definition.module_key == "versioned-preview"
+    ] == ["1.0.0-rc.2", "1.0.0-rc.10", "1.0.0"]
 
 
 def test_module_definition_rejects_invalid_keys_and_versions() -> None:
@@ -283,6 +316,43 @@ def test_store_persists_immutable_definition_selection_and_result(
     )
     with pytest.raises(ValueError, match="immutable"):
         store.register_definition(changed)
+    with pytest.raises(KeyError):
+        store.get_run("not-a-uuid")
+    with pytest.raises(KeyError):
+        store.get_run("00000000-0000-0000-0000-000000000000")
+
+
+def test_concurrent_definition_registration_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    store = migrated_store(tmp_path)
+    definition = default_analysis_registry().get(
+        "current-signal-analysis"
+    ).definition
+    stores = [
+        AnalysisStore(store.database_url, user_key=f"worker-{index}")
+        for index in range(2)
+    ]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(
+            executor.map(
+                lambda candidate: candidate.register_definition(definition),
+                stores,
+            )
+        )
+
+    with store.engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT count(*) FROM analysis_module_definitions "
+                "WHERE module_key=:module_key AND module_version=:version"
+            ),
+            {
+                "module_key": definition.module_key,
+                "version": definition.module_version,
+            },
+        ).scalar_one() == 1
 
 
 def test_module_api_persists_valid_result_and_fails_closed_on_stale_data(
@@ -295,6 +365,11 @@ def test_module_api_persists_valid_result_and_fails_closed_on_stale_data(
     monkeypatch.setattr(main, "_analysis_store", store)
     monkeypatch.setattr(main, "_analysis_registry", registry)
     frames = {"1d": frame(), "4h": frame(), "1h": frame()}
+    frames["1d"]["timestamp"] = pd.date_range(
+        end=datetime.now(timezone.utc),
+        periods=len(frames["1d"]),
+        freq="D",
+    )
     monkeypatch.setattr(
         main,
         "_require_eligible_data",
@@ -345,3 +420,108 @@ def test_module_api_persists_valid_result_and_fails_closed_on_stale_data(
         assert connection.execute(
             text("SELECT count(*) FROM analysis_module_runs")
         ).scalar_one() == 1
+
+
+def test_module_api_uses_selected_version_and_enforces_freshness(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class SelectedVersionModule:
+        def __init__(self, version: str, *, requires_data: bool) -> None:
+            self.definition = AnalysisModuleDefinition(
+                module_key="selected-version",
+                module_version=version,
+                display_name=f"Selected Version {version}",
+                description="Selected-version execution fixture",
+                supported_asset_types=["stock"],
+                supported_horizons=["short-term"],
+                requirements=(
+                    [
+                        {
+                            "interval": "1d",
+                            "minimum_candles": 1,
+                            "max_age_seconds": 60,
+                        }
+                    ]
+                    if requires_data
+                    else []
+                ),
+                input_schema={},
+                output_schema={},
+                result_ttl_seconds=60,
+                normalized_event_type="analysis.selected.v1",
+            )
+
+        def run(self, context: AnalysisContext) -> AnalysisModuleResult:
+            generated_at = context.generated_at
+            output = {"version": self.definition.module_version}
+            return AnalysisModuleResult(
+                output=output,
+                evidence=[],
+                lineage={},
+                normalized_event=NormalizedAnalysisEvent(
+                    event_type=self.definition.normalized_event_type,
+                    module_key=self.definition.module_key,
+                    module_version=self.definition.module_version,
+                    ticker=context.request.ticker,
+                    asset_type=context.request.asset_type,
+                    horizon=context.request.horizon,
+                    generated_at=generated_at,
+                    expires_at=generated_at,
+                    recommendation=output,
+                ),
+            )
+
+    store = migrated_store(tmp_path)
+    registry = default_analysis_registry()
+    registry.register(SelectedVersionModule("1.0.0", requires_data=True))
+    registry.register(SelectedVersionModule("2.0.0", requires_data=False))
+    store.sync_registry(registry)
+    store.set_selection(
+        "selected-version",
+        "1.0.0",
+        enabled=True,
+    )
+    monkeypatch.setattr(main, "_analysis_store", store)
+    monkeypatch.setattr(main, "_analysis_registry", registry)
+    monkeypatch.setattr(
+        main,
+        "_require_eligible_data",
+        AsyncMock(return_value=quality()),
+    )
+    monkeypatch.setattr(
+        main,
+        "_fetch_timeframe_frames",
+        AsyncMock(
+            return_value={
+                "1d": pd.DataFrame(
+                    {
+                        "timestamp": [
+                            datetime(2020, 1, 1, tzinfo=timezone.utc)
+                        ]
+                    }
+                )
+            }
+        ),
+    )
+    request = AnalysisRunRequest(
+        ticker="AAPL",
+        asset_type="stock",
+        horizon="short-term",
+    )
+
+    with pytest.raises(main.HTTPException) as stale:
+        asyncio.run(main.run_analysis_module("selected-version", request))
+
+    assert stale.value.status_code == 422
+    assert "newer than 60 seconds" in stale.value.detail
+    store.set_selection(
+        "selected-version",
+        "2.0.0",
+        enabled=True,
+    )
+    persisted = asyncio.run(
+        main.run_analysis_module("selected-version", request)
+    )
+    assert persisted["module_version"] == "2.0.0"
+    assert persisted["result"] == {"version": "2.0.0"}
