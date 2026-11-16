@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -366,7 +366,7 @@ def test_module_api_persists_valid_result_and_fails_closed_on_stale_data(
     monkeypatch.setattr(main, "_analysis_registry", registry)
     frames = {"1d": frame(), "4h": frame(), "1h": frame()}
     frames["1d"]["timestamp"] = pd.date_range(
-        end=datetime.now(timezone.utc),
+        end=datetime.now(timezone.utc) - timedelta(days=3),
         periods=len(frames["1d"]),
         freq="D",
     )
@@ -397,6 +397,16 @@ def test_module_api_persists_valid_result_and_fails_closed_on_stale_data(
     assert persisted["status"] == "completed"
     assert persisted["normalized_event"]["research_only"] is True
     assert persisted["normalized_event"]["module_version"] == "1.0.0"
+    assert (
+        registry.get("current-signal-analysis")
+        .definition.requirements[0]
+        .max_age_seconds
+        == 432_000
+    )
+
+    with pytest.raises(main.HTTPException) as unknown:
+        asyncio.run(main.run_analysis_module("unknown-module", request))
+    assert unknown.value.status_code == 404
 
     monkeypatch.setattr(
         main,
