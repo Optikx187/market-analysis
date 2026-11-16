@@ -7,6 +7,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -381,6 +382,10 @@ class AnalysisStore:
         return self.get_run(run_id)
 
     def get_run(self, run_id: str) -> dict[str, object]:
+        try:
+            normalized_run_id = str(UUID(run_id))
+        except (TypeError, ValueError) as error:
+            raise KeyError(run_id) from error
         run_cast = (
             "CAST(:run_id AS UUID)" if self.postgresql else ":run_id"
         )
@@ -396,11 +401,13 @@ class AnalysisStore:
                     """
                 ),
                 {
-                    "run_id": run_id,
+                    "run_id": normalized_run_id,
                     "tenant_id": self.tenant_id,
                     "user_key": self.user_key,
                 },
-            ).mappings().one()
+            ).mappings().one_or_none()
+        if row is None:
+            raise KeyError(run_id)
         payload: dict[str, Any] = dict(row)
         for key in (
             "request_json",
