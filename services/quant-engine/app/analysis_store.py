@@ -121,23 +121,6 @@ class AnalysisStore:
             ),
         }
         with self.engine.begin() as connection:
-            existing = connection.execute(
-                text(
-                    f"""
-                    SELECT definition_sha256
-                    FROM {self.definition_table}
-                    WHERE module_key = :module_key
-                      AND module_version = :module_version
-                    """
-                ),
-                values,
-            ).scalar_one_or_none()
-            if existing is not None:
-                if str(existing) != digest:
-                    raise ValueError(
-                        "Registered analysis module version is immutable"
-                    )
-                return
             connection.execute(
                 text(
                     f"""
@@ -149,10 +132,26 @@ class AnalysisStore:
                         {self._json_cast("definition_json")},
                         :definition_sha256, {self._time("created_at")}
                     )
+                    ON CONFLICT (module_key, module_version) DO NOTHING
                     """
                 ),
                 values,
             )
+            existing = connection.execute(
+                text(
+                    f"""
+                    SELECT definition_sha256
+                    FROM {self.definition_table}
+                    WHERE module_key = :module_key
+                      AND module_version = :module_version
+                    """
+                ),
+                values,
+            ).scalar_one()
+            if str(existing) != digest:
+                raise ValueError(
+                    "Registered analysis module version is immutable"
+                )
 
     def ensure_selection(
         self,
