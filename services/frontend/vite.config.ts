@@ -28,6 +28,7 @@ export default defineConfig({
       "/api/price-alerts": dataIngestionUrl,
       "/api/earnings": dataIngestionUrl,
       "/api/analyze": quantEngineUrl,
+      "/api/analysis": quantEngineUrl,
       "/api/risk-profile": quantEngineUrl,
       "/api/regime": quantEngineUrl,
       "/api/scan-all": quantEngineUrl,
