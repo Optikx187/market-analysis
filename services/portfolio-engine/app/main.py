@@ -4074,6 +4074,15 @@ async def update_organization_membership(
         organization_id=parsed_id,
         permission="members.update",
     )
+    await organizations.lock_organization(
+        db,
+        organization_id=parsed_id,
+    )
+    actor = await organizations.require_permission(
+        db,
+        organization_id=parsed_id,
+        permission="members.update",
+    )
     role = request.role.strip().lower()
     if role not in organizations.ROLES:
         raise HTTPException(422, "Membership role is not permitted")
@@ -4118,6 +4127,15 @@ async def remove_organization_membership(
     db: AsyncSession = Depends(get_db),
 ):
     parsed_id = organizations.parse_organization_id(organization_id)
+    actor = await organizations.require_permission(
+        db,
+        organization_id=parsed_id,
+        permission="members.remove",
+    )
+    await organizations.lock_organization(
+        db,
+        organization_id=parsed_id,
+    )
     actor = await organizations.require_permission(
         db,
         organization_id=parsed_id,

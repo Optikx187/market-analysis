@@ -283,6 +283,11 @@ async def create_invitation(
         permission="members.invite",
     )
     await lock_organization(db, organization_id=organization_id)
+    actor = await require_permission(
+        db,
+        organization_id=organization_id,
+        permission="members.invite",
+    )
     if role not in INVITABLE_ROLES:
         raise HTTPException(422, "Invitation role is not permitted")
     if actor.role == ADMIN and role == ADMIN:
