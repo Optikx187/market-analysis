@@ -48,8 +48,10 @@ from app.models import (
     TradeExecution, TradeJournal, ExecutionKind, PaperOrder, PaperOrderEvent, PaperOrderFill,
     RiskSnapshot,
     ActionItem, DashboardPreference, LiveTradingControl, LiveOrder, LiveOrderFill,
-    LiveExecutionAudit, _utc_now,
+    LiveExecutionAudit, Organization, OrganizationAccessAudit,
+    OrganizationMembership, _utc_now,
 )
+from app import organizations
 from app import action_items as actions
 from app import attribution as attribution_math
 from app import paper_orders as paper
@@ -3861,6 +3863,23 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class OrganizationCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class OrganizationInvitationRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    role: str
+
+
+class OrganizationInvitationAcceptRequest(BaseModel):
+    token: str = Field(min_length=20, max_length=200)
+
+
+class OrganizationMembershipUpdateRequest(BaseModel):
+    role: str
+
+
 @app.post("/api/auth/register")
 async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     """Register a new user (only when AUTH_ENABLED=true)."""
@@ -3875,6 +3894,13 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
         display_name=req.display_name or req.username,
     )
     db.add(user)
+    await db.flush()
+    await organizations.create_owned_organization(
+        db,
+        user_key=str(user.id),
+        username=user.username,
+        display_name=user.display_name or user.username,
+    )
     await db.commit()
     await db.refresh(user)
     token = create_token(str(user.id), user.username)
@@ -3912,6 +3938,254 @@ async def auth_session():
     return {
         "auth_enabled": settings.AUTH_ENABLED,
         "user_id": current_user_key(),
+    }
+
+
+@app.get("/api/organizations")
+async def get_organizations(db: AsyncSession = Depends(get_db)):
+    return {"organizations": await organizations.list_organizations(db)}
+
+
+@app.post("/api/organizations", status_code=201)
+async def create_organization(
+    request: OrganizationCreateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    organization_name = request.name.strip()
+    if not organization_name:
+        raise HTTPException(422, "Organization name is required")
+    user_key = current_user_key() or DEFAULT_USER_KEY
+    username = "local-operator"
+    display_name = "Local operator"
+    if user_key != DEFAULT_USER_KEY:
+        user = await db.get(User, _parse_entity_id(user_key))
+        if user is None or not user.is_active:
+            raise HTTPException(403, "Active registered account required")
+        username = user.username
+        display_name = user.display_name or user.username
+    organization = await organizations.create_owned_organization(
+        db,
+        user_key=user_key,
+        username=username,
+        display_name=display_name,
+        organization_name=organization_name,
+    )
+    await db.commit()
+    await db.refresh(organization)
+    return organizations.organization_dict(organization, organizations.OWNER)
+
+
+@app.get("/api/organizations/{organization_id}")
+async def get_organization(
+    organization_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    parsed_id = organizations.parse_organization_id(organization_id)
+    membership = await organizations.require_permission(
+        db,
+        organization_id=parsed_id,
+        permission="organization.read",
+    )
+    organization = await db.get(Organization, parsed_id)
+    if organization is None:
+        raise HTTPException(404, "Organization not found")
+    return organizations.organization_dict(organization, membership.role)
+
+
+@app.get("/api/organizations/{organization_id}/members")
+async def get_organization_members(
+    organization_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    parsed_id = organizations.parse_organization_id(organization_id)
+    await organizations.require_permission(
+        db,
+        organization_id=parsed_id,
+        permission="members.read",
+    )
+    rows = (
+        await db.execute(
+            select(OrganizationMembership)
+            .where(
+                OrganizationMembership.organization_id == parsed_id,
+                OrganizationMembership.is_active.is_(True),
+            )
+            .order_by(OrganizationMembership.username)
+        )
+    ).scalars().all()
+    return {
+        "members": [
+            organizations.membership_dict(membership)
+            for membership in rows
+        ]
+    }
+
+
+@app.post(
+    "/api/organizations/{organization_id}/invitations",
+    status_code=201,
+)
+async def invite_organization_member(
+    organization_id: str,
+    request: OrganizationInvitationRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    parsed_id = organizations.parse_organization_id(organization_id)
+    invitation, token = await organizations.create_invitation(
+        db,
+        organization_id=parsed_id,
+        invitee_username=request.username.strip(),
+        role=request.role.strip().lower(),
+    )
+    return {
+        "id": str(invitation.id),
+        "organization_id": str(invitation.organization_id),
+        "username": invitation.invitee_username,
+        "role": invitation.role,
+        "expires_at": invitation.expires_at,
+        "token": token,
+    }
+
+
+@app.post("/api/organizations/invitations/accept")
+async def accept_organization_invitation(
+    request: OrganizationInvitationAcceptRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    membership = await organizations.accept_invitation(
+        db,
+        token=request.token,
+    )
+    return organizations.membership_dict(membership)
+
+
+@app.patch(
+    "/api/organizations/{organization_id}/members/{membership_id}",
+)
+async def update_organization_membership(
+    organization_id: str,
+    membership_id: str,
+    request: OrganizationMembershipUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    parsed_id = organizations.parse_organization_id(organization_id)
+    actor = await organizations.require_permission(
+        db,
+        organization_id=parsed_id,
+        permission="members.update",
+    )
+    role = request.role.strip().lower()
+    if role not in organizations.ROLES:
+        raise HTTPException(422, "Membership role is not permitted")
+    membership = (
+        await db.execute(
+            select(OrganizationMembership).where(
+                OrganizationMembership.id == _parse_entity_id(membership_id),
+                OrganizationMembership.organization_id == parsed_id,
+                OrganizationMembership.is_active.is_(True),
+            )
+        )
+    ).scalars().first()
+    if membership is None:
+        raise HTTPException(404, "Organization membership not found")
+    if actor.role != organizations.OWNER and (
+        membership.role in {organizations.OWNER, organizations.ADMIN}
+        or role in {organizations.OWNER, organizations.ADMIN}
+    ):
+        raise HTTPException(403, "Only an owner can manage administrators")
+    if (
+        membership.role == organizations.OWNER
+        and role != organizations.OWNER
+        and await organizations.active_owner_count(
+            db,
+            organization_id=parsed_id,
+        ) <= 1
+    ):
+        raise HTTPException(409, "The last owner cannot be downgraded")
+    membership.role = role
+    await db.commit()
+    await db.refresh(membership)
+    return organizations.membership_dict(membership)
+
+
+@app.delete(
+    "/api/organizations/{organization_id}/members/{membership_id}",
+    status_code=204,
+)
+async def remove_organization_membership(
+    organization_id: str,
+    membership_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    parsed_id = organizations.parse_organization_id(organization_id)
+    actor = await organizations.require_permission(
+        db,
+        organization_id=parsed_id,
+        permission="members.remove",
+    )
+    membership = (
+        await db.execute(
+            select(OrganizationMembership).where(
+                OrganizationMembership.id == _parse_entity_id(membership_id),
+                OrganizationMembership.organization_id == parsed_id,
+                OrganizationMembership.is_active.is_(True),
+            )
+        )
+    ).scalars().first()
+    if membership is None:
+        raise HTTPException(404, "Organization membership not found")
+    if actor.role != organizations.OWNER and membership.role in {
+        organizations.OWNER,
+        organizations.ADMIN,
+    }:
+        raise HTTPException(403, "Only an owner can remove administrators")
+    if (
+        membership.role == organizations.OWNER
+        and await organizations.active_owner_count(
+            db,
+            organization_id=parsed_id,
+        ) <= 1
+    ):
+        raise HTTPException(409, "The last owner cannot be removed")
+    membership.is_active = False
+    await db.commit()
+    return None
+
+
+@app.get("/api/organizations/{organization_id}/access-audit")
+async def get_organization_access_audit(
+    organization_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    parsed_id = organizations.parse_organization_id(organization_id)
+    await organizations.require_permission(
+        db,
+        organization_id=parsed_id,
+        permission="audit.read",
+    )
+    rows = (
+        await db.execute(
+            select(OrganizationAccessAudit)
+            .where(OrganizationAccessAudit.organization_id == parsed_id)
+            .order_by(desc(OrganizationAccessAudit.created_at))
+            .limit(100)
+        )
+    ).scalars().all()
+    return {
+        "events": [
+            {
+                "id": str(row.id),
+                "actor_user_key": row.actor_user_key,
+                "action": row.action,
+                "outcome": row.outcome,
+                "required_roles": [
+                    role for role in row.required_roles.split(",") if role
+                ],
+                "detail": row.detail,
+                "created_at": row.created_at,
+            }
+            for row in rows
+        ]
     }
 
 

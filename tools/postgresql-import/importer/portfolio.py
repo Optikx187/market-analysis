@@ -16,6 +16,10 @@ from importer.target import Target
 
 TABLE_ORDER = (
     "users",
+    "organizations",
+    "organization_memberships",
+    "organization_invitations",
+    "organization_access_audit",
     "credential_secrets",
     "portfolio",
     "trades",
@@ -115,6 +119,7 @@ def _preallocate_mappings(
             if "id" not in row:
                 continue
             try:
+                preserve_source_uuid = source_table == "organizations"
                 target.mapping(
                     source_store="portfolio",
                     source_table=source_table,
@@ -124,7 +129,7 @@ def _preallocate_mappings(
                     target_table=target_table,
                     target_id_override=(
                         str(row["id"])
-                        if target_id_type != "uuid"
+                        if target_id_type != "uuid" or preserve_source_uuid
                         else None
                     ),
                 )
@@ -214,8 +219,17 @@ def _transform_row(
             else:
                 values[name] = int(row["id"])
             continue
-        if name == "user_key" and name in row:
-            values[name] = remap_user(row[name], user_map)
+        if name in {
+            "user_key",
+            "created_by_user_key",
+            "invited_by_user_key",
+            "actor_user_key",
+        } and name in row:
+            values[name] = (
+                remap_user(row[name], user_map)
+                if row[name] is not None
+                else None
+            )
             continue
         if name not in row:
             continue
@@ -283,6 +297,26 @@ def _comparable(
     }
 
 
+def _matches_existing(
+    source_table: str,
+    existing: dict[str, object],
+    values: dict[str, object],
+) -> bool:
+    ignored = {
+        "organizations": {"created_at"},
+        "organization_memberships": {"id", "joined_at"},
+    }.get(source_table, set())
+    actual = {
+        key: existing[key]
+        for key in values
+        if key in existing and key not in ignored
+    }
+    expected = {
+        key: value for key, value in values.items() if key not in ignored
+    }
+    return checksum(_comparable(actual)) == checksum(_comparable(expected))
+
+
 def import_portfolio(
     source: ReadOnlySQLite,
     target: Target,
@@ -339,15 +373,21 @@ def import_portfolio(
                     if target.mode == "apply"
                     else None
                 )
+                if (
+                    existing is None
+                    and target.mode == "apply"
+                    and source_table == "organization_memberships"
+                ):
+                    existing = target.fetch_by_columns(
+                        "portfolio",
+                        target_table,
+                        {
+                            "organization_id": values["organization_id"],
+                            "user_key": values["user_key"],
+                        },
+                    )
                 if existing is not None:
-                    actual = {
-                        key: existing[key]
-                        for key in values
-                        if key in existing
-                    }
-                    if checksum(_comparable(actual)) != checksum(
-                        _comparable(values)
-                    ):
+                    if not _matches_existing(source_table, existing, values):
                         raise ValueError(
                             f"target row conflicts for id {row.get('id')}"
                         )

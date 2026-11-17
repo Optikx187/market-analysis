@@ -47,6 +47,11 @@ def reset_current_user_key(token: Token[str]) -> None:
 
 
 def validate_auth_configuration() -> None:
+    if settings.AUTH_ENABLED and not settings.ORGANIZATION_ENFORCEMENT_ENABLED:
+        raise RuntimeError(
+            "ORGANIZATION_ENFORCEMENT_ENABLED may only be disabled "
+            "for auth-disabled single-operator compatibility"
+        )
     if not settings.AUTH_ENABLED:
         return
     secret = settings.JWT_SECRET.strip()
