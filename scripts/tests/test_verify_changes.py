@@ -236,6 +236,21 @@ class ClassifierTest(unittest.TestCase):
 
 
 class JobCatalogTest(unittest.TestCase):
+    def test_notification_image_build_uses_shared_schema_context(self) -> None:
+        catalog = verify_changes.job_catalog("origin/master")
+
+        self.assertEqual(
+            catalog["image-notification-gateway"].commands[0].argv,
+            (
+                "docker",
+                "build",
+                "--quiet",
+                "-f",
+                "services/notification-gateway/Dockerfile",
+                ".",
+            ),
+        )
+
     def test_each_named_service_has_a_portable_command(self) -> None:
         catalog = verify_changes.job_catalog("origin/master")
         for service in verify_changes.SERVICE_NAMES:

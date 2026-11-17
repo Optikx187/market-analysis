@@ -8,16 +8,18 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from credentials import get_provider_credentials
+from event_contracts import EventContractConsumer, EventQuarantine
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, model_validator
 from pydantic_settings import BaseSettings
-
-from credentials import get_provider_credentials
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,6 +38,7 @@ class Settings(BaseSettings):
     PUBLIC_BASE_URL: str = "http://localhost:3000"
     ALLOWED_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
     NOTIFICATION_MODE: str = "live"
+    EVENT_QUARANTINE_PATH: str = ""
     TELEGRAM_API_BASE_URL: str = "https://api.telegram.org"
     TWILIO_API_BASE_URL: str = "https://api.twilio.com"
 
@@ -69,8 +72,14 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-_bot_task: Optional[asyncio.Task] = None
+_bot_task: asyncio.Task | None = None
 _fake_deliveries: list[dict[str, str]] = []
+_event_quarantine = EventQuarantine(
+    Path(settings.EVENT_QUARANTINE_PATH)
+    if settings.EVENT_QUARANTINE_PATH.strip()
+    else None
+)
+_event_consumer = EventContractConsumer(quarantine=_event_quarantine)
 
 _FAKE_CREDENTIALS = {
     "telegram": {
@@ -239,7 +248,16 @@ async def health():
         "service": "notification-gateway",
         "deployment_profile": settings.DEPLOYMENT_PROFILE,
         "notification_mode": settings.NOTIFICATION_MODE,
+        "quarantined_event_count": len(_event_quarantine.records),
     }
+
+
+@app.post("/api/events/validate")
+async def validate_event_envelope(payload: dict[str, Any]):
+    """Validate and redact an event without invoking any provider adapter."""
+    result = _event_consumer.consume(payload)
+    status_code = 200 if result.status == "accepted" else 202
+    return JSONResponse(status_code=status_code, content=result.public_dict())
 
 
 @app.get("/api/notify/sandbox-deliveries")

@@ -286,7 +286,7 @@ def test_store_persists_immutable_definition_selection_and_result(
             asset_type="stock",
             horizon="short-term",
             generated_at=generated_at,
-            expires_at=generated_at,
+            expires_at=generated_at + timedelta(hours=1),
             recommendation={"signal": None},
         ),
     )
@@ -396,7 +396,10 @@ def test_module_api_persists_valid_result_and_fails_closed_on_stale_data(
     assert persisted["ticker"] == "AAPL"
     assert persisted["status"] == "completed"
     assert persisted["normalized_event"]["research_only"] is True
-    assert persisted["normalized_event"]["module_version"] == "1.0.0"
+    assert (
+        persisted["normalized_event"]["payload"]["data"]["module_version"]
+        == "1.0.0"
+    )
     assert (
         registry.get("current-signal-analysis")
         .definition.requirements[0]
@@ -475,10 +478,10 @@ def test_module_api_uses_selected_version_and_enforces_freshness(
                     module_version=self.definition.module_version,
                     ticker=context.request.ticker,
                     asset_type=context.request.asset_type,
-                    horizon=context.request.horizon,
-                    generated_at=generated_at,
-                    expires_at=generated_at,
-                    recommendation=output,
+                        horizon=context.request.horizon,
+                        generated_at=generated_at,
+                        expires_at=generated_at + timedelta(minutes=1),
+                        recommendation=output,
                 ),
             )
 

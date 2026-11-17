@@ -191,7 +191,6 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
                     PYTHON,
                     "-m",
                     "pytest",
-                    "test_credentials.py",
                     "-q",
                     cwd="services/notification-gateway",
                 ),
@@ -287,7 +286,15 @@ def job_catalog(base_ref: str) -> dict[str, Job]:
                         "docker",
                         "build",
                         "--quiet",
-                        f"services/{service}",
+                        *(
+                            (
+                                "-f",
+                                "services/notification-gateway/Dockerfile",
+                                ".",
+                            )
+                            if service == "notification-gateway"
+                            else (f"services/{service}",)
+                        ),
                     ),
                 ),
             )

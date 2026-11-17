@@ -496,13 +496,19 @@ The quant engine exposes a local, versioned analysis registry:
   module and stores user configuration;
 - `POST /api/analysis/modules/{module_key}/run` validates required data,
   executes the selected version, and persists research evidence, lineage,
-  expiry, and a normalized event;
+  expiry, and a versioned recommendation envelope;
 - `GET /api/analysis/runs/{run_id}` retrieves the immutable result.
 
 `current-signal-analysis@1.0.0` wraps the existing EMA/RSI/ATR and regime math;
 parity tests prevent silent financial changes. Analysis modules do not import
 notification or broker code. Their normalized events are research-only until
 separate portfolio risk and execution gates approve an action.
+
+The shared
+[versioned event contract](docs/architecture/events/README.md) defines
+recommendation, incident, order-state, and operational envelopes. Unsupported
+or incompatible versions are quarantined rather than guessed, and provider
+adapters remain independent from analysis modules.
 
 Missing evidence receives no optimistic score. An opportunity must pass its out-of-sample, data-quality, regime, score, and portfolio-risk requirements before it is eligible.
 

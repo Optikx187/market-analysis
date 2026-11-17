@@ -1,0 +1,529 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://market-analysis.local/schemas/events/v1/envelope.schema.json",
+  "title": "Market Analysis Event Envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "schema_version",
+    "producer",
+    "tenant_id",
+    "audience",
+    "severity",
+    "occurred_at",
+    "expires_at",
+    "deduplication_key",
+    "subject",
+    "summary",
+    "payload",
+    "metadata",
+    "research_only"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "event_type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:\\.[a-z][a-z0-9-]*)+$",
+      "maxLength": 160
+    },
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "producer": {
+      "$ref": "#/definitions/producer"
+    },
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "audience": {
+      "$ref": "#/definitions/audience"
+    },
+    "severity": {
+      "enum": [
+        "info",
+        "notice",
+        "warning",
+        "critical"
+      ]
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "deduplication_key": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9:._/-]+$"
+    },
+    "subject": {
+      "$ref": "#/definitions/subject"
+    },
+    "deep_links": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "$ref": "#/definitions/deepLink"
+      },
+      "default": []
+    },
+    "summary": {
+      "$ref": "#/definitions/summary"
+    },
+    "payload": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/recommendationPayload"
+        },
+        {
+          "$ref": "#/definitions/incidentPayload"
+        },
+        {
+          "$ref": "#/definitions/orderStatePayload"
+        },
+        {
+          "$ref": "#/definitions/operationPayload"
+        }
+      ]
+    },
+    "metadata": {
+      "$ref": "#/definitions/metadata"
+    },
+    "research_only": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "service",
+        "version"
+      ],
+      "properties": {
+        "service": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{2,63}$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[a-z0-9.-]+)?$"
+        }
+      }
+    },
+    "audience": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tenant_id",
+        "user_keys",
+        "route_keys"
+      ],
+      "properties": {
+        "tenant_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "user_keys": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 100,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        },
+        "route_keys": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 100,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9:._/-]{1,159}$"
+          }
+        }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subject_type",
+        "subject_id"
+      ],
+      "properties": {
+        "subject_type": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{1,79}$"
+        },
+        "subject_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "symbol": {
+          "type": "string",
+          "pattern": "^[A-Z0-9][A-Z0-9._/-]{0,29}$"
+        }
+      }
+    },
+    "deepLink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "url"
+      ],
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "url": {
+          "type": "string",
+          "format": "uri-reference",
+          "maxLength": 2048
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "body"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "disclaimer": {
+          "type": "string",
+          "maxLength": 500
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "correlation_id",
+        "causation_id",
+        "trace_id",
+        "tags",
+        "redacted_fields"
+      ],
+      "properties": {
+        "correlation_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 160
+        },
+        "causation_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 160
+        },
+        "trace_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 160
+        },
+        "tags": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9._-]{0,63}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "redacted_fields": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
+      }
+    },
+    "recommendationPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema_version",
+        "data"
+      ],
+      "properties": {
+        "kind": {
+          "const": "recommendation"
+        },
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "data": {
+          "$ref": "#/definitions/recommendationData"
+        }
+      }
+    },
+    "recommendationData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "module_key",
+        "module_version",
+        "ticker",
+        "asset_type",
+        "horizon",
+        "recommendation",
+        "evidence",
+        "lineage"
+      ],
+      "properties": {
+        "module_key": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{2,63}$"
+        },
+        "module_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[a-z0-9.-]+)?$"
+        },
+        "ticker": {
+          "type": "string",
+          "pattern": "^[A-Z0-9][A-Z0-9._/-]{0,29}$"
+        },
+        "asset_type": {
+          "enum": [
+            "stock",
+            "crypto"
+          ]
+        },
+        "horizon": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "recommendation": {
+          "type": "object"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "lineage": {
+          "type": "object"
+        }
+      }
+    },
+    "incidentPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema_version",
+        "data"
+      ],
+      "properties": {
+        "kind": {
+          "const": "incident"
+        },
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "data": {
+          "$ref": "#/definitions/incidentData"
+        }
+      }
+    },
+    "incidentData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "code",
+        "status",
+        "details"
+      ],
+      "properties": {
+        "category": {
+          "enum": [
+            "risk",
+            "data",
+            "security",
+            "operations"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,79}$"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "acknowledged",
+            "resolved"
+          ]
+        },
+        "details": {
+          "type": "object"
+        }
+      }
+    },
+    "orderStatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema_version",
+        "data"
+      ],
+      "properties": {
+        "kind": {
+          "const": "order_state"
+        },
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "data": {
+          "$ref": "#/definitions/orderStateData"
+        }
+      }
+    },
+    "orderStateData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "order_id",
+        "order_mode",
+        "state",
+        "symbol",
+        "side",
+        "quantity",
+        "price"
+      ],
+      "properties": {
+        "order_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "order_mode": {
+          "enum": [
+            "paper",
+            "live"
+          ]
+        },
+        "state": {
+          "enum": [
+            "submitted",
+            "accepted",
+            "partially_filled",
+            "filled",
+            "cancelled",
+            "rejected"
+          ]
+        },
+        "symbol": {
+          "type": "string",
+          "pattern": "^[A-Z0-9][A-Z0-9._/-]{0,29}$"
+        },
+        "side": {
+          "enum": [
+            "buy",
+            "sell"
+          ]
+        },
+        "quantity": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
+        },
+        "price": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
+        }
+      }
+    },
+    "operationPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema_version",
+        "data"
+      ],
+      "properties": {
+        "kind": {
+          "const": "operation"
+        },
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "data": {
+          "$ref": "#/definitions/operationData"
+        }
+      }
+    },
+    "operationData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "status",
+        "details"
+      ],
+      "properties": {
+        "operation": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{2,119}$"
+        },
+        "status": {
+          "enum": [
+            "started",
+            "healthy",
+            "degraded",
+            "failed",
+            "recovered",
+            "completed"
+          ]
+        },
+        "details": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

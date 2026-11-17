@@ -12,6 +12,7 @@ from uuid import UUID
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 
+from app.analysis_events import build_recommendation_event
 from app.analysis_modules import (
     AnalysisModuleDefinition,
     AnalysisModuleRegistry,
@@ -316,7 +317,15 @@ class AnalysisStore:
         completed_at: datetime,
     ) -> dict[str, object]:
         run_id = str(uuid7())
-        event = result.normalized_event
+        analysis_event = result.normalized_event
+        event = build_recommendation_event(
+            event_id=run_id,
+            tenant_id=self.tenant_id,
+            user_key=self.user_key,
+            event=analysis_event,
+            evidence=result.evidence,
+            lineage=result.lineage,
+        )
         values = {
             "run_id": run_id,
             "tenant_id": self.tenant_id,
@@ -347,9 +356,9 @@ class AnalysisStore:
                 else completed_at.isoformat()
             ),
             "expires_at": (
-                event.expires_at
+                analysis_event.expires_at
                 if self.postgresql
-                else event.expires_at.isoformat()
+                else analysis_event.expires_at.isoformat()
             ),
         }
         run_cast = (

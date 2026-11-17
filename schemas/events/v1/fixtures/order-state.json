@@ -1,0 +1,62 @@
+{
+  "event_id": "018f0c8a-7b9d-7cc2-9b34-000000000301",
+  "event_type": "order.paper.filled",
+  "schema_version": "1.0.0",
+  "producer": {
+    "service": "portfolio-engine",
+    "version": "1.0.0"
+  },
+  "tenant_id": "00000000-0000-7000-8000-000000000001",
+  "audience": {
+    "tenant_id": "00000000-0000-7000-8000-000000000001",
+    "user_keys": [
+      "default"
+    ],
+    "route_keys": [
+      "orders:paper"
+    ]
+  },
+  "severity": "info",
+  "occurred_at": "2026-01-15T16:00:00Z",
+  "expires_at": "2026-02-14T16:00:00Z",
+  "deduplication_key": "order:paper:018f0c8a-7b9d-7cc2-9b34-000000000302:filled",
+  "subject": {
+    "subject_type": "paper_order",
+    "subject_id": "018f0c8a-7b9d-7cc2-9b34-000000000302",
+    "symbol": "BTC/USD"
+  },
+  "deep_links": [
+    {
+      "label": "Open paper order",
+      "url": "/orders/paper/018f0c8a-7b9d-7cc2-9b34-000000000302"
+    }
+  ],
+  "summary": {
+    "title": "BTC/USD paper order filled",
+    "body": "The deterministic paper order filled at 45000.120000000000.",
+    "disclaimer": "Paper trade only; no real-money order was submitted."
+  },
+  "payload": {
+    "kind": "order_state",
+    "schema_version": "1.0.0",
+    "data": {
+      "order_id": "018f0c8a-7b9d-7cc2-9b34-000000000302",
+      "order_mode": "paper",
+      "state": "filled",
+      "symbol": "BTC/USD",
+      "side": "buy",
+      "quantity": "0.010000000000000000",
+      "price": "45000.120000000000"
+    }
+  },
+  "metadata": {
+    "correlation_id": "fixture-correlation-003",
+    "causation_id": "fixture-recommendation-003",
+    "trace_id": null,
+    "tags": {
+      "environment": "sandbox"
+    },
+    "redacted_fields": []
+  },
+  "research_only": false
+}

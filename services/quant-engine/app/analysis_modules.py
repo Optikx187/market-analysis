@@ -207,7 +207,7 @@ class CurrentSignalAnalysisModule:
         input_schema=AnalysisRunRequest.model_json_schema(),
         output_schema=CurrentSignalOutput.model_json_schema(),
         result_ttl_seconds=86_400,
-        normalized_event_type="analysis.signal.v1",
+        normalized_event_type="analysis.recommendation.generated",
     )
 
     def run(self, context: AnalysisContext) -> AnalysisModuleResult:

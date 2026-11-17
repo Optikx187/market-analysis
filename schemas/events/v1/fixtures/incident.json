@@ -1,0 +1,56 @@
+{
+  "event_id": "018f0c8a-7b9d-7cc2-9b34-000000000201",
+  "event_type": "data.quality.rejected",
+  "schema_version": "1.0.0",
+  "producer": {
+    "service": "data-ingestion",
+    "version": "1.0.0"
+  },
+  "tenant_id": "00000000-0000-7000-8000-000000000001",
+  "audience": {
+    "tenant_id": "00000000-0000-7000-8000-000000000001",
+    "user_keys": [
+      "default"
+    ],
+    "route_keys": [
+      "operations:data-quality"
+    ]
+  },
+  "severity": "warning",
+  "occurred_at": "2026-01-15T16:00:00Z",
+  "expires_at": "2026-01-16T16:00:00Z",
+  "deduplication_key": "data:quality:AAPL:1d:2026-01-15",
+  "subject": {
+    "subject_type": "instrument",
+    "subject_id": "AAPL",
+    "symbol": "AAPL"
+  },
+  "deep_links": [],
+  "summary": {
+    "title": "AAPL data rejected",
+    "body": "Daily candles failed the deterministic quality gate."
+  },
+  "payload": {
+    "kind": "incident",
+    "schema_version": "1.0.0",
+    "data": {
+      "category": "data",
+      "code": "STALE_CANDLES",
+      "status": "open",
+      "details": {
+        "interval": "1d",
+        "age_hours": 96
+      }
+    }
+  },
+  "metadata": {
+    "correlation_id": "fixture-correlation-002",
+    "causation_id": null,
+    "trace_id": null,
+    "tags": {
+      "environment": "sandbox"
+    },
+    "redacted_fields": []
+  },
+  "research_only": true
+}

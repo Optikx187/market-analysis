@@ -158,7 +158,9 @@ services:
 
   # NOTIFICATION GATEWAY (part of Service D)
   notification-gateway:
-    build: ./services/notification-gateway
+    build:
+      context: .
+      dockerfile: services/notification-gateway/Dockerfile
     expose:
       - "8003"
     environment:

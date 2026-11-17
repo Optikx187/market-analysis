@@ -1,0 +1,57 @@
+{
+  "event_id": "018f0c8a-7b9d-7cc2-9b34-000000000401",
+  "event_type": "operations.scanner.recovered",
+  "schema_version": "1.0.0",
+  "producer": {
+    "service": "quant-engine",
+    "version": "1.0.0"
+  },
+  "tenant_id": "00000000-0000-7000-8000-000000000001",
+  "audience": {
+    "tenant_id": "00000000-0000-7000-8000-000000000001",
+    "user_keys": [],
+    "route_keys": [
+      "operations:scanner"
+    ]
+  },
+  "severity": "notice",
+  "occurred_at": "2026-01-15T16:00:00Z",
+  "expires_at": "2026-01-22T16:00:00Z",
+  "deduplication_key": "operations:scanner:equity:recovered:2026-01-15T16",
+  "subject": {
+    "subject_type": "scanner_schedule",
+    "subject_id": "equity"
+  },
+  "deep_links": [
+    {
+      "label": "Open scanner status",
+      "url": "/scanner/status"
+    }
+  ],
+  "summary": {
+    "title": "Equity scanner recovered",
+    "body": "A replacement worker acquired the expired lease and resumed scanning."
+  },
+  "payload": {
+    "kind": "operation",
+    "schema_version": "1.0.0",
+    "data": {
+      "operation": "scanner.lease",
+      "status": "recovered",
+      "details": {
+        "schedule_key": "equity",
+        "attempt": 2
+      }
+    }
+  },
+  "metadata": {
+    "correlation_id": "fixture-correlation-004",
+    "causation_id": null,
+    "trace_id": null,
+    "tags": {
+      "environment": "sandbox"
+    },
+    "redacted_fields": []
+  },
+  "research_only": false
+}
