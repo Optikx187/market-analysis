@@ -102,6 +102,31 @@ def _mapping_id(
     return mapped
 
 
+def _remap_user_key(
+    target: Target,
+    value: object,
+    user_map: dict[str, str],
+) -> str:
+    source = str(value or "default")
+    explicit = remap_user(source, user_map)
+    if explicit != source:
+        return explicit
+    candidates: tuple[object, ...] = (
+        (source, int(source))
+        if source.isdecimal()
+        else (source,)
+    )
+    for candidate in candidates:
+        imported_user = target.lookup_mapping(
+            "portfolio",
+            "users",
+            candidate,
+        )
+        if imported_user is not None:
+            return imported_user
+    return source
+
+
 def _preallocate_mappings(
     source: ReadOnlySQLite,
     target: Target,
@@ -226,7 +251,7 @@ def _transform_row(
             "actor_user_key",
         } and name in row:
             values[name] = (
-                remap_user(row[name], user_map)
+                _remap_user_key(target, row[name], user_map)
                 if row[name] is not None
                 else None
             )

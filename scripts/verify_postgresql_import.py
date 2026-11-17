@@ -513,6 +513,20 @@ def main() -> int:
             psql(
                 postgres,
                 "import_test",
+                "SELECT COUNT(*) "
+                "FROM portfolio.organization_memberships AS membership "
+                "JOIN portfolio.users AS app_user "
+                "ON membership.user_key = app_user.id::text "
+                "WHERE app_user.username = 'alice' "
+                "AND membership.role = 'owner'",
+            ),
+            "1",
+            "imported organization owner identity",
+        )
+        assert_equal(
+            psql(
+                postgres,
+                "import_test",
                 "SELECT COUNT(*) FROM operations.import_deferred_records",
             ),
             "1",
