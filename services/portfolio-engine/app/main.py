@@ -4148,6 +4148,11 @@ async def remove_organization_membership(
     ):
         raise HTTPException(409, "The last owner cannot be removed")
     membership.is_active = False
+    await organizations.revoke_pending_invitations(
+        db,
+        organization_id=parsed_id,
+        invitee_username=membership.username,
+    )
     await db.commit()
     return None
 

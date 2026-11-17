@@ -193,6 +193,48 @@ def test_invitation_acceptance_and_role_matrix(
     assert admin_invite.status_code == 403
 
 
+def test_new_and_removed_members_cannot_use_older_invitations(
+    organization_client: TestClient,
+) -> None:
+    _, owner_token = _register(organization_client, "owner")
+    _, bob_token = _register(organization_client, "bob")
+    organization_id = _organizations(organization_client, owner_token)[0]["id"]
+
+    first = organization_client.post(
+        f"/api/organizations/{organization_id}/invitations",
+        headers=_headers(owner_token),
+        json={"username": "bob", "role": "viewer"},
+    ).json()
+    second = organization_client.post(
+        f"/api/organizations/{organization_id}/invitations",
+        headers=_headers(owner_token),
+        json={"username": "bob", "role": "analyst"},
+    ).json()
+
+    assert organization_client.post(
+        "/api/organizations/invitations/accept",
+        headers=_headers(bob_token),
+        json={"token": first["token"]},
+    ).status_code == 404
+    accepted = organization_client.post(
+        "/api/organizations/invitations/accept",
+        headers=_headers(bob_token),
+        json={"token": second["token"]},
+    )
+    assert accepted.status_code == 200
+
+    membership_id = accepted.json()["id"]
+    assert organization_client.delete(
+        f"/api/organizations/{organization_id}/members/{membership_id}",
+        headers=_headers(owner_token),
+    ).status_code == 204
+    assert organization_client.post(
+        "/api/organizations/invitations/accept",
+        headers=_headers(bob_token),
+        json={"token": first["token"]},
+    ).status_code == 404
+
+
 def test_last_owner_cannot_be_removed_or_downgraded(
     organization_client: TestClient,
 ) -> None:

@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Iterable
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import DEFAULT_USER_KEY, current_user_key
@@ -116,6 +116,48 @@ async def create_owned_organization(
         is_active=True,
     ))
     return organization
+
+
+async def lock_organization(
+    db: AsyncSession,
+    *,
+    organization_id,
+) -> Organization:
+    organization = (
+        await db.execute(
+            select(Organization)
+            .where(
+                Organization.id == organization_id,
+                Organization.is_active.is_(True),
+            )
+            .with_for_update()
+        )
+    ).scalars().first()
+    if organization is None:
+        raise HTTPException(404, "Organization not found")
+    return organization
+
+
+async def revoke_pending_invitations(
+    db: AsyncSession,
+    *,
+    organization_id,
+    invitee_username: str,
+    exclude_invitation_id=None,
+) -> None:
+    conditions = [
+        OrganizationInvitation.organization_id == organization_id,
+        OrganizationInvitation.invitee_username == invitee_username,
+        OrganizationInvitation.accepted_at.is_(None),
+        OrganizationInvitation.revoked_at.is_(None),
+    ]
+    if exclude_invitation_id is not None:
+        conditions.append(OrganizationInvitation.id != exclude_invitation_id)
+    await db.execute(
+        update(OrganizationInvitation)
+        .where(*conditions)
+        .values(revoked_at=_utc_now())
+    )
 
 
 async def record_access(
@@ -240,6 +282,7 @@ async def create_invitation(
         organization_id=organization_id,
         permission="members.invite",
     )
+    await lock_organization(db, organization_id=organization_id)
     if role not in INVITABLE_ROLES:
         raise HTTPException(422, "Invitation role is not permitted")
     if actor.role == ADMIN and role == ADMIN:
@@ -268,6 +311,11 @@ async def create_invitation(
     if existing is not None:
         raise HTTPException(409, "User is already an active member")
 
+    await revoke_pending_invitations(
+        db,
+        organization_id=organization_id,
+        invitee_username=invitee_username,
+    )
     token = secrets.token_urlsafe(32)
     invitation = OrganizationInvitation(
         organization_id=organization_id,
@@ -293,9 +341,21 @@ async def accept_invitation(
         await db.execute(
             select(OrganizationInvitation).where(
                 OrganizationInvitation.token_hash == token_hash,
-            ).with_for_update()
+            )
         )
     ).scalars().first()
+    if invitation is not None:
+        await lock_organization(
+            db,
+            organization_id=invitation.organization_id,
+        )
+        invitation = (
+            await db.execute(
+                select(OrganizationInvitation)
+                .where(OrganizationInvitation.token_hash == token_hash)
+                .with_for_update()
+            )
+        ).scalars().first()
     now = _utc_now()
     if (
         invitation is None
@@ -334,6 +394,12 @@ async def accept_invitation(
         membership.invited_by_user_key = invitation.invited_by_user_key
         membership.joined_at = now
     invitation.accepted_at = now
+    await revoke_pending_invitations(
+        db,
+        organization_id=invitation.organization_id,
+        invitee_username=invitation.invitee_username,
+        exclude_invitation_id=invitation.id,
+    )
     await db.commit()
     await db.refresh(membership)
     return membership
