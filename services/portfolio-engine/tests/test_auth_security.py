@@ -75,6 +75,18 @@ def test_auth_configuration_allows_disabled_auth_and_strong_secret(
     auth.validate_auth_configuration()
 
 
+def test_multi_user_auth_requires_organization_enforcement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "AUTH_ENABLED", True)
+    monkeypatch.setattr(settings, "ORGANIZATION_ENFORCEMENT_ENABLED", False)
+    monkeypatch.setattr(settings, "JWT_SECRET", STRONG_SECRET)
+    monkeypatch.setattr(settings, "JWT_ALGORITHM", "HS256")
+
+    with pytest.raises(RuntimeError, match="ORGANIZATION_ENFORCEMENT_ENABLED"):
+        auth.validate_auth_configuration()
+
+
 def test_tokens_reject_tampering_expiration_and_invalid_claims(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

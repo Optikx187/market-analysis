@@ -14,6 +14,7 @@ import {
   type SystemStatus,
 } from "@/lib/api";
 import type { DeepLinkFocus } from "@/lib/deepLink";
+import OrganizationPanel from "@/components/OrganizationPanel";
 
 interface EditingService {
   name: string;
@@ -224,6 +225,8 @@ export default function SettingsPanel({ focus }: { focus?: DeepLinkFocus }) {
         Provider credentials are encrypted in Portfolio Engine, masked by default,
         and removed from <code>.env</code> after migration.
       </p>
+
+      <OrganizationPanel />
 
       <div className="mb-4 rounded border p-3">
         <div className="text-sm font-medium">Protected settings access</div>

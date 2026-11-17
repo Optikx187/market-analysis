@@ -46,6 +46,10 @@ implicit.
 | `candle_revisions` | `market_data.candle_revisions` |
 | `price_alerts` | Future `notifications.alert_rules`, tenant/user scoped and keyed by instrument UUID |
 | `users` | `identity.users`; tenant role in `identity.memberships` |
+| `organizations` | `identity.organizations` |
+| `organization_memberships` | `identity.memberships` |
+| `organization_invitations` | Future `identity.organization_invitations`; token hashes only |
+| `organization_access_audit` | `operations.audit_events`; preserve denied cross-tenant access evidence |
 | `credential_secrets` | Future `operations.credential_bindings` containing an opaque secret-manager reference, never plaintext |
 | `portfolio` | `portfolio.portfolios` |
 | `trades` | `portfolio.trades` |

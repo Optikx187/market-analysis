@@ -217,6 +217,23 @@ class Target:
         )
         return self.connection.execute(query, (target_id,)).fetchone()
 
+    def fetch_by_columns(
+        self,
+        schema: str,
+        table: str,
+        values: dict[str, object],
+    ) -> dict[str, object] | None:
+        predicates = sql.SQL(" AND ").join(
+            sql.SQL("{}=%s").format(sql.Identifier(column))
+            for column in values
+        )
+        query = sql.SQL("SELECT * FROM {}.{} WHERE {}").format(
+            sql.Identifier(schema),
+            sql.Identifier(table),
+            predicates,
+        )
+        return self.connection.execute(query, list(values.values())).fetchone()
+
     def insert(
         self,
         schema: str,

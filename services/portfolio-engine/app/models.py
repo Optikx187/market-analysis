@@ -79,6 +79,16 @@ def _tenant_id():
     )
 
 
+def _organization_id():
+    default_value = uuid7 if POSTGRESQL_STORAGE else lambda: str(uuid.uuid4())
+    return Column(
+        TENANT_ID_TYPE,
+        primary_key=True,
+        default=default_value,
+        autoincrement=False,
+    )
+
+
 def _utc_now() -> datetime.datetime:
     """UTC timestamp with microseconds so audit rows stay strictly ordered."""
     value = datetime.datetime.now(datetime.timezone.utc)
@@ -691,6 +701,92 @@ class User(Base):
     display_name = Column(String(200), nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(TIMESTAMP_TYPE, server_default=func.now())
+
+
+class Organization(Base):
+    __tablename__ = "organizations"
+    __table_args__ = _table_args()
+
+    id = _organization_id()
+    slug = Column(String(100), nullable=False, unique=True, index=True)
+    name = Column(String(200), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_by_user_key = Column(String(120), nullable=False, index=True)
+    created_at = Column(TIMESTAMP_TYPE, nullable=False, default=_utc_now)
+
+
+class OrganizationMembership(Base):
+    __tablename__ = "organization_memberships"
+    __table_args__ = _table_args(
+        UniqueConstraint(
+            "organization_id",
+            "user_key",
+            name="uq_organization_membership",
+        ),
+        CheckConstraint(
+            "role IN ('owner', 'admin', 'operator', 'analyst', 'viewer')",
+            name="ck_organization_membership_role",
+        ),
+    )
+
+    id = _entity_id()
+    organization_id = Column(
+        TENANT_ID_TYPE,
+        ForeignKey(f"{_table_name('organizations')}.id"),
+        nullable=False,
+        index=True,
+    )
+    user_key = Column(String(120), nullable=False, index=True)
+    username = Column(String(100), nullable=False)
+    role = Column(String(20), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    invited_by_user_key = Column(String(120), nullable=True)
+    joined_at = Column(TIMESTAMP_TYPE, nullable=False, default=_utc_now)
+
+
+class OrganizationInvitation(Base):
+    __tablename__ = "organization_invitations"
+    __table_args__ = _table_args(
+        CheckConstraint(
+            "role IN ('admin', 'operator', 'analyst', 'viewer')",
+            name="ck_organization_invitation_role",
+        ),
+    )
+
+    id = _entity_id()
+    organization_id = Column(
+        TENANT_ID_TYPE,
+        ForeignKey(f"{_table_name('organizations')}.id"),
+        nullable=False,
+        index=True,
+    )
+    invitee_username = Column(String(100), nullable=False, index=True)
+    role = Column(String(20), nullable=False)
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    invited_by_user_key = Column(String(120), nullable=False)
+    expires_at = Column(TIMESTAMP_TYPE, nullable=False)
+    accepted_at = Column(TIMESTAMP_TYPE, nullable=True)
+    revoked_at = Column(TIMESTAMP_TYPE, nullable=True)
+    created_at = Column(TIMESTAMP_TYPE, nullable=False, default=_utc_now)
+
+
+class OrganizationAccessAudit(Base):
+    __tablename__ = "organization_access_audit"
+    __table_args__ = _table_args(
+        CheckConstraint(
+            "outcome IN ('allowed', 'denied')",
+            name="ck_organization_access_audit_outcome",
+        ),
+    )
+
+    id = _entity_id()
+    organization_id = Column(TENANT_ID_TYPE, nullable=True, index=True)
+    actor_user_key = Column(String(120), nullable=False, index=True)
+    action = Column(String(100), nullable=False, index=True)
+    outcome = Column(String(20), nullable=False)
+    required_roles = Column(String(200), nullable=False, default="")
+    detail = Column(Text, nullable=False, default="")
+    created_at = Column(TIMESTAMP_TYPE, nullable=False, default=_utc_now)
 
 
 USER_SCOPED_MODELS = (

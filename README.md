@@ -679,6 +679,7 @@ Authentication is optional:
 
 ```dotenv
 AUTH_ENABLED=false
+ORGANIZATION_ENFORCEMENT_ENABLED=true
 JWT_SECRET=
 JWT_ALGORITHM=HS256
 JWT_EXPIRY_HOURS=24
@@ -691,6 +692,11 @@ When enabled:
 - `JWT_SECRET` must contain at least 32 bytes of non-default material;
 - `JWT_ALGORITHM` must be `HS256`;
 - users register or sign in through the UI or auth API;
+- each user receives an owned default organization;
+- owners and admins manage organization memberships and one-time invitations
+  from **Settings → Organizations & access**;
+- roles are explicit (`owner`, `admin`, `operator`, `analyst`, `viewer`) and
+  permissions deny by default;
 - protected portfolio APIs require a bearer token;
 - portfolio/trade/order records are scoped to the authenticated user;
 - signing out or closing the tab clears the frontend session.
@@ -701,9 +707,13 @@ Generate a JWT secret:
 docker run --rm python:3.12-slim python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-For any remote deployment, terminate TLS at a trusted reverse proxy or load balancer, restrict network access, and enable authentication.
+For any remote deployment, terminate TLS at a trusted reverse proxy or load balancer, restrict network access, and enable authentication. Keep `ORGANIZATION_ENFORCEMENT_ENABLED=true` whenever authentication is enabled. It may only be disabled for an auth-disabled, single-operator compatibility deployment.
 
-The current user model is not yet a complete commercial tenancy system. It does not provide organizations, roles, subscription plans, quotas, or per-tenant notification destinations.
+Existing users receive an owned default organization during migration. The
+organization migration is additive; rollback requires restoring the verified
+pre-migration backup so membership and access-audit history are not silently
+discarded. Organization roles are now available, while subscription plans,
+quotas, and tenant-owned notification destinations remain future work.
 
 ## Credentials and key rotation
 
