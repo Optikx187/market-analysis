@@ -257,6 +257,16 @@ def _transform_row(
         if name not in row:
             continue
         value = row[name]
+        if (
+            source_table == "users"
+            and name == "display_name"
+            and isinstance(value, str)
+            and len(value) > 200
+        ):
+            value = value[:200]
+            report.warnings.append(
+                "portfolio.users.display_name was truncated to 200 characters"
+            )
         explicit = _explicit_reference(
             target,
             source_table,

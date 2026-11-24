@@ -241,7 +241,7 @@ def portfolio_rows() -> dict[str, list[dict[str, object]]]:
                 "id": 1,
                 "username": "alice",
                 "password_hash": "scrypt$fixture",
-                "display_name": "Alice",
+                "display_name": "A" * 400,
                 "is_active": 1,
                 "created_at": "2026-01-01 10:00:00",
             }

@@ -127,6 +127,20 @@ def test_registration_truncates_default_organization_name(
     assert len(organization["name"]) == 200
 
 
+def test_registration_rejects_oversized_display_name(
+    organization_client: TestClient,
+) -> None:
+    response = organization_client.post(
+        "/api/auth/register",
+        json={
+            "username": "oversized-name",
+            "password": "password123",
+            "display_name": "x" * 201,
+        },
+    )
+    assert response.status_code == 422
+
+
 def test_long_workspace_names_keep_unique_slug_suffixes(
     organization_client: TestClient,
 ) -> None:

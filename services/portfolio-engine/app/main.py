@@ -3855,7 +3855,7 @@ async def trade_recommendation(
 class RegisterRequest(BaseModel):
     username: str
     password: str
-    display_name: Optional[str] = None
+    display_name: Optional[str] = Field(default=None, max_length=200)
 
 
 class LoginRequest(BaseModel):

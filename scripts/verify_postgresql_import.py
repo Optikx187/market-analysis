@@ -527,6 +527,16 @@ def main() -> int:
             psql(
                 postgres,
                 "import_test",
+                "SELECT length(display_name) "
+                "FROM portfolio.users WHERE username = 'alice'",
+            ),
+            "200",
+            "legacy display-name normalization",
+        )
+        assert_equal(
+            psql(
+                postgres,
+                "import_test",
                 "SELECT COUNT(*) FROM operations.import_deferred_records",
             ),
             "1",
