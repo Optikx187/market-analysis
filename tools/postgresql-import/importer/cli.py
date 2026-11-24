@@ -15,7 +15,7 @@ from importer.target import Target
 EXPECTED_REVISIONS = {
     "market": "0004_data",
     "research": "0004_research",
-    "portfolio": "0002_portfolio",
+    "portfolio": "0003_portfolio",
 }
 
 DOMAIN_TABLES = {
@@ -23,6 +23,10 @@ DOMAIN_TABLES = {
     "research": ("backtest_runs", "backtest_artifacts"),
     "portfolio": (
         "users",
+        "organizations",
+        "organization_memberships",
+        "organization_invitations",
+        "organization_access_audit",
         "credential_secrets",
         "portfolios",
         "trades",
@@ -41,6 +45,11 @@ DOMAIN_TABLES = {
         "live_order_fills",
         "live_execution_audit",
     ),
+}
+
+MIGRATION_SEEDED_TABLES = {
+    ("portfolio", "organizations"),
+    ("portfolio", "organization_memberships"),
 }
 
 
@@ -134,6 +143,7 @@ def run_import(
                 f"{schema}.{table}={target.count(schema, table)}"
                 for schema, tables in DOMAIN_TABLES.items()
                 for table in tables
+                if (schema, table) not in MIGRATION_SEEDED_TABLES
                 if target.count(schema, table) > 0
             ]
             if populated:

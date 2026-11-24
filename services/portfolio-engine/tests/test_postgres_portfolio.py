@@ -7,9 +7,9 @@ from decimal import Decimal
 
 import pytest
 import pytest_asyncio
+from fastapi import HTTPException
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
-
 
 pytestmark = [
     pytest.mark.skipif(
@@ -38,10 +38,19 @@ from app.models import (  # noqa: E402
     Portfolio,
     RiskSnapshot,
     Trade,
+    User,
+)
+from app.organizations import (  # noqa: E402
+    accept_invitation,
+    create_invitation,
+    create_owned_organization,
 )
 
-
 TABLES = (
+    "organization_access_audit",
+    "organization_invitations",
+    "organization_memberships",
+    "organizations",
     "live_execution_audit",
     "live_order_fills",
     "live_orders",
@@ -170,7 +179,82 @@ async def test_concurrent_idempotent_order_and_fill() -> None:
         ) == 1
         assert await session.scalar(select(func.count(Trade.id))) == 1
         portfolio = (await session.execute(select(Portfolio))).scalar_one()
-        assert portfolio.equity == 10_000.0
+    assert portfolio.equity == 10_000.0
+
+
+async def test_invitation_replacement_and_acceptance_do_not_deadlock() -> None:
+    owner_id = uuid.uuid4()
+    invitee_id = uuid.uuid4()
+    owner_token = set_current_user_key(str(owner_id))
+    try:
+        async with async_session() as session:
+            session.add_all([
+                User(
+                    id=owner_id,
+                    username="owner",
+                    password_hash="scrypt$fixture",
+                    display_name="Owner",
+                    is_active=True,
+                ),
+                User(
+                    id=invitee_id,
+                    username="invitee",
+                    password_hash="scrypt$fixture",
+                    display_name="Invitee",
+                    is_active=True,
+                ),
+            ])
+            organization = await create_owned_organization(
+                session,
+                user_key=str(owner_id),
+                username="owner",
+                display_name="Owner",
+            )
+            await session.commit()
+            invitation, raw_token = await create_invitation(
+                session,
+                organization_id=organization.id,
+                invitee_username="invitee",
+                role="viewer",
+            )
+            assert invitation.id is not None
+    finally:
+        reset_current_user_key(owner_token)
+
+    async def accept() -> int:
+        token = set_current_user_key(str(invitee_id))
+        try:
+            async with async_session() as session:
+                try:
+                    await accept_invitation(session, token=raw_token)
+                    return 200
+                except HTTPException as exc:
+                    return exc.status_code
+        finally:
+            reset_current_user_key(token)
+
+    async def replace() -> int:
+        token = set_current_user_key(str(owner_id))
+        try:
+            async with async_session() as session:
+                try:
+                    await create_invitation(
+                        session,
+                        organization_id=organization.id,
+                        invitee_username="invitee",
+                        role="analyst",
+                    )
+                    return 201
+                except HTTPException as exc:
+                    return exc.status_code
+        finally:
+            reset_current_user_key(token)
+
+    statuses = await asyncio.wait_for(
+        asyncio.gather(accept(), replace()),
+        timeout=10,
+    )
+    assert sorted(statuses) in ([200, 409], [201, 404])
 
 
 async def test_user_scoped_idempotency_and_query_isolation() -> None:

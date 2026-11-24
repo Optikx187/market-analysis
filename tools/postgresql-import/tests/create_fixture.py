@@ -241,9 +241,31 @@ def portfolio_rows() -> dict[str, list[dict[str, object]]]:
                 "id": 1,
                 "username": "alice",
                 "password_hash": "scrypt$fixture",
-                "display_name": "Alice",
+                "display_name": "A" * 400,
                 "is_active": 1,
                 "created_at": "2026-01-01 10:00:00",
+            }
+        ],
+        "organizations": [
+            {
+                "id": "11111111-1111-4111-8111-111111111111",
+                "slug": "alice-1",
+                "name": "Alice workspace",
+                "is_active": 1,
+                "created_by_user_key": "1",
+                "created_at": "2026-01-01 10:00:00",
+            }
+        ],
+        "organization_memberships": [
+            {
+                "id": 2,
+                "organization_id": "11111111-1111-4111-8111-111111111111",
+                "user_key": "1",
+                "username": "alice",
+                "role": "owner",
+                "is_active": 1,
+                "invited_by_user_key": None,
+                "joined_at": "2026-01-01 10:00:00",
             }
         ],
         "credential_secrets": [

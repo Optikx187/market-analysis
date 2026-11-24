@@ -43,6 +43,7 @@ export default defineConfig({
       "/api/action-items": portfolioEngineUrl,
       "/api/dashboard-preferences": portfolioEngineUrl,
       "/api/auth": portfolioEngineUrl,
+      "/api/organizations": portfolioEngineUrl,
       "/api/trades": portfolioEngineUrl,
       "/api/alerts": portfolioEngineUrl,
       "/api/process-signal": portfolioEngineUrl,

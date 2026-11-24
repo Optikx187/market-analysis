@@ -55,6 +55,87 @@ export const loginUser = async (username: string, password: string): Promise<Aut
 export const registerUser = async (username: string, password: string): Promise<AuthResponse> =>
   (await api.post<AuthResponse>("/auth/register", { username, password })).data;
 
+export type OrganizationRole = "owner" | "admin" | "operator" | "analyst" | "viewer";
+
+export interface Organization {
+  id: string;
+  slug: string;
+  name: string;
+  role: OrganizationRole;
+  permissions: string[];
+  created_at: string;
+}
+
+export interface OrganizationMember {
+  id: EntityId;
+  organization_id: string;
+  user_key: string;
+  username: string;
+  role: OrganizationRole;
+  is_active: boolean;
+  joined_at: string;
+}
+
+export interface OrganizationInvitation {
+  id: EntityId;
+  organization_id: string;
+  username: string;
+  role: OrganizationRole;
+  expires_at: string;
+  token: string;
+}
+
+export const fetchOrganizations = async (): Promise<Organization[]> =>
+  (await api.get<{ organizations: Organization[] }>("/organizations")).data.organizations;
+
+export const createOrganization = async (name: string): Promise<Organization> =>
+  (await api.post<Organization>("/organizations", { name })).data;
+
+export const fetchOrganizationMembers = async (
+  organizationId: string,
+): Promise<OrganizationMember[]> =>
+  (
+    await api.get<{ members: OrganizationMember[] }>(
+      `/organizations/${organizationId}/members`,
+    )
+  ).data.members;
+
+export const inviteOrganizationMember = async (
+  organizationId: string,
+  username: string,
+  role: OrganizationRole,
+): Promise<OrganizationInvitation> =>
+  (
+    await api.post<OrganizationInvitation>(
+      `/organizations/${organizationId}/invitations`,
+      { username, role },
+    )
+  ).data;
+
+export const acceptOrganizationInvitation = async (
+  token: string,
+): Promise<OrganizationMember> =>
+  (await api.post<OrganizationMember>("/organizations/invitations/accept", { token })).data;
+
+export const updateOrganizationMembership = async (
+  organizationId: string,
+  membershipId: EntityId,
+  role: OrganizationRole,
+): Promise<OrganizationMember> =>
+  (
+    await api.patch<OrganizationMember>(
+      `/organizations/${organizationId}/members/${membershipId}`,
+      { role },
+    )
+  ).data;
+
+export const removeOrganizationMembership = async (
+  organizationId: string,
+  membershipId: EntityId,
+): Promise<void> => {
+  await api.delete(`/organizations/${organizationId}/members/${membershipId}`);
+};
+
 export const apiErrorMessage = (error: unknown, fallback: string): string => {
   if (axios.isAxiosError(error)) {
     const detail: unknown = error.response?.data?.detail;

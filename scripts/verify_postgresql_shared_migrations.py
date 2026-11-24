@@ -234,7 +234,7 @@ def main() -> int:
         ).stdout.strip().splitlines()
         expected = [
             "data=0004_data",
-            "portfolio=0002_portfolio",
+            "portfolio=0003_portfolio",
             "research=0004_research",
         ]
         if revisions != expected:

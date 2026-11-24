@@ -133,7 +133,13 @@ def test_empty_database_upgrades_to_head_and_is_idempotent(
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0002_portfolio",)
+        ).fetchone() == ("0003_portfolio",)
+        assert connection.execute(
+            "SELECT slug, created_by_user_key FROM organizations"
+        ).fetchall() == [("local-operator-default", "default")]
+        assert connection.execute(
+            "SELECT user_key, username, role FROM organization_memberships"
+        ).fetchall() == [("default", "local-operator", "owner")]
         assert connection.execute(
             "SELECT COUNT(*) FROM pragma_table_info('portfolio') "
             "WHERE name = 'tenant_id'"
@@ -162,7 +168,43 @@ def test_current_unversioned_schema_is_adopted_without_data_loss(
         ).fetchall() == [("alice", 12345.0, 12500.0, 13000.0)]
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0002_portfolio",)
+        ).fetchone() == ("0003_portfolio",)
+
+
+def test_existing_users_receive_owned_default_organizations(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "existing-users.db"
+    engine = create_engine(f"sqlite:///{database_path}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO users "
+            "(id, username, password_hash, display_name, is_active) "
+            "VALUES (42, 'alice', 'unused-test-hash', 'Alice Analyst', 1)"
+        ))
+    engine.dispose()
+
+    _upgrade(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        organizations = connection.execute(
+            "SELECT slug, name, created_by_user_key "
+            "FROM organizations ORDER BY created_by_user_key"
+        ).fetchall()
+        memberships = connection.execute(
+            "SELECT user_key, username, role, is_active "
+            "FROM organization_memberships ORDER BY user_key"
+        ).fetchall()
+
+    assert organizations == [
+        ("alice-42", "Alice Analyst workspace", "42"),
+        ("local-operator-default", "Local operator workspace", "default"),
+    ]
+    assert memberships == [
+        ("42", "alice", "owner", 1),
+        ("default", "local-operator", "owner", 1),
+    ]
 
 
 def test_legacy_schema_upgrades_with_record_reconciliation(
@@ -296,7 +338,7 @@ def test_destructive_downgrade_requires_restore(
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("0002_portfolio",)
+        ).fetchone() == ("0003_portfolio",)
 
 
 def test_schema_validation_is_read_only_and_fails_closed(

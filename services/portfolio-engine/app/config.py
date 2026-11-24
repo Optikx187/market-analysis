@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     LIVE_MAX_ORDER_NOTIONAL_USD: float = 1_000.0
     LIVE_MAX_PRICE_AGE_SECONDS: float = 300.0
     AUTH_ENABLED: bool = False
+    ORGANIZATION_ENFORCEMENT_ENABLED: bool = True
     JWT_SECRET: str = "change-me-in-production"
     SETTINGS_OPERATOR_TOKEN: str = ""
     JWT_ALGORITHM: str = "HS256"
