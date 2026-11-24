@@ -406,6 +406,10 @@ async def accept_invitation(
     if user is None or user.username != invitation.invitee_username:
         raise HTTPException(403, "Invitation belongs to another account")
 
+    await lock_organization(
+        db,
+        organization_id=invitation.organization_id,
+    )
     claim = await db.execute(
         update(OrganizationInvitation)
         .where(
