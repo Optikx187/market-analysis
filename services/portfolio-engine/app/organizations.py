@@ -412,6 +412,7 @@ async def accept_invitation(
         db,
         organization_id=invitation.organization_id,
     )
+    now = _utc_now()
     claim = await db.execute(
         update(OrganizationInvitation)
         .where(

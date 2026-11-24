@@ -344,6 +344,34 @@ def test_expired_admin_invitation_does_not_block_admin_reinvite(
     assert reinvite.status_code == 201
 
 
+def test_invitation_expiry_is_rechecked_after_organization_lock(
+    organization_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, owner_token = _register(organization_client, "owner")
+    _, invitee_token = _register(organization_client, "invitee")
+    organization_id = _organizations(organization_client, owner_token)[0]["id"]
+    token = organization_client.post(
+        f"/api/organizations/{organization_id}/invitations",
+        headers=_headers(owner_token),
+        json={"username": "invitee", "role": "viewer"},
+    ).json()["token"]
+
+    current = organizations._utc_now()
+    times = iter([
+        current + datetime.timedelta(days=6),
+        current + datetime.timedelta(days=8),
+    ])
+    monkeypatch.setattr(organizations, "_utc_now", lambda: next(times))
+
+    response = organization_client.post(
+        "/api/organizations/invitations/accept",
+        headers=_headers(invitee_token),
+        json={"token": token},
+    )
+    assert response.status_code == 404
+
+
 def test_invitation_is_claimed_once_under_concurrent_acceptance(
     organization_client: TestClient,
 ) -> None:
