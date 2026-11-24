@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -299,6 +300,48 @@ def test_new_and_removed_members_cannot_use_older_invitations(
         headers=_headers(bob_token),
         json={"token": first["token"]},
     ).status_code == 404
+
+
+def test_expired_admin_invitation_does_not_block_admin_reinvite(
+    organization_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, owner_token = _register(organization_client, "owner")
+    _, admin_token = _register(organization_client, "admin")
+    _register(organization_client, "invitee")
+    organization_id = _organizations(organization_client, owner_token)[0]["id"]
+
+    admin_invitation = organization_client.post(
+        f"/api/organizations/{organization_id}/invitations",
+        headers=_headers(owner_token),
+        json={"username": "admin", "role": "admin"},
+    ).json()
+    assert organization_client.post(
+        "/api/organizations/invitations/accept",
+        headers=_headers(admin_token),
+        json={"token": admin_invitation["token"]},
+    ).status_code == 200
+
+    issued_at = organizations._utc_now()
+    monkeypatch.setattr(organizations, "_utc_now", lambda: issued_at)
+    owner_invitation = organization_client.post(
+        f"/api/organizations/{organization_id}/invitations",
+        headers=_headers(owner_token),
+        json={"username": "invitee", "role": "admin"},
+    )
+    assert owner_invitation.status_code == 201
+
+    monkeypatch.setattr(
+        organizations,
+        "_utc_now",
+        lambda: issued_at + datetime.timedelta(days=8),
+    )
+    reinvite = organization_client.post(
+        f"/api/organizations/{organization_id}/invitations",
+        headers=_headers(admin_token),
+        json={"username": "invitee", "role": "viewer"},
+    )
+    assert reinvite.status_code == 201
 
 
 def test_invitation_is_claimed_once_under_concurrent_acceptance(

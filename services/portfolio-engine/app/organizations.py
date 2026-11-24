@@ -341,6 +341,7 @@ async def create_invitation(
     if existing is not None:
         raise HTTPException(409, "User is already an active member")
 
+    now = _utc_now()
     if actor.role != OWNER:
         protected_invitation = (
             await db.execute(
@@ -350,6 +351,7 @@ async def create_invitation(
                     OrganizationInvitation.role == ADMIN,
                     OrganizationInvitation.accepted_at.is_(None),
                     OrganizationInvitation.revoked_at.is_(None),
+                    OrganizationInvitation.expires_at > now,
                 )
             )
         ).scalar_one_or_none()
@@ -371,7 +373,7 @@ async def create_invitation(
         role=role,
         token_hash=hashlib.sha256(token.encode()).hexdigest(),
         invited_by_user_key=current_user_key() or DEFAULT_USER_KEY,
-        expires_at=_utc_now() + datetime.timedelta(days=7),
+        expires_at=now + datetime.timedelta(days=7),
     )
     db.add(invitation)
     await db.commit()
