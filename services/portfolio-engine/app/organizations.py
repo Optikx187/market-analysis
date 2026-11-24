@@ -164,6 +164,7 @@ async def revoke_pending_invitations(
     organization_id,
     invitee_username: str,
     exclude_invitation_id=None,
+    protected_roles: Iterable[str] = (),
 ) -> None:
     conditions = [
         OrganizationInvitation.organization_id == organization_id,
@@ -173,6 +174,9 @@ async def revoke_pending_invitations(
     ]
     if exclude_invitation_id is not None:
         conditions.append(OrganizationInvitation.id != exclude_invitation_id)
+    protected = tuple(protected_roles)
+    if protected:
+        conditions.append(OrganizationInvitation.role.not_in(protected))
     await db.execute(
         update(OrganizationInvitation)
         .where(*conditions)
@@ -337,10 +341,28 @@ async def create_invitation(
     if existing is not None:
         raise HTTPException(409, "User is already an active member")
 
+    if actor.role != OWNER:
+        protected_invitation = (
+            await db.execute(
+                select(OrganizationInvitation.id).where(
+                    OrganizationInvitation.organization_id == organization_id,
+                    OrganizationInvitation.invitee_username == invitee_username,
+                    OrganizationInvitation.role == ADMIN,
+                    OrganizationInvitation.accepted_at.is_(None),
+                    OrganizationInvitation.revoked_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if protected_invitation is not None:
+            raise HTTPException(
+                403,
+                "Only an owner can replace an administrator invitation",
+            )
     await revoke_pending_invitations(
         db,
         organization_id=organization_id,
         invitee_username=invitee_username,
+        protected_roles=(ADMIN,) if actor.role != OWNER else (),
     )
     token = secrets.token_urlsafe(32)
     invitation = OrganizationInvitation(

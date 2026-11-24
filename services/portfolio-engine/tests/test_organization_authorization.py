@@ -185,7 +185,7 @@ def test_invitation_acceptance_and_role_matrix(
 ) -> None:
     _, alice_token = _register(organization_client, "alice")
     _, bob_token = _register(organization_client, "bob")
-    _register(organization_client, "carol")
+    _, carol_token = _register(organization_client, "carol")
     organization_id = _organizations(organization_client, alice_token)[0]["id"]
 
     invitation = organization_client.post(
@@ -237,6 +237,26 @@ def test_invitation_acceptance_and_role_matrix(
         json={"username": "carol", "role": "admin"},
     )
     assert admin_invite.status_code == 403
+
+    owner_admin_invite = organization_client.post(
+        f"/api/organizations/{organization_id}/invitations",
+        headers=_headers(alice_token),
+        json={"username": "carol", "role": "admin"},
+    )
+    assert owner_admin_invite.status_code == 201
+    replacement = organization_client.post(
+        f"/api/organizations/{organization_id}/invitations",
+        headers=_headers(bob_token),
+        json={"username": "carol", "role": "viewer"},
+    )
+    assert replacement.status_code == 403
+    accepted_admin = organization_client.post(
+        "/api/organizations/invitations/accept",
+        headers=_headers(carol_token),
+        json={"token": owner_admin_invite.json()["token"]},
+    )
+    assert accepted_admin.status_code == 200
+    assert accepted_admin.json()["role"] == "admin"
 
 
 def test_new_and_removed_members_cannot_use_older_invitations(
