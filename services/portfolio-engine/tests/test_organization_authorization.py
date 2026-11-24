@@ -6,14 +6,14 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app import main, organizations
 from app.auth import reset_current_user_key, set_current_user_key
 from app.config import settings
 from app.database import Base, get_db
-from app.models import OrganizationAccessAudit
+from app.models import OrganizationAccessAudit, OrganizationMembership
 
 
 @pytest.fixture
@@ -334,6 +334,58 @@ def test_last_owner_cannot_be_removed_or_downgraded(
     assert unchanged.status_code == 200
     assert downgrade.status_code == 409
     assert remove.status_code == 409
+
+
+def test_permission_refreshes_membership_role_after_concurrent_change(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "refresh-role.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    session_factory = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+    async def exercise() -> str:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        token = set_current_user_key("default")
+        try:
+            async with session_factory() as first:
+                organization = await organizations.create_owned_organization(
+                    first,
+                    user_key="default",
+                    username="local-operator",
+                    display_name="Local operator",
+                )
+                await first.commit()
+                cached = await organizations.require_permission(
+                    first,
+                    organization_id=organization.id,
+                    permission="members.update",
+                )
+                assert cached.role == "owner"
+
+                async with session_factory() as second:
+                    await second.execute(
+                        update(OrganizationMembership)
+                        .where(OrganizationMembership.id == cached.id)
+                        .values(role="admin")
+                    )
+                    await second.commit()
+
+                refreshed = await organizations.require_permission(
+                    first,
+                    organization_id=organization.id,
+                    permission="members.update",
+                )
+                return refreshed.role
+        finally:
+            reset_current_user_key(token)
+            await engine.dispose()
+
+    assert asyncio.run(exercise()) == "admin"
 
 
 def test_unknown_permission_is_denied_by_default_and_audited(

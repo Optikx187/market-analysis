@@ -219,6 +219,7 @@ async def require_permission(
             OrganizationMembership.is_active.is_(True),
             Organization.is_active.is_(True),
         )
+        .execution_options(populate_existing=True)
     )
     membership = result.scalars().first()
     role = membership.role if membership else None
