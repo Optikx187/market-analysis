@@ -36,7 +36,8 @@ def _organization_id(user_key: str):
 def _slug(value: str, user_key: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     suffix = re.sub(r"[^a-z0-9]+", "", user_key.lower())[-12:] or "operator"
-    return f"{normalized or 'organization'}-{suffix}"[:100]
+    prefix = (normalized or "organization")[: 100 - len(suffix) - 1]
+    return f"{prefix}-{suffix}"
 
 
 def _default_organization_name(display_name: str) -> str:

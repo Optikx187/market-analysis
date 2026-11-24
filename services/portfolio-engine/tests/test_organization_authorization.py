@@ -125,6 +125,31 @@ def test_registration_truncates_default_organization_name(
     assert len(organization["name"]) == 200
 
 
+def test_long_workspace_names_keep_unique_slug_suffixes(
+    organization_client: TestClient,
+) -> None:
+    _, token = _register(organization_client, "owner")
+    headers = _headers(token)
+    name = "research-" + ("x" * 191)
+
+    first = organization_client.post(
+        "/api/organizations",
+        headers=headers,
+        json={"name": name},
+    )
+    second = organization_client.post(
+        "/api/organizations",
+        headers=headers,
+        json={"name": name},
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["slug"] != second.json()["slug"]
+    assert len(first.json()["slug"]) == 100
+    assert len(second.json()["slug"]) == 100
+
+
 def test_cross_organization_access_is_rejected_and_audited(
     organization_client: TestClient,
 ) -> None:

@@ -90,7 +90,9 @@ def _slug(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     if not normalized:
         normalized = "organization"
-    return f"{normalized}-{secrets.token_hex(4)}"[:100]
+    suffix = secrets.token_hex(4)
+    prefix = normalized[: 100 - len(suffix) - 1]
+    return f"{prefix}-{suffix}"
 
 
 def _organization_name(
