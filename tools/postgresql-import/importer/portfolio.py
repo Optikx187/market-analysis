@@ -7,7 +7,6 @@ from importer.common import (
     ReadOnlySQLite,
     checksum,
     decimal_value,
-    remap_user,
     source_key,
     utc_datetime,
 )
@@ -108,9 +107,8 @@ def _remap_user_key(
     user_map: dict[str, str],
 ) -> str:
     source = str(value or "default")
-    explicit = remap_user(source, user_map)
-    if explicit != source:
-        return explicit
+    if source in user_map:
+        return user_map[source]
     candidates: tuple[object, ...] = (
         (source, int(source))
         if source.isdecimal()
