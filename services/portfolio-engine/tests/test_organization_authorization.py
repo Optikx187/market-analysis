@@ -105,6 +105,26 @@ def test_registration_creates_owned_default_organization(
     ]
 
 
+def test_registration_truncates_default_organization_name(
+    organization_client: TestClient,
+) -> None:
+    response = organization_client.post(
+        "/api/auth/register",
+        json={
+            "username": "long-name",
+            "password": "password123",
+            "display_name": "x" * 200,
+        },
+    )
+    assert response.status_code == 200
+    organization = _organizations(
+        organization_client,
+        response.json()["token"],
+    )[0]
+    assert organization["name"].endswith(" workspace")
+    assert len(organization["name"]) == 200
+
+
 def test_cross_organization_access_is_rejected_and_audited(
     organization_client: TestClient,
 ) -> None:

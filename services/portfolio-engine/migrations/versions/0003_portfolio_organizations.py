@@ -39,6 +39,11 @@ def _slug(value: str, user_key: str) -> str:
     return f"{normalized or 'organization'}-{suffix}"[:100]
 
 
+def _default_organization_name(display_name: str) -> str:
+    suffix = " workspace"
+    return f"{display_name[: 200 - len(suffix)]}{suffix}"
+
+
 def _create_tables() -> None:
     connection = op.get_bind()
     for table in (
@@ -69,7 +74,7 @@ def _ensure_owned_organization(
             organization.insert().values(
                 id=organization_id,
                 slug=_slug(username, user_key),
-                name=f"{display_name} workspace",
+                name=_default_organization_name(display_name),
                 is_active=True,
                 created_by_user_key=user_key,
             )

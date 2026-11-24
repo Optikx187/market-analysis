@@ -93,6 +93,19 @@ def _slug(value: str) -> str:
     return f"{normalized}-{secrets.token_hex(4)}"[:100]
 
 
+def _organization_name(
+    *,
+    username: str,
+    display_name: str,
+    requested_name: str | None,
+) -> str:
+    if requested_name is not None:
+        return requested_name.strip()[:200]
+    suffix = " workspace"
+    label = display_name.strip() or username
+    return f"{label[: 200 - len(suffix)]}{suffix}"
+
+
 async def create_owned_organization(
     db: AsyncSession,
     *,
@@ -101,9 +114,14 @@ async def create_owned_organization(
     display_name: str,
     organization_name: str | None = None,
 ) -> Organization:
+    name = _organization_name(
+        username=username,
+        display_name=display_name,
+        requested_name=organization_name,
+    )
     organization = Organization(
-        slug=_slug(organization_name or username),
-        name=organization_name or f"{display_name} workspace",
+        slug=_slug(name if organization_name is not None else username),
+        name=name,
         created_by_user_key=user_key,
     )
     db.add(organization)
