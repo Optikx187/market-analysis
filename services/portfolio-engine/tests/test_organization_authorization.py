@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -278,6 +279,31 @@ def test_new_and_removed_members_cannot_use_older_invitations(
         headers=_headers(bob_token),
         json={"token": first["token"]},
     ).status_code == 404
+
+
+def test_invitation_is_claimed_once_under_concurrent_acceptance(
+    organization_client: TestClient,
+) -> None:
+    _, owner_token = _register(organization_client, "owner")
+    _, bob_token = _register(organization_client, "bob")
+    organization_id = _organizations(organization_client, owner_token)[0]["id"]
+    token = organization_client.post(
+        f"/api/organizations/{organization_id}/invitations",
+        headers=_headers(owner_token),
+        json={"username": "bob", "role": "viewer"},
+    ).json()["token"]
+
+    def accept() -> int:
+        return organization_client.post(
+            "/api/organizations/invitations/accept",
+            headers=_headers(bob_token),
+            json={"token": token},
+        ).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        statuses = sorted(executor.map(lambda _: accept(), range(2)))
+
+    assert statuses == [200, 404]
 
 
 def test_last_owner_cannot_be_removed_or_downgraded(

@@ -369,18 +369,6 @@ async def accept_invitation(
             )
         )
     ).scalars().first()
-    if invitation is not None:
-        await lock_organization(
-            db,
-            organization_id=invitation.organization_id,
-        )
-        invitation = (
-            await db.execute(
-                select(OrganizationInvitation)
-                .where(OrganizationInvitation.token_hash == token_hash)
-                .with_for_update()
-            )
-        ).scalars().first()
     now = _utc_now()
     if (
         invitation is None
@@ -394,6 +382,22 @@ async def accept_invitation(
     user = await db.get(User, _user_id(user_key))
     if user is None or user.username != invitation.invitee_username:
         raise HTTPException(403, "Invitation belongs to another account")
+
+    claim = await db.execute(
+        update(OrganizationInvitation)
+        .where(
+            OrganizationInvitation.id == invitation.id,
+            OrganizationInvitation.accepted_at.is_(None),
+            OrganizationInvitation.revoked_at.is_(None),
+            OrganizationInvitation.expires_at > now,
+        )
+        .values(accepted_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if claim.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(404, "Invitation is invalid or expired")
+    invitation.accepted_at = now
 
     membership = (
         await db.execute(
@@ -418,7 +422,6 @@ async def accept_invitation(
         membership.is_active = True
         membership.invited_by_user_key = invitation.invited_by_user_key
         membership.joined_at = now
-    invitation.accepted_at = now
     await revoke_pending_invitations(
         db,
         organization_id=invitation.organization_id,
